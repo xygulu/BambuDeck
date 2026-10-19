@@ -255,7 +255,6 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
           const SizedBox(height: 8),
           TextField(
             controller: _accountCtrl,
-            keyboardType: TextInputType.emailAddress,
             decoration: const InputDecoration(
                 labelText: '手机号 / 邮箱', hintText: '与 Bambu Handy 相同的账号'),
           ),
@@ -283,7 +282,7 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
                 controller: _loginCodeCtrl,
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
-                    labelText: '邮箱验证码', hintText: '无需密码时用'),
+                    labelText: '验证码', hintText: '手机号发短信 / 邮箱发邮件'),
               ),
             ),
             const SizedBox(width: 8),
@@ -319,8 +318,10 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
           setState(() => _loginMsg = '登录成功,Token 已填入');
           await _fetchDevices();
         case LoginNeedsEmailCode():
-          setState(() =>
-              _loginMsg = '该账号需要邮箱验证码:点「发验证码」,收到后填入再点「验证码登录」');
+          final emailish = _accountCtrl.text.trim().contains('@');
+          setState(() => _loginMsg = emailish
+              ? '该账号需要验证码登录:点「发验证码」(发到邮箱),收到后填入再点「验证码登录」'
+              : '该账号需要验证码登录(手机号注册,验证码走短信):点「发验证码」,收到后填入再点「验证码登录」');
         case LoginNeedsTfa():
           setState(() => _loginMsg =
               '该账号开启了两步验证,暂不支持动态口令——请改用「验证码登录」,或到拓竹官网关闭两步验证后用密码登录');
@@ -346,7 +347,7 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
   Future<void> _sendLoginCode() async {
     final account = _accountCtrl.text.trim();
     if (account.isEmpty) {
-      setState(() => _loginMsg = '请先填写邮箱账号');
+      setState(() => _loginMsg = '请先填写账号(手机号或邮箱)');
       return;
     }
     setState(() {
@@ -354,8 +355,9 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
       _loginMsg = null;
     });
     try {
-      await cloudSendLoginCode(region: _region, email: account);
-      setState(() => _loginMsg = '验证码已发送到 $account');
+      await cloudSendLoginCode(region: _region, account: account);
+      setState(() =>
+          _loginMsg = '验证码已发送到 $account(${account.contains("@") ? "邮件" : "短信"})');
     } on Exception catch (e) {
       debugPrint('[cloud] send code FAILED: $e');
       setState(() => _loginMsg = '发送失败: $e');
@@ -368,7 +370,7 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
     final account = _accountCtrl.text.trim();
     final code = _loginCodeCtrl.text.trim();
     if (account.isEmpty || code.isEmpty) {
-      setState(() => _loginMsg = '请填写邮箱和验证码');
+      setState(() => _loginMsg = '请填写账号和验证码');
       return;
     }
     await _runLogin(

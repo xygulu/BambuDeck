@@ -174,15 +174,27 @@ Future<LoginOutcome> cloudLogin({
   throw HttpException('登录被拒绝: ${jsonEncode(doc)}', uri: uri);
 }
 
-/// Email a login code for the account (type "codeLogin"), then sign in with
-/// [cloudLogin] + [code].
+/// True when [account] reads as an email address rather than a phone
+/// number - decides whether a login code goes by email or by SMS.
+bool isEmailAccount(String account) => account.contains('@');
+
+/// Send a login code for [account] (type "codeLogin"), then sign in with
+/// [cloudLogin] + [code]. Email accounts hit `sendemail/code`; phone
+/// accounts (registered by number) hit `sendsmscode` - Bambu demands a
+/// verification code for password login on these, and no email is bound.
 Future<void> cloudSendLoginCode({
   required CloudRegion region,
-  required String email,
+  required String account,
 }) async {
-  final uri =
-      Uri.parse('${region.apiBase}/v1/user-service/user/sendemail/code');
-  await _postJson(uri, {'email': email, 'type': 'codeLogin'});
+  if (isEmailAccount(account)) {
+    final uri =
+        Uri.parse('${region.apiBase}/v1/user-service/user/sendemail/code');
+    await _postJson(uri, {'email': account, 'type': 'codeLogin'});
+  } else {
+    final uri =
+        Uri.parse('${region.apiBase}/v1/user-service/user/sendsmscode');
+    await _postJson(uri, {'phone': account, 'type': 'codeLogin'});
+  }
 }
 
 /// Fetch the printers bound to the account behind [token].
