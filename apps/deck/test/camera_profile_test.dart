@@ -33,7 +33,7 @@ void main() {
     expect(back.enabled, isTrue);
   });
 
-  test('bambu camera resolves rtsp from the linked LAN printer', () {
+  test('bambu camera resolves from the linked LAN printer model', () {
     final cam = CameraProfile(
         id: 'c2', name: '机内', sourceType: CameraSourceType.bambu);
     final linked = PrinterProfile(
@@ -44,8 +44,12 @@ void main() {
       ip: '192.168.100.110',
       accessCode: 'secret',
     );
-    expect(cam.resolveUrl(linked),
-        'rtsp://bblp:secret@192.168.100.110/stream_live');
+    // Model unknown -> MJPEG family default.
+    expect(cam.resolveUrl(linked), 'bmjpeg://bblp:secret@192.168.100.110');
+    expect(
+      cam.resolveUrl(linked.copyWith(model: 'X1C')),
+      'rtsps://bblp:secret@192.168.100.110:322/streaming/live/1',
+    );
   });
 
   test('bambu camera with no usable printer resolves null', () {

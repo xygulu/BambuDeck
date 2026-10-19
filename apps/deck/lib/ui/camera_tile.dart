@@ -5,10 +5,14 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../core/theme.dart';
+import '../data/bambu_mjpeg.dart';
+import 'mjpeg_tile.dart';
 
 /// Live video tile for one stream URL (PRD FR-3). Wraps a media_kit
 /// player with connect/error states and a manual retry; RTSP streams get
-/// low-latency, TCP-forced transport settings.
+/// low-latency, TCP-forced transport settings. `bmjpeg://` URLs (the
+/// A1/P1-family built-in camera) dispatch to [MjpegTile] instead - that
+/// protocol is not something libmpv can demux.
 class CameraTile extends StatefulWidget {
   const CameraTile({
     super.key,
@@ -102,6 +106,24 @@ class _CameraTileState extends State<CameraTile> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.streamUrl.startsWith('bmjpeg://')) {
+      final parsed = parseBambuMjpegUrl(widget.streamUrl);
+      if (parsed != null) {
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: AspectRatio(
+            aspectRatio: widget.aspectRatio,
+            child: MjpegTile(
+              host: parsed.host,
+              port: parsed.port,
+              username: parsed.username,
+              password: parsed.password,
+              label: widget.showLabel ? widget.label : null,
+            ),
+          ),
+        );
+      }
+    }
     final controller = _controller;
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),

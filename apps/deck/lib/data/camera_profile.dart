@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'bambu_mjpeg.dart';
 import 'printer_profile.dart';
 
 /// Where a camera stream comes from (PRD FR-3).
@@ -10,8 +11,10 @@ enum CameraSourceType {
   /// Generic RTSP / ONVIF camera, full URL given by the user.
   rtsp,
 
-  /// The printer's own camera (X1/P1 family), derived from the linked
-  /// printer's LAN credentials. A1 / A1 mini have no camera hardware.
+  /// The printer's own camera, derived from the linked printer's LAN
+  /// credentials. Transport depends on the model: A1/A1 mini/P1/P1P speak
+  /// MJPEG over TLS :6000 (bmjpeg:// scheme), X1/P1S/P2S/H2 speak
+  /// RTSPS :322.
   bambu;
 
   String get label => switch (this) {
@@ -45,14 +48,18 @@ class CameraProfile {
 
   final bool enabled;
 
-  /// Playback URL, resolving the bambu type against the printer profile.
-  /// Returns null when a bambu camera has no (usable) linked printer.
+  /// Playback URL, resolving the bambu type against the printer profile
+  /// and its model's camera transport. Returns null when a bambu camera
+  /// has no (usable) linked printer.
   String? resolveUrl(PrinterProfile? linked) => switch (sourceType) {
         CameraSourceType.rtsp => url.isEmpty ? null : url,
         CameraSourceType.bambu =>
-          linked == null || linked.mode != PrinterMode.lan
+          linked == null || linked.mode != PrinterMode.lan || linked.ip.isEmpty
               ? null
-              : 'rtsp://bblp:${linked.accessCode}@${linked.ip}/stream_live',
+              : cameraSchemeForModel(linked.model) == BambuCameraScheme.rtsps
+                  ? 'rtsps://bblp:${linked.accessCode}'
+                      '@${linked.ip}:322/streaming/live/1'
+                  : 'bmjpeg://bblp:${linked.accessCode}@${linked.ip}',
       };
 
   Map<String, dynamic> toJson() => {

@@ -199,10 +199,10 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
       scanError = '';
       hits = const [];
       done = 0;
-      total = 508;
+      total = 762;
     });
     try {
-      final found = await scanRtspCameras(
+      final report = await scanRtspCameras(
         subnetPrefix: prefix,
         onProgress: (d, t) {
           if (d % 32 == 0 || d == t) {
@@ -211,9 +211,18 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
         },
       );
       setState(() {
-        hits = found;
+        hits = report.hits;
         scanning = false;
-        if (found.isEmpty) scanError = '该网段没有发现 RTSP 摄像头';
+        if (report.hits.isEmpty && report.openPorts == 0) {
+          scanError =
+              '该网段没有任何开放的视频端口——确认摄像头在这个网段、已上电联网,'
+              '且路由器没开「终端/AP 隔离」';
+        } else if (report.hits.isEmpty) {
+          scanError =
+              '发现 ${report.openPorts} 个开放端口,但没有端口用标准 RTSP 应答——'
+              '摄像头可能需要在自家 App 里开启局域网访问(萤石:App 设备设置里的本地直播),'
+              '或流路径不在常见列表里';
+        }
       });
     } catch (e) {
       setState(() {
@@ -361,8 +370,10 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  '打印机自带摄像头走 RTSP(bblp 账号 + 访问码自动填入)。'
-                  '注意:X1 / P1 系才有摄像头,A1 / A1 mini 没有摄像头硬件。',
+                  '摄像头取流方式由打印机机型决定(添加打印机时选的「机型」):'
+                  'A1 / A1 mini / P1 / P1P 走内置 MJPEG(6000 端口),'
+                  'X1 / P1S / P2S / H2 系走 RTSPS(322 端口)。'
+                  '凭据 bblp + 访问码自动填入,画面本地直连、不经过拓竹云。',
                   style: TextStyle(
                       fontSize: 12,
                       color: DeckColors.textSecondary.withValues(alpha: 0.9)),

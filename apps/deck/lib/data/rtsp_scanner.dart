@@ -32,6 +32,7 @@ class RtspHit {
   /// Best-effort vendor name from the Server header.
   String? get vendor {
     final s = server.toLowerCase();
+    if (s.contains('ezviz')) return '萤石';
     if (s.contains('hikvision') || s.contains('hik')) return '海康威视';
     if (s.contains('dahua') || s.contains('daheng')) return '大华';
     if (s.contains('tp-link')) return 'TP-LINK';
@@ -45,6 +46,18 @@ class RtspHit {
       '${vendor == null ? "" : " [$vendor]"}';
 }
 
+/// Sweep outcome: answering endpoints plus how many ports were open, so
+/// the UI can tell "nothing on this subnet" apart from "ports open but
+/// nobody answered DESCRIBE".
+class RtspScanReport {
+  const RtspScanReport({required this.hits, required this.openPorts});
+
+  final List<RtspHit> hits;
+
+  /// TCP ports found open during the sweep, answering RTSP or not.
+  final int openPorts;
+}
+
 /// LAN RTSP camera discovery, tuned for networks where multicast (SSDP /
 /// WS-Discovery / mDNS) does not cross subnets but TCP unicast routes:
 /// sweep [ports] across `subnetPrefix.1-254`, then RTSP-DESCRIBE common
@@ -52,9 +65,9 @@ class RtspHit {
 ///
 /// `subnetPrefix` is the first three octets, e.g. `192.168.100`. Progress
 /// reports completed first-phase probes.
-Future<List<RtspHit>> scanRtspCameras({
+Future<RtspScanReport> scanRtspCameras({
   required String subnetPrefix,
-  List<int> ports = const [554, 8554],
+  List<int> ports = const [554, 8554, 10554],
   List<String> paths = defaultProbePaths,
   int concurrency = 64,
   Duration connectTimeout = const Duration(milliseconds: 400),
@@ -96,7 +109,7 @@ Future<List<RtspHit>> scanRtspCameras({
     if (hit != null) hits.add(hit);
   });
   hits.sort((a, b) => a.url.compareTo(b.url));
-  return hits;
+  return RtspScanReport(hits: hits, openPorts: open.length);
 }
 
 /// DESCRIBE each candidate path; prefer an authorized 200, else a 401
@@ -188,6 +201,7 @@ const defaultProbePaths = [
   '/h264',
   '/live/ch0',
   '/Streaming/Channels/101', // Hikvision main stream
+  '/h264/ch1/main/av_stream', // EZVIZ main stream
   '/cam/realmonitor?channel=1&subtype=0', // Dahua main stream
   '/onvif1',
   '/',

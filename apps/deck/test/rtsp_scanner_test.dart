@@ -16,7 +16,7 @@ Future<ServerSocket> _fakeRtsp(String response) async {
 
 /// Scan the loopback /24 at the fake servers' port, with test-sized
 /// timeouts.
-Future<List<RtspHit>> _scan(
+Future<RtspScanReport> _scan(
   int port,
   List<String> paths, {
   void Function(int done, int total)? onProgress,
@@ -46,16 +46,17 @@ void main() {
     addTearDown(server.close);
 
     final progress = <int>[];
-    final hits = await _scan(
+    final report = await _scan(
       server.port,
       const ['/stream1'],
       onProgress: (d, t) => progress.add(d),
     );
 
-    expect(hits, hasLength(1));
-    expect(hits.first.url, 'rtsp://127.0.0.1:${server.port}/stream1');
-    expect(hits.first.vendor, '海康威视');
-    expect(hits.first.needsAuth, isFalse);
+    expect(report.hits, hasLength(1));
+    expect(report.hits.first.url, 'rtsp://127.0.0.1:${server.port}/stream1');
+    expect(report.hits.first.vendor, '海康威视');
+    expect(report.hits.first.needsAuth, isFalse);
+    expect(report.openPorts, 1);
     expect(progress.last, 254); // 254 hosts x 1 port, all reported
   });
 
@@ -68,23 +69,25 @@ void main() {
     );
     addTearDown(server.close);
 
-    final hits = await _scan(server.port,
-        const ['/cam/realmonitor?channel=1&subtype=0']);
+    final report = await _scan(
+        server.port, const ['/cam/realmonitor?channel=1&subtype=0']);
 
-    expect(hits, hasLength(1));
-    expect(hits.first.needsAuth, isTrue);
-    expect(hits.first.vendor, '大华');
+    expect(report.hits, hasLength(1));
+    expect(report.hits.first.needsAuth, isTrue);
+    expect(report.hits.first.vendor, '大华');
   });
 
-  test('open port that never answers RTSP yields no hit', () async {
+  test('open port that never answers RTSP yields no hit but counts open',
+      () async {
     // Bare TCP server: accepts, stays mute -> probe times out.
     final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
     server.listen((sock) {});
     addTearDown(server.close);
 
-    final hits = await _scan(server.port, const ['/stream1']);
+    final report = await _scan(server.port, const ['/stream1']);
 
-    expect(hits, isEmpty);
+    expect(report.hits, isEmpty);
+    expect(report.openPorts, 1);
   });
 
   test('server header without a known vendor gives null vendor', () {
@@ -92,5 +95,14 @@ void main() {
         ip: '10.0.0.9', port: 554, path: '/1', server: 'AppServer/1.0');
     expect(hit.vendor, isNull);
     expect(hit.url, 'rtsp://10.0.0.9:554/1');
+  });
+
+  test('EZVIZ server header maps to 萤石', () {
+    const hit = RtspHit(
+        ip: '10.0.0.7',
+        port: 554,
+        path: '/h264/ch1/main/av_stream',
+        server: 'EZVIZ Webs');
+    expect(hit.vendor, '萤石');
   });
 }

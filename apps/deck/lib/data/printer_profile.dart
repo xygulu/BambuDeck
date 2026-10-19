@@ -16,6 +16,7 @@ class PrinterProfile {
     this.region = CloudRegion.us,
     this.token = '',
     this.userId = '',
+    this.model = '',
   });
 
   final String id;
@@ -33,6 +34,11 @@ class PrinterProfile {
   final String token;
   final String userId; // "u_{uid}"
 
+  /// Model name (A1 / A1 mini / P1P / P1S / X1C / X1E / P2S / H2D / H2S …).
+  /// Decides which camera transport the printer speaks - see
+  /// [cameraSchemeForModel] in camera_profile.dart.
+  final String model;
+
   String get modeLabel => mode == PrinterMode.lan ? '局域网' : '云端';
 
   Map<String, dynamic> toJson() => {
@@ -45,6 +51,7 @@ class PrinterProfile {
         'region': region.name,
         'token': token,
         'userId': userId,
+        'model': model,
       };
 
   factory PrinterProfile.fromJson(Map<String, dynamic> j) => PrinterProfile(
@@ -58,6 +65,7 @@ class PrinterProfile {
             .byName(j['region'] as String? ?? CloudRegion.us.name),
         token: j['token'] as String? ?? '',
         userId: j['userId'] as String? ?? '',
+        model: j['model'] as String? ?? '',
       );
 
   BambuMqttConfig toMqttConfig() => mode == PrinterMode.lan
@@ -72,6 +80,7 @@ class PrinterProfile {
     CloudRegion? region,
     String? token,
     String? userId,
+    String? model,
   }) =>
       PrinterProfile(
         id: id,
@@ -83,6 +92,7 @@ class PrinterProfile {
         region: region ?? this.region,
         token: token ?? this.token,
         userId: userId ?? this.userId,
+        model: model ?? this.model,
       );
 }
 

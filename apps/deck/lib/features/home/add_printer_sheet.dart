@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
+import '../../data/bambu_mjpeg.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 
@@ -24,6 +25,7 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
   final _ipCtrl = TextEditingController();
   final _serialCtrl = TextEditingController();
   final _codeCtrl = TextEditingController();
+  String? _lanModel;
 
   // Cloud form. Region follows the system language on open (zh -> cn):
   // a wrong-region login reads as "wrong password", which nobody debugs.
@@ -121,6 +123,12 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
         const SizedBox(height: 10),
         TextField(
           controller: _serialCtrl,
+          onChanged: (s) {
+            // Auto-guess until the user picks a model themselves.
+            if (_lanModel != null) return;
+            final guess = guessModelFromSerial(s);
+            if (guess != null) setState(() => _lanModel = guess);
+          },
           decoration: const InputDecoration(
               labelText: '序列号 (SN)',
               hintText: '打印机屏幕 设置 → 关于 设备 可查'),
@@ -132,6 +140,29 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
           decoration: const InputDecoration(
               labelText: '局域网访问码',
               hintText: '打印机屏幕 设置 → 局域网 查看'),
+        ),
+        const SizedBox(height: 10),
+        DropdownButtonFormField<String>(
+          initialValue: _lanModel,
+          decoration: const InputDecoration(
+              labelText: '机型(决定摄像头取流方式)',
+              hintText: '按序列号自动猜'),
+          items: [
+            for (final m in const [
+              'A1',
+              'A1 mini',
+              'P1P',
+              'P1S',
+              'X1C',
+              'X1E',
+              'P2S',
+              'H2D',
+              'H2S',
+              '其他/不确定',
+            ])
+              DropdownMenuItem(value: m, child: Text(m)),
+          ],
+          onChanged: (m) => setState(() => _lanModel = m),
         ),
         const SizedBox(height: 16),
         FilledButton(
@@ -393,6 +424,9 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
           serial: serial,
           ip: ip,
           accessCode: code,
+          model: _lanModel == '其他/不确定'
+              ? ''
+              : (_lanModel ?? guessModelFromSerial(serial) ?? ''),
         ));
     if (mounted) Navigator.of(context).pop();
   }
@@ -421,6 +455,7 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
           region: _region,
           token: token,
           userId: userId,
+          model: device.modelName,
         ));
     if (mounted) Navigator.of(context).pop();
   }
