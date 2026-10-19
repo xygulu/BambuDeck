@@ -286,6 +286,18 @@ class BambuMqttClient {
         }
       };
 
+  /// System-envelope command. ledctrl rides `system`, not `print`, and the
+  /// A1/P1 silently DROP it unless the timing fields are present - payload
+  /// mirrors BambuHelper sendLightCtrlNode (field-proven on LAN + cloud).
+  Map<String, dynamic> _systemNode(String command, Map<String, dynamic> extra) =>
+      {
+        'system': {
+          'sequence_id': (_pushallSeq++).toString(),
+          'command': command,
+          ...extra,
+        }
+      };
+
   /// Force a full state snapshot. Reasons mirror BambuHelper PushallReason.
   Future<bool> requestPushall({String reason = 'manual'}) {
     _logLine('pushall ($reason)');
@@ -306,8 +318,15 @@ class BambuMqttClient {
   Future<bool> setSpeedLevel(int level) =>
       _publish(jsonEncode(_node('print_speed', {'param': level.toString()})));
 
-  Future<bool> setChamberLight(bool on) => _publish(jsonEncode(_node('ledctrl', {
-        'led_node': 'chamber_light',
-        'led_mode': on ? 'on' : 'off',
-      })));
+  Future<bool> setChamberLight(bool on) {
+    _logLine('ledctrl ${on ? 'on' : 'off'}');
+    return _publish(jsonEncode(_systemNode('ledctrl', {
+      'led_node': 'chamber_light',
+      'led_mode': on ? 'on' : 'off',
+      'led_on_time': 500,
+      'led_off_time': 500,
+      'loop_times': 0,
+      'interval_time': 0,
+    })));
+  }
 }
