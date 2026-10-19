@@ -25,8 +25,8 @@
 | 里程碑 | 状态 |
 |---|---|
 | M0 协议层(`packages/bambu_protocol`) | ✅ 完成 — 纯 Dart,MQTT/TLS 双模式(LAN `bblp`+访问码 / 云端 `u_{uid}`+Token)、report 全字段解析(AMS/HMS/双喷嘴/风扇/舱门/校准任务识别)、断线指数退避重连、30s 静默 pushall / 90s 强制重连。20/20 测试通过 |
-| M1 独立客户端 MVP(`apps/deck`) | 🔨 核心完成 — 打印机网格首页、单机仪表盘(进度环/温度/风扇/AMS/HMS/舱门)、暂停/恢复/停止/速度/腔灯控制、LAN + 云端 Token 添加打印机、安全存储凭据(flutter_secure_storage)。6/6 widget 测试通过;**macOS 实机验证 ✅**(2026-10-19,三台 A1 局域网直连,任务/进度/温度实时稳定) |
-| M1 剩余 | 密码/邮箱验证码云端登录、HMS 错误码句表(从原项目 error_tables 转换)、Windows/Android 构建验证(Android SDK 未装;Windows 需 VS2022 C++ 工作负载) |
+| M1 独立客户端 MVP(`apps/deck`) | ✅ 功能完成 — 打印机网格首页、单机仪表盘(进度环/温度/风扇/AMS/HMS/舱门)、暂停/恢复/停止/速度/腔灯控制、LAN + 云端添加打印机(支持**账号登录**:手机号/邮箱+密码或邮箱验证码,Token 自动填入)、HMS/print_error 错误码句表(拓竹官方错误库,2014+490 条)、安全存储凭据(flutter_secure_storage)。32/32 协议测试 + 6/6 widget 测试通过;**macOS 实机验证 ✅**(2026-10-19,三台 A1 局域网直连,任务/进度/温度实时稳定) |
+| M1 剩余 | Windows/Android 构建验证(Android SDK 未装;Windows 需 VS2022 C++ 工作负载) |
 | M2 摄像头 + 组合布局 | 未开始 |
 | M3 Hub 服务端 | 未开始 |
 | M4 全平台 | 未开始 |

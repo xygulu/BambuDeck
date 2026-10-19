@@ -414,18 +414,33 @@ class HmsCard extends StatelessWidget {
             for (final e in state.hms.take(4))
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 2),
-                child: Text(
-                  'HMS_${e.hexKey.substring(0, 4).toUpperCase()}-'
-                  '${e.hexKey.substring(4, 8).toUpperCase()} · '
-                  '${severityLabel(e.severity)}',
-                  style: const TextStyle(
-                      fontSize: 12, color: DeckColors.textSecondary,
-                      fontFeatures: []),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${e.ecode} · ${severityLabel(e.severity)}',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: worst.withValues(alpha: 0.85),
+                          fontWeight: FontWeight.w600),
+                    ),
+                    // Sentence from the generated feed; raw ecode alone
+                    // when the table doesn't know the code.
+                    if (hmsDescription(e) != null)
+                      Text(hmsDescription(e)!,
+                          style: const TextStyle(
+                              fontSize: 12,
+                              color: DeckColors.textSecondary)),
+                  ],
                 ),
               ),
           if (state.printError != 0 && state.hms.isEmpty)
-            const Text('打印机上报了错误码,等待详情推送…',
-                style: TextStyle(fontSize: 12, color: DeckColors.textSecondary)),
+            Text(
+              printErrorDescription(state.printError) ??
+                  '打印机上报了错误码,等待详情推送…',
+              style: const TextStyle(
+                  fontSize: 12, color: DeckColors.textSecondary),
+            ),
         ],
       ),
     );

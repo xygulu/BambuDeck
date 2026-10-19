@@ -5,5 +5,6 @@ library;
 
 export 'src/bambu_cloud.dart';
 export 'src/bambu_mqtt_client.dart';
+export 'src/error_text.dart';
 export 'src/models.dart';
 export 'src/report_parser.dart';

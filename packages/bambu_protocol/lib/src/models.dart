@@ -103,6 +103,12 @@ class HmsEntry {
       attr.toRadixString(16).padLeft(8, '0') +
       code.toRadixString(16).padLeft(8, '0');
 
+  /// Official ecode spelling, e.g. `HMS_0300-0100-0001-0003` (same format
+  /// the printer screen and Bambu's wiki pages use).
+  String get ecode => 'HMS_${hexKey.substring(0, 4)}-'
+      '${hexKey.substring(4, 8)}-${hexKey.substring(8, 12)}-'
+      '${hexKey.substring(12, 16)}'.toUpperCase();
+
   @override
   bool operator ==(Object other) =>
       other is HmsEntry && other.attr == attr && other.code == code;

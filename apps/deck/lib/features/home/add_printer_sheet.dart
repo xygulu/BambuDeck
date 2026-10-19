@@ -25,8 +25,12 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
   final _serialCtrl = TextEditingController();
   final _codeCtrl = TextEditingController();
 
-  // Cloud form
-  var _region = CloudRegion.us;
+  // Cloud form. Region follows the system language on open (zh -> cn):
+  // a wrong-region login reads as "wrong password", which nobody debugs.
+  late var _region = WidgetsBinding
+              .instance.platformDispatcher.locale.languageCode == 'zh'
+      ? CloudRegion.cn
+      : CloudRegion.us;
   final _tokenCtrl = TextEditingController();
   List<CloudDevice>? _devices;
   CloudDevice? _selected;
