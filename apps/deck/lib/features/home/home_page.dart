@@ -6,16 +6,25 @@ import '../../core/theme.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 import '../../ui/widgets.dart';
+import '../cameras/cameras_page.dart';
 import '../dashboard/dashboard_page.dart';
 import '../settings/settings_page.dart';
 import 'add_printer_sheet.dart';
 
-/// Home: printer grid. Tap a card for the full dashboard.
-class HomePage extends ConsumerWidget {
+/// Home shell: printers tab + cameras tab (PRD FR-3/FR-4). Tap a printer
+/// card for the full dashboard.
+class HomePage extends ConsumerStatefulWidget {
   const HomePage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends ConsumerState<HomePage> {
+  var _tab = 0; // 0 printers, 1 cameras
+
+  @override
+  Widget build(BuildContext context) {
     final printers = ref.watch(printersProvider);
 
     return Scaffold(
@@ -24,6 +33,13 @@ class HomePage extends ConsumerWidget {
         title: const Text('BambuDeck',
             style: TextStyle(fontWeight: FontWeight.w700)),
         actions: [
+          if (_tab == 1)
+            IconButton(
+              icon: const Icon(Icons.video_call),
+              tooltip: '添加摄像头',
+              onPressed: () =>
+                  showAddCameraDialog(context, ref),
+            ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: '设置',
@@ -32,42 +48,59 @@ class HomePage extends ConsumerWidget {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _openAddSheet(context),
-        icon: const Icon(Icons.add),
-        label: const Text('添加打印机'),
+      floatingActionButton: _tab == 0
+          ? FloatingActionButton.extended(
+              onPressed: _openAddSheet,
+              icon: const Icon(Icons.add),
+              label: const Text('添加打印机'),
+            )
+          : null,
+      bottomNavigationBar: NavigationBar(
+        backgroundColor: DeckColors.surface,
+        indicatorColor: DeckColors.running.withValues(alpha: 0.18),
+        selectedIndex: _tab,
+        onDestinationSelected: (i) => setState(() => _tab = i),
+        destinations: const [
+          NavigationDestination(
+              icon: Icon(Icons.print_outlined), label: '打印机'),
+          NavigationDestination(
+              icon: Icon(Icons.videocam_outlined), label: '监控画面'),
+        ],
       ),
-      body: printers.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => Center(
-            child: Text('读取配置失败: $e',
-                style: const TextStyle(color: DeckColors.error))),
-        data: (list) {
-          if (list.isEmpty) {
-            return _EmptyState(onAdd: () => _openAddSheet(context));
-          }
-          return LayoutBuilder(builder: (context, constraints) {
-            final wide = constraints.maxWidth >= 760;
-            final columns = wide
-                ? (constraints.maxWidth ~/ 360).clamp(2, 4)
-                : (constraints.maxWidth ~/ 340).clamp(1, 2);
-            return GridView.count(
-              padding: const EdgeInsets.all(16),
-              crossAxisCount: columns,
-              mainAxisSpacing: 14,
-              crossAxisSpacing: 14,
-              childAspectRatio: wide ? 1.7 : 1.55,
-              children: [
-                for (final p in list) _PrinterCard(profile: p),
-              ],
-            );
-          });
-        },
-      ),
+      body: IndexedStack(index: _tab, children: [
+        printers.when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, _) => Center(
+              child: Text('读取配置失败: $e',
+                  style: const TextStyle(color: DeckColors.error))),
+          data: (list) {
+            if (list.isEmpty) {
+              return _EmptyState(onAdd: _openAddSheet);
+            }
+            return LayoutBuilder(builder: (context, constraints) {
+              final wide = constraints.maxWidth >= 760;
+              final columns = wide
+                  ? (constraints.maxWidth ~/ 360).clamp(2, 4)
+                  : (constraints.maxWidth ~/ 340).clamp(1, 2);
+              return GridView.count(
+                padding: const EdgeInsets.all(16),
+                crossAxisCount: columns,
+                mainAxisSpacing: 14,
+                crossAxisSpacing: 14,
+                childAspectRatio: wide ? 1.7 : 1.55,
+                children: [
+                  for (final p in list) _PrinterCard(profile: p),
+                ],
+              );
+            });
+          },
+        ),
+        CamerasPage(onAdd: () => showAddCameraDialog(context, ref)),
+      ]),
     );
   }
 
-  void _openAddSheet(BuildContext context) {
+  void _openAddSheet() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,

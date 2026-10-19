@@ -4,7 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/format.dart';
 import '../../core/theme.dart';
+import '../../data/camera_profile.dart';
+import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
+import '../../ui/camera_tile.dart';
 import '../../ui/widgets.dart';
 
 /// Full monitoring dashboard for one printer: progress ring, temperatures,
@@ -109,6 +112,7 @@ class _DashboardBody extends ConsumerWidget {
     final left = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        _LinkedCameras(profileId: profileId),
         _HeaderCard(s: s, accent: accent),
         const SizedBox(height: 14),
         _TempCard(s: s),
@@ -150,6 +154,50 @@ class _DashboardBody extends ConsumerWidget {
             const SizedBox(height: 14),
             right,
           ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Cameras linked to this printer (FR-4 组合画面): live picture right on
+/// the dashboard, above the state header. bambu-type cameras point at a
+/// printer id; rtsp cameras link via their optional printerId.
+class _LinkedCameras extends ConsumerWidget {
+  const _LinkedCameras({required this.profileId});
+
+  final String profileId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final cameras = ref.watch(camerasProvider).valueOrNull ?? const [];
+    final linked =
+        cameras.where((c) => c.enabled && c.printerId == profileId).toList();
+    if (linked.isEmpty) return const SizedBox.shrink();
+
+    final printers = ref.watch(printersProvider).valueOrNull ?? const [];
+    PrinterProfile? byId(String id) {
+      for (final p in printers) {
+        if (p.id == id) return p;
+      }
+      return null;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final c in linked.take(2))
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Builder(builder: (context) {
+                final url = c.resolveUrl(byId(c.printerId));
+                return url == null
+                    ? const SizedBox.shrink()
+                    : CameraTile(streamUrl: url, label: c.name);
+              }),
+            ),
         ],
       ),
     );

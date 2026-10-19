@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:media_kit/media_kit.dart';
 
 import 'core/theme.dart';
 import 'data/app_settings.dart';
+import 'data/camera_profile.dart';
 import 'data/print_events.dart';
 import 'data/printer_profile.dart';
 import 'data/providers.dart';
@@ -50,6 +52,7 @@ class LocalDeckNotifier implements DeckNotifier {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized(); // libmpv for camera streams (FR-3)
 
   // Desktop notifications: init asks macOS for permission on first run.
   try {
@@ -76,6 +79,10 @@ Future<void> main() async {
               ))),
       settingsStoreProvider.overrideWith(
           (ref) => SecureSettingsStore(storage: const SecureAdapter(
+                FlutterSecureStorage(),
+              ))),
+      cameraStoreProvider.overrideWith(
+          (ref) => SecureCameraStore(storage: const SecureAdapter(
                 FlutterSecureStorage(),
               ))),
     ],
