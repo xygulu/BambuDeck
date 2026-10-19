@@ -33,6 +33,13 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
   var _fetching = false;
   String? _error;
 
+  // Cloud sign-in (token obtained in-app instead of pasted)
+  final _accountCtrl = TextEditingController();
+  final _passwordCtrl = TextEditingController();
+  final _loginCodeCtrl = TextEditingController();
+  var _loginBusy = false;
+  String? _loginMsg;
+
   @override
   void dispose() {
     _nameCtrl.dispose();
@@ -40,6 +47,9 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
     _serialCtrl.dispose();
     _codeCtrl.dispose();
     _tokenCtrl.dispose();
+    _accountCtrl.dispose();
+    _passwordCtrl.dispose();
+    _loginCodeCtrl.dispose();
     super.dispose();
   }
 
@@ -138,12 +148,14 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
           onChanged: (r) => setState(() => _region = r ?? CloudRegion.us),
         ),
         const SizedBox(height: 10),
+        _loginSection(),
+        const SizedBox(height: 10),
         TextField(
           controller: _tokenCtrl,
           maxLines: 2,
           decoration: const InputDecoration(
-              labelText: '访问 Token',
-              hintText: '从浏览器登录拓竹后粘贴(支持后续密码/验证码登录)'),
+              labelText: '访问 Token(登录后自动填入,也可手动粘贴)',
+              hintText: '浏览器登录拓竹后从请求头/cookie 复制'),
         ),
         const SizedBox(height: 12),
         Row(children: [
@@ -197,7 +209,10 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
     }
     try {
       final api = ref.read(cloudApiProvider);
+      debugPrint('[cloud] fetching devices, region=${_region.name}, '
+          'token=${token.length}B, jwt=${token.split('.').length}段');
       final devices = await api.devices(token, _region);
+      debugPrint('[cloud] devices: ${devices.length}');
       setState(() {
         _devices = devices;
         _selected = devices.isNotEmpty ? devices.first : null;
@@ -205,11 +220,155 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
         _fetching = false;
       });
     } on Exception catch (e) {
+      // Full failure detail goes to the run log; the sheet shows a short line.
+      debugPrint('[cloud] list FAILED: $e');
       setState(() {
         _error = '获取列表失败: $e';
         _fetching = false;
       });
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // In-app sign-in. Flows ported from BambuHelper cloud_login.cpp: account
+  // (phone/email) + password, or an emailed login code. Both land the token
+  // in _tokenCtrl and immediately pull the device list.
+  // ---------------------------------------------------------------------------
+
+  Widget _loginSection() => Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Theme.of(context)
+              .colorScheme
+              .surfaceContainerHighest
+              .withValues(alpha: 0.4),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('账号登录(自动获取 Token)',
+              style:
+                  TextStyle(fontSize: 12, color: DeckColors.textSecondary)),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _accountCtrl,
+            keyboardType: TextInputType.emailAddress,
+            decoration: const InputDecoration(
+                labelText: '手机号 / 邮箱', hintText: '与 Bambu Handy 相同的账号'),
+          ),
+          const SizedBox(height: 8),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _passwordCtrl,
+                obscureText: true,
+                decoration: const InputDecoration(
+                    labelText: '密码',
+                    hintText: '国内手机号账号用密码登录'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.tonal(
+              onPressed: _loginBusy ? null : _loginWithPassword,
+              child: const Text('登录'),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _loginCodeCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                    labelText: '邮箱验证码', hintText: '无需密码时用'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: _loginBusy ? null : _sendLoginCode,
+              child: const Text('发验证码'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: _loginBusy ? null : _loginWithCode,
+              child: const Text('验证码登录'),
+            ),
+          ]),
+          if (_loginMsg != null) ...[
+            const SizedBox(height: 8),
+            Text(_loginMsg!,
+                style: const TextStyle(
+                    fontSize: 12, color: DeckColors.textSecondary)),
+          ],
+        ]),
+      );
+
+  Future<void> _runLogin(Future<LoginOutcome> Function() flow) async {
+    setState(() {
+      _loginBusy = true;
+      _loginMsg = null;
+    });
+    try {
+      final outcome = await flow();
+      switch (outcome) {
+        case LoginToken(:final token):
+          _tokenCtrl.text = token;
+          setState(() => _loginMsg = '登录成功,Token 已填入');
+          await _fetchDevices();
+        case LoginNeedsEmailCode():
+          setState(() =>
+              _loginMsg = '该账号需要邮箱验证码:点「发验证码」,收到后填入再点「验证码登录」');
+        case LoginNeedsTfa():
+          setState(() => _loginMsg =
+              '该账号开启了两步验证,暂不支持动态口令——请改用「验证码登录」,或到拓竹官网关闭两步验证后用密码登录');
+      }
+    } on Exception catch (e) {
+      debugPrint('[cloud] login FAILED: $e');
+      setState(() => _loginMsg = '登录失败: $e');
+    } finally {
+      if (mounted) setState(() => _loginBusy = false);
+    }
+  }
+
+  Future<void> _loginWithPassword() async {
+    final account = _accountCtrl.text.trim();
+    if (account.isEmpty || _passwordCtrl.text.isEmpty) {
+      setState(() => _loginMsg = '请填写账号和密码');
+      return;
+    }
+    await _runLogin(() => cloudLogin(
+        region: _region, account: account, password: _passwordCtrl.text));
+  }
+
+  Future<void> _sendLoginCode() async {
+    final account = _accountCtrl.text.trim();
+    if (account.isEmpty) {
+      setState(() => _loginMsg = '请先填写邮箱账号');
+      return;
+    }
+    setState(() {
+      _loginBusy = true;
+      _loginMsg = null;
+    });
+    try {
+      await cloudSendLoginCode(region: _region, email: account);
+      setState(() => _loginMsg = '验证码已发送到 $account');
+    } on Exception catch (e) {
+      debugPrint('[cloud] send code FAILED: $e');
+      setState(() => _loginMsg = '发送失败: $e');
+    } finally {
+      if (mounted) setState(() => _loginBusy = false);
+    }
+  }
+
+  Future<void> _loginWithCode() async {
+    final account = _accountCtrl.text.trim();
+    final code = _loginCodeCtrl.text.trim();
+    if (account.isEmpty || code.isEmpty) {
+      setState(() => _loginMsg = '请填写邮箱和验证码');
+      return;
+    }
+    await _runLogin(
+        () => cloudLogin(region: _region, account: account, code: code));
   }
 
   Future<void> _saveLan() async {

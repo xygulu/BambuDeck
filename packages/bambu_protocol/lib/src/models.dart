@@ -9,10 +9,13 @@
 enum PrinterMode { lan, cloud }
 
 /// Bambu cloud region.
+///
+/// API hosts follow BambuHelper's measured table: everything non-CN answers
+/// on api.bambulab.com (api.us.* 401s CN-issued tokens), CN is its own site.
 enum CloudRegion {
-  us('us.mqtt.bambulab.com', 'https://api.us.bambulab.com'),
+  us('us.mqtt.bambulab.com', 'https://api.bambulab.com'),
   eu('eu.mqtt.bambulab.com', 'https://api.eu.bambulab.com'),
-  cn('cn.mqtt.bambulab.com', 'https://api.bambulab.com');
+  cn('cn.mqtt.bambulab.com', 'https://api.bambulab.cn');
 
   const CloudRegion(this.mqttHost, this.apiBase);
   final String mqttHost;
