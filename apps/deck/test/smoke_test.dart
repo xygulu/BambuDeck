@@ -160,6 +160,32 @@ void main() {
     ));
     expect(find.textContaining('HMS'), findsNothing);
   });
+
+  testWidgets('HMS card shows the feed sentence for known codes',
+      (tester) async {
+    // 0x03000100/0x00010001 - heatbed short circuit, a real feed entry.
+    final state = parseReport(jsonDecode(
+        '{"print":{"gcode_state":"RUNNING",'
+        '"hms":[{"attr": 50331904, "code": 65537}]}}'))!;
+    await tester.pumpWidget(MaterialApp(
+      theme: buildDeckTheme(),
+      home: Scaffold(body: HmsCard(state: state)),
+    ));
+    expect(find.textContaining('HMS_0300-0100-0001-0001'), findsOneWidget);
+    expect(find.textContaining('heatbed temperature is abnormal'),
+        findsOneWidget);
+  });
+
+  testWidgets('print_error resolves to the feed sentence', (tester) async {
+    // 0x03004000 - Z axis homing failed (first err entry).
+    final state = parseReport(jsonDecode(
+        '{"print":{"gcode_state":"RUNNING","print_error": 50348032}}'))!;
+    await tester.pumpWidget(MaterialApp(
+      theme: buildDeckTheme(),
+      home: Scaffold(body: HmsCard(state: state)),
+    ));
+    expect(find.textContaining('Z axis homing failed'), findsOneWidget);
+  });
 }
 
 const _cardReport = '''
