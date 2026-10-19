@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,6 +9,7 @@ import '../../core/theme.dart';
 import '../../data/camera_profile.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
+import '../../data/rtsp_scanner.dart';
 import '../../ui/camera_tile.dart';
 
 /// Cameras tab body (PRD FR-3): live tile per camera, add via dialog.
@@ -164,17 +167,61 @@ class _CameraCardState extends ConsumerState<_CameraCard> {
   }
 }
 
-/// Add-camera dialog: RTSP/ONVIF URL, or the printer's own camera
-/// (X1/P1 family; A1 系没有摄像头硬件).
+/// Add-camera dialog: RTSP/ONVIF URL (with LAN auto-scan) or the
+/// printer's own camera (X1/P1 family; A1 系没有摄像头硬件).
 Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
   final nameCtrl = TextEditingController();
   final urlCtrl = TextEditingController();
+  final subnetCtrl = TextEditingController(text: await _guessSubnet());
+  if (!context.mounted) return;
   var type = CameraSourceType.rtsp;
   PrinterProfile? linked;
+
+  // LAN scan state.
+  var scanning = false;
+  var done = 0;
+  var total = 0;
+  var scanError = '';
+  var hits = const <RtspHit>[];
 
   final printers = ref.read(printersProvider).valueOrNull ?? const [];
   final lanPrinters =
       printers.where((p) => p.mode == PrinterMode.lan).toList();
+
+  Future<void> runScan(StateSetter setState) async {
+    final prefix = subnetCtrl.text.trim();
+    if (!RegExp(r'^\d{1,3}(\.\d{1,3}){2}$').hasMatch(prefix)) {
+      setState(() => scanError = '网段前缀格式应为 192.168.100');
+      return;
+    }
+    setState(() {
+      scanning = true;
+      scanError = '';
+      hits = const [];
+      done = 0;
+      total = 508;
+    });
+    try {
+      final found = await scanRtspCameras(
+        subnetPrefix: prefix,
+        onProgress: (d, t) {
+          if (d % 32 == 0 || d == t) {
+            setState(() => done = d);
+          }
+        },
+      );
+      setState(() {
+        hits = found;
+        scanning = false;
+        if (found.isEmpty) scanError = '该网段没有发现 RTSP 摄像头';
+      });
+    } catch (e) {
+      setState(() {
+        scanning = false;
+        scanError = '扫描失败: $e';
+      });
+    }
+  }
 
   final ok = await showDialog<bool>(
     context: context,
@@ -183,67 +230,146 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
         backgroundColor: DeckColors.surface,
         title: const Text('添加摄像头'),
         content: SizedBox(
-          width: 420,
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            TextField(
-              controller: nameCtrl,
-              decoration: const InputDecoration(
-                  labelText: '名称', hintText: '例如 打印房门口'),
-            ),
-            const SizedBox(height: 12),
-            SegmentedButton<CameraSourceType>(
-              segments: const [
-                ButtonSegment(
-                    value: CameraSourceType.rtsp,
-                    label: Text('RTSP/ONVIF')),
-                ButtonSegment(
-                    value: CameraSourceType.bambu,
-                    label: Text('打印机自带')),
-              ],
-              selected: {type},
-              onSelectionChanged: (s) => setState(() => type = s.first),
-            ),
-            const SizedBox(height: 12),
-            if (type == CameraSourceType.rtsp) ...[
+          width: 460,
+          child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
               TextField(
-                controller: urlCtrl,
+                controller: nameCtrl,
                 decoration: const InputDecoration(
-                  labelText: 'RTSP 地址',
-                  hintText: 'rtsp://user:pass@192.168.1.10:554/stream1',
-                ),
+                    labelText: '名称', hintText: '例如 打印房门口'),
               ),
               const SizedBox(height: 12),
-              DropdownButtonFormField<PrinterProfile>(
-                initialValue: linked,
-                decoration: const InputDecoration(
-                    labelText: '关联打印机(可选,显示在其仪表盘)'),
-                items: [
-                  for (final p in printers)
-                    DropdownMenuItem(value: p, child: Text(p.name)),
+              SegmentedButton<CameraSourceType>(
+                segments: const [
+                  ButtonSegment(
+                      value: CameraSourceType.rtsp,
+                      label: Text('RTSP/ONVIF')),
+                  ButtonSegment(
+                      value: CameraSourceType.bambu,
+                      label: Text('打印机自带')),
                 ],
-                onChanged: (p) => setState(() => linked = p),
+                selected: {type},
+                onSelectionChanged: (s) => setState(() => type = s.first),
               ),
-            ] else ...[
-              DropdownButtonFormField<PrinterProfile>(
-                initialValue: linked,
-                decoration: const InputDecoration(
-                    labelText: '选择打印机(局域网直连)'),
-                items: [
-                  for (final p in lanPrinters)
-                    DropdownMenuItem(value: p, child: Text(p.name)),
+              const SizedBox(height: 12),
+              if (type == CameraSourceType.rtsp) ...[
+                Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: urlCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'RTSP 地址',
+                        hintText: 'rtsp://user:pass@192.168.1.10:554/stream1',
+                      ),
+                    ),
+                  ),
+                ]),
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: subnetCtrl,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                          labelText: '扫描网段前缀',
+                          hintText: '192.168.100'),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.tonal(
+                    onPressed: scanning ? null : () => runScan(setState),
+                    child: Text(scanning ? '扫描中…' : '自动扫描'),
+                  ),
+                ]),
+                if (scanning) ...[
+                  const SizedBox(height: 8),
+                  LinearProgressIndicator(value: total == 0 ? null : done / total),
+                  const SizedBox(height: 4),
+                  Text('已探测 $done/$total',
+                      style: const TextStyle(
+                          fontSize: 11,
+                          color: DeckColors.textSecondary)),
                 ],
-                onChanged: (p) => setState(() => linked = p),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                '打印机自带摄像头走 RTSP(bblp 账号 + 访问码自动填入)。'
-                '注意:X1 / P1 系才有摄像头,A1 / A1 mini 没有摄像头硬件。',
-                style: TextStyle(
-                    fontSize: 12,
-                    color: DeckColors.textSecondary.withValues(alpha: 0.9)),
-              ),
-            ],
-          ]),
+                if (scanError.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(scanError,
+                      style: const TextStyle(
+                          fontSize: 12,
+                          color: DeckColors.textSecondary)),
+                ],
+                if (hits.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 150),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: hits.length,
+                      itemBuilder: (ctx, i) {
+                        final h = hits[i];
+                        final subtitle = [
+                          if (h.vendor != null) h.vendor!,
+                          if (h.needsAuth) '需要摄像头密码',
+                        ].join(' · ');
+                        return ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.videocam, size: 18),
+                          title: Text(h.url,
+                              style: const TextStyle(fontSize: 12)),
+                          subtitle: subtitle.isEmpty
+                              ? null
+                              : Text(subtitle,
+                                  style: const TextStyle(fontSize: 11)),
+                          onTap: () {
+                            urlCtrl.text = h.url;
+                            if (nameCtrl.text.trim().isEmpty) {
+                              final octet =
+                                  h.ip.split('.').last;
+                              nameCtrl.text =
+                                  '${h.vendor ?? "摄像头"} $octet';
+                            }
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                  const Text('点击结果填入地址(需要密码的话在地址里加 user:pass@)',
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: DeckColors.textSecondary)),
+                ],
+                const SizedBox(height: 10),
+                DropdownButtonFormField<PrinterProfile>(
+                  initialValue: linked,
+                  decoration: const InputDecoration(
+                      labelText: '关联打印机(可选,显示在其仪表盘)'),
+                  items: [
+                    for (final p in printers)
+                      DropdownMenuItem(value: p, child: Text(p.name)),
+                  ],
+                  onChanged: (p) => setState(() => linked = p),
+                ),
+              ] else ...[
+                DropdownButtonFormField<PrinterProfile>(
+                  initialValue: linked,
+                  decoration: const InputDecoration(
+                      labelText: '选择打印机(局域网直连)'),
+                  items: [
+                    for (final p in lanPrinters)
+                      DropdownMenuItem(value: p, child: Text(p.name)),
+                  ],
+                  onChanged: (p) => setState(() => linked = p),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  '打印机自带摄像头走 RTSP(bblp 账号 + 访问码自动填入)。'
+                  '注意:X1 / P1 系才有摄像头,A1 / A1 mini 没有摄像头硬件。',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: DeckColors.textSecondary.withValues(alpha: 0.9)),
+                ),
+              ],
+            ]),
+          ),
         ),
         actions: [
           TextButton(
@@ -271,4 +397,23 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
     printerId: linked?.id ?? '',
   );
   await ref.read(camerasProvider.notifier).add(camera);
+}
+
+/// First non-loopback IPv4's first three octets - the usual LAN.
+Future<String> _guessSubnet() async {
+  try {
+    final interfaces = await NetworkInterface.list();
+    for (final itf in interfaces) {
+      for (final addr in itf.addresses) {
+        if (addr.type != InternetAddressType.IPv4) continue;
+        if (addr.address.startsWith('127.')) continue;
+        final parts = addr.address.split('.');
+        if (parts.length != 4) continue;
+        return '${parts[0]}.${parts[1]}.${parts[2]}';
+      }
+    }
+  } on SocketException {
+    // fall through
+  }
+  return '192.168.1';
 }
