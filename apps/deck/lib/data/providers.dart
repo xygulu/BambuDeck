@@ -4,6 +4,8 @@ import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'cloud_api.dart';
+import 'log_buffer.dart';
+import 'print_events.dart';
 import 'printer_profile.dart';
 
 /// Composition root bindings - overridden in main.dart (secure storage) and
@@ -37,14 +39,8 @@ abstract class PrinterLink {
 
 class MqttPrinterLink implements PrinterLink {
   MqttPrinterLink(this.profile) {
-    _client = BambuMqttClient(config: profile.toMqttConfig(), log: (line) {
-      // MVP: connection diagnostics land in the log page (M5).
-      assert(() {
-        // ignore: avoid_print
-        print(line);
-        return true;
-      }());
-    });
+    _client = BambuMqttClient(config: profile.toMqttConfig(),
+        log: LogBuffer.instance.add);
   }
 
   final PrinterProfile profile;
@@ -100,6 +96,14 @@ class PrintersNotifier extends AsyncNotifier<List<PrinterProfile>> {
     final store = ref.read(storeProvider);
     state = AsyncData(
         (state.valueOrNull ?? []).where((p) => p.id != id).toList());
+    await store.save(state.valueOrNull ?? []);
+  }
+
+  /// Config import (FR-10 backup): swaps the whole list, dropping live
+  /// connections via the per-id watch in ConnectionNotifier.build.
+  Future<void> replaceAll(List<PrinterProfile> printers) async {
+    final store = ref.read(storeProvider);
+    state = AsyncData(List.of(printers));
     await store.save(state.valueOrNull ?? []);
   }
 
@@ -176,7 +180,9 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
       state = state.copyWith(status: s);
     });
     _stateSub = link.states.listen((s) {
+      final prev = state.state;
       state = state.copyWith(state: s, lastError: null);
+      printEvents.observe(profile, prev, s);
     });
     await link.connect();
   }

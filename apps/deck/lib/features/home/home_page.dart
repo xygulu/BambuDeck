@@ -7,6 +7,7 @@ import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 import '../../ui/widgets.dart';
 import '../dashboard/dashboard_page.dart';
+import '../settings/settings_page.dart';
 import 'add_printer_sheet.dart';
 
 /// Home: printer grid. Tap a card for the full dashboard.
@@ -24,11 +25,10 @@ class HomePage extends ConsumerWidget {
             style: TextStyle(fontWeight: FontWeight.w700)),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: '刷新状态',
-            onPressed: () {
-              // Handled per-connection by pull-to-refresh on cards.
-            },
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: '设置',
+            onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const SettingsPage())),
           ),
         ],
       ),
