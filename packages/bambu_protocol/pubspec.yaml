@@ -1,0 +1,15 @@
+name: bambu_protocol
+description: Bambu Lab printer protocol layer for BambuDeck - MQTT (LAN/Cloud), state models, report parsing, cloud auth.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  mqtt_client: ^10.6.0
+  typed_data: ^1.4.0
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.0

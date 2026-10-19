@@ -1,0 +1,23 @@
+name: deck
+description: BambuDeck - Bambu Lab printer & camera monitoring for desktop and mobile.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  bambu_protocol:
+    path: ../../packages/bambu_protocol
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.6.1
+  flutter_secure_storage: ^9.2.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
