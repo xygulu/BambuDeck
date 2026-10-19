@@ -24,6 +24,8 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  # tool/ diagnostics scripts (camera protocol probing) speak MQTT directly.
+  mqtt_client: ^10.13.0
 
 flutter:
   uses-material-design: true

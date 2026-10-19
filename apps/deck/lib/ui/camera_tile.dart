@@ -6,6 +6,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../core/theme.dart';
 import '../data/bambu_mjpeg.dart';
+import '../data/log_buffer.dart';
 import 'mjpeg_tile.dart';
 
 /// Live video tile for one stream URL (PRD FR-3). Wraps a media_kit
@@ -75,6 +76,7 @@ class _CameraTileState extends State<CameraTile> {
       // Non-fatal: defaults still play.
     }
     _errSub = player.stream.error.listen((e) {
+      LogBuffer.instance.add('[${widget.label}] 视频流错误: $e');
       if (mounted) setState(() => _error = '视频流错误: $e');
     });
 
@@ -85,6 +87,7 @@ class _CameraTileState extends State<CameraTile> {
     try {
       await player.open(Media(url));
     } catch (e) {
+      LogBuffer.instance.add('[${widget.label}] 无法连接视频源: $e');
       if (mounted) setState(() => _error = '无法连接视频源: $e');
     }
   }

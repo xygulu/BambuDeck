@@ -44,7 +44,7 @@ Future<void> main(List<String> args) async {
 
   // Read 16-byte frame header, then payload; save first JPEG frame.
   final buf = BytesBuilder();
-  var header = Uint8List(16);
+  final header = Uint8List(16);
   var headerFill = 0;
   var payloadTarget = 0;
   final done = Completer<void>();

@@ -168,12 +168,20 @@ class _CameraCardState extends ConsumerState<_CameraCard> {
 }
 
 /// Add-camera dialog: RTSP/ONVIF URL (with LAN auto-scan) or the
-/// printer's own camera (X1/P1 family; A1 系没有摄像头硬件).
+/// printer's own camera.
 Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
   final nameCtrl = TextEditingController();
-  final urlCtrl = TextEditingController();
   final subnetCtrl = TextEditingController(text: await _guessSubnet());
   if (!context.mounted) return;
+  // The RTSP field starts as an editable template - the cursor sits right
+  // after "admin:" so the password is the first thing typed. The hint
+  // would vanish on first keystroke; this never does.
+  final template = 'rtsp://admin:密码@${subnetCtrl.text}.10:554/stream1';
+  final urlCtrl = TextEditingController(text: template)
+    ..value = TextEditingValue(
+      text: template,
+      selection: const TextSelection.collapsed(offset: 12),
+    );
   var type = CameraSourceType.rtsp;
   PrinterProfile? linked;
 
@@ -182,11 +190,25 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
   var done = 0;
   var total = 0;
   var scanError = '';
+  var urlError = '';
   var hits = const <RtspHit>[];
 
   final printers = ref.read(printersProvider).valueOrNull ?? const [];
   final lanPrinters =
       printers.where((p) => p.mode == PrinterMode.lan).toList();
+
+  /// Fill the URL field from a scan hit; auth-only hits get an `admin:`
+  /// placeholder so the password is the only thing left to type.
+  void fillFromHit(RtspHit h) {
+    final text = h.needsAuth
+        ? 'rtsp://admin:@${h.ip}:${h.port}${h.path}'
+        : h.url;
+    urlCtrl.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(
+          offset: h.needsAuth ? 'rtsp://admin:'.length : text.length),
+    );
+  }
 
   Future<void> runScan(StateSetter setState) async {
     final prefix = subnetCtrl.text.trim();
@@ -262,17 +284,18 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
               ),
               const SizedBox(height: 12),
               if (type == CameraSourceType.rtsp) ...[
-                Row(children: [
-                  Expanded(
-                    child: TextField(
-                      controller: urlCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'RTSP 地址',
-                        hintText: 'rtsp://user:pass@192.168.1.10:554/stream1',
-                      ),
-                    ),
+                TextField(
+                  controller: urlCtrl,
+                  onChanged: (_) {
+                    if (urlError.isNotEmpty) {
+                      setState(() => urlError = '');
+                    }
+                  },
+                  decoration: InputDecoration(
+                    labelText: 'RTSP 地址(可直接编辑预填模板)',
+                    errorText: urlError.isEmpty ? null : urlError,
                   ),
-                ]),
+                ),
                 const SizedBox(height: 10),
                 Row(children: [
                   Expanded(
@@ -329,7 +352,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
                               : Text(subtitle,
                                   style: const TextStyle(fontSize: 11)),
                           onTap: () {
-                            urlCtrl.text = h.url;
+                            fillFromHit(h);
                             if (nameCtrl.text.trim().isEmpty) {
                               final octet =
                                   h.ip.split('.').last;
@@ -387,7 +410,20 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
               onPressed: () => Navigator.pop(ctx, false),
               child: const Text('取消')),
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
+              onPressed: () {
+                if (type == CameraSourceType.rtsp) {
+                  final u = urlCtrl.text.trim();
+                  if (u == template ||
+                      !u.startsWith('rtsp://') ||
+                      RegExp(r'^rtsp://[^/]*$').hasMatch(u)) {
+                    setState(() => urlError =
+                        '地址没改过或不对——直接在预填模板上改,'
+                        '或「自动扫描」后点结果');
+                    return;
+                  }
+                }
+                Navigator.pop(ctx, true);
+              },
               child: const Text('添加')),
         ],
       ),

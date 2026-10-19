@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../core/theme.dart';
 import '../data/bambu_mjpeg.dart';
+import '../data/log_buffer.dart';
 
 /// Live view for the A1/P1-family built-in camera: MJPEG frames pushed
 /// over TLS :6000. Decodes are capped to ~15 fps - the printer pushes
@@ -48,6 +49,7 @@ class _MjpegTileState extends State<MjpegTile> {
       onError: (msg) {
         // The stream retries on its own; surface the failure only while
         // nothing has ever rendered.
+        LogBuffer.instance.add('[${widget.label ?? "摄像头"}] MJPEG: $msg');
         if (!mounted) return;
         setState(() {
           if (_jpeg == null) {
@@ -115,7 +117,7 @@ class _MjpegTileState extends State<MjpegTile> {
             fit: BoxFit.contain,
           )
         else if (_error != null)
-          _overlay('${_error!}', retry: true)
+          _overlay(_error!, retry: true)
         else
           const Center(
             child: Column(mainAxisSize: MainAxisSize.min, children: [

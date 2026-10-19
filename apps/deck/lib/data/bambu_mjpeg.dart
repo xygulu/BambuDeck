@@ -135,7 +135,7 @@ class BambuMjpegStream {
   /// errors propagate to _run's catch.
   Future<void> _pump(SecureSocket socket) async {
     final body = BytesBuilder(copy: false);
-    var header = Uint8List(16);
+    final header = Uint8List(16);
     var headerFill = 0;
     var payloadSize = 0;
 
