@@ -1,6 +1,7 @@
 import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 
 import '../../core/theme.dart';
 import '../../data/camera_profile.dart';
@@ -73,7 +74,7 @@ class CamerasPage extends ConsumerWidget {
   }
 }
 
-class _CameraCard extends ConsumerWidget {
+class _CameraCard extends ConsumerStatefulWidget {
   const _CameraCard({
     required this.camera,
     required this.printers,
@@ -85,58 +86,80 @@ class _CameraCard extends ConsumerWidget {
   final VoidCallback onDelete;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_CameraCard> createState() => _CameraCardState();
+}
+
+class _CameraCardState extends ConsumerState<_CameraCard> {
+  /// NFR-3: streams outside the viewport stop pulling. Mounting the tile
+  /// only while visible disposes its player on scroll-out.
+  bool _visible = true;
+
+  @override
+  Widget build(BuildContext context) {
+    final camera = widget.camera;
     PrinterProfile? linked;
-    for (final p in printers) {
+    for (final p in widget.printers) {
       if (p.id == camera.printerId) linked = p;
     }
     final url = camera.resolveUrl(linked);
 
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Expanded(
-          child: url != null && camera.enabled
-              ? CameraTile(streamUrl: url, label: camera.name)
-              : Container(
-                  color: Colors.black,
-                  alignment: Alignment.center,
-                  child: Text(
-                    camera.enabled ? '未配置视频源' : '已停用',
-                    style: const TextStyle(
-                        fontSize: 13, color: DeckColors.textSecondary),
-                  ),
-                ),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Row(children: [
-            Expanded(
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(camera.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontSize: 14, fontWeight: FontWeight.w600)),
-                    Text(
-                      '${camera.sourceType.label}'
-                      '${linked == null ? '' : ' · ${linked.name}'}',
+    return VisibilityDetector(
+      key: Key('cam-${camera.id}'),
+      onVisibilityChanged: (info) {
+        final visible = info.visibleFraction > 0.05;
+        if (visible != _visible) setState(() => _visible = visible);
+      },
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        child:
+            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Expanded(
+            child: url != null && camera.enabled && _visible
+                ? CameraTile(streamUrl: url, label: camera.name)
+                : Container(
+                    color: Colors.black,
+                    alignment: Alignment.center,
+                    child: Text(
+                      !camera.enabled
+                          ? '已停用'
+                          : url == null
+                              ? '未配置视频源'
+                              : '画面已在后台暂停',
                       style: const TextStyle(
-                          fontSize: 12,
-                          color: DeckColors.textSecondary),
+                          fontSize: 13, color: DeckColors.textSecondary),
                     ),
-                  ]),
-            ),
-            IconButton(
-              icon: const Icon(Icons.delete_outline, size: 20),
-              tooltip: '删除摄像头',
-              onPressed: onDelete,
-            ),
-          ]),
-        ),
-      ]),
+                  ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(children: [
+              Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(camera.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 14, fontWeight: FontWeight.w600)),
+                      Text(
+                        '${camera.sourceType.label}'
+                        '${linked == null ? '' : ' · ${linked.name}'}',
+                        style: const TextStyle(
+                            fontSize: 12,
+                            color: DeckColors.textSecondary),
+                      ),
+                    ]),
+              ),
+              IconButton(
+                icon: const Icon(Icons.delete_outline, size: 20),
+                tooltip: '删除摄像头',
+                onPressed: widget.onDelete,
+              ),
+            ]),
+          ),
+        ]),
+      ),
     );
   }
 }
