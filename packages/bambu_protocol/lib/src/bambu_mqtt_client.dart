@@ -258,13 +258,21 @@ class BambuMqttClient {
 
   Future<bool> _publish(String json) async {
     final client = _client;
-    if (client == null ||
-        client.connectionStatus?.state != MqttConnectionState.connected) {
+    final state = client?.connectionStatus?.state;
+    _logLine('publish state=$state $json');
+    if (client == null || state != MqttConnectionState.connected) {
+      _logLine('publish ABORTED (not connected)');
       return false;
     }
     try {
+      // QoS 1: the reference clients publish commands at QoS 1 (OpenBambuAPI
+      // sends print.stop at QoS 1; bambu-mqtt-comms send_and_wait defaults to
+      // qos=1). Publishing at QoS 0 stopped the chamber-light command reaching
+      // the printer (灯光开关失效 2026-10-20) - the earlier "QoS 1 dropped"
+      // read was the wrong-command-name / signing rejection, not QoS.
       client.publishMessage(
           _requestTopic, MqttQos.atLeastOnce, _payloadBytes(json));
+      _logLine('publish OK');
       return true;
     } on Exception catch (e) {
       _logLine('publish failed: $e');
@@ -310,9 +318,12 @@ class BambuMqttClient {
     }));
   }
 
-  Future<bool> pausePrint() => _publish(jsonEncode(_node('pause_print', {})));
-  Future<bool> resumePrint() => _publish(jsonEncode(_node('resume_print', {})));
-  Future<bool> stopPrint() => _publish(jsonEncode(_node('stop_print', {})));
+  // Bambu's control commands are `pause`/`resume`/`stop` (no `_print`
+  // suffix — that suffix only appears in `print_speed`). Sending `stop_print`
+  // is silently ignored by the printer (停止按钮不起作用 2026-10-20).
+  Future<bool> pausePrint() => _publish(jsonEncode(_node('pause', {})));
+  Future<bool> resumePrint() => _publish(jsonEncode(_node('resume', {})));
+  Future<bool> stopPrint() => _publish(jsonEncode(_node('stop', {})));
 
   /// 1 silent, 2 standard, 3 sport, 4 ludicrous.
   Future<bool> setSpeedLevel(int level) =>

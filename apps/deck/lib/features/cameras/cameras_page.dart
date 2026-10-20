@@ -197,6 +197,8 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
       selection: TextSelection.collapsed(offset: initialUrl.length),
     );
   var type = editing?.sourceType ?? CameraSourceType.rtsp;
+  var flipH = editing?.flipH ?? false;
+  var rotationDeg = editing?.rotationDeg ?? 0;
   PrinterProfile? linked;
   if (editing != null && editing.printerIds.isNotEmpty) {
     final printers = ref.read(printersProvider).valueOrNull ?? const [];
@@ -316,6 +318,36 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                     errorText: urlError.isEmpty ? null : urlError,
                   ),
                 ),
+                const SizedBox(height: 14),
+                Text('画面方向',
+                    style: TextStyle(
+                        fontSize: 12, color: DeckColors.textSecondary)),
+                const SizedBox(height: 6),
+                Row(children: [
+                  const Text('水平翻转', style: TextStyle(fontSize: 13)),
+                  Switch(
+                    value: flipH,
+                    activeThumbColor: DeckColors.running,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    onChanged: (v) => setState(() => flipH = v),
+                  ),
+                  const SizedBox(width: 16),
+                  const Text('旋转', style: TextStyle(fontSize: 13)),
+                  const SizedBox(width: 8),
+                  SegmentedButton<int>(
+                    segments: const [
+                      ButtonSegment(value: 0, label: Text('0°')),
+                      ButtonSegment(value: 90, label: Text('90°')),
+                      ButtonSegment(value: 180, label: Text('180°')),
+                      ButtonSegment(value: 270, label: Text('270°')),
+                    ],
+                    selected: {rotationDeg},
+                    onSelectionChanged: (s) =>
+                        setState(() => rotationDeg = s.first),
+                    style: const ButtonStyle(
+                        visualDensity: VisualDensity.compact),
+                  ),
+                ]),
                 // 编辑模式只改名称/连接信息, 网段扫描是添加时的入口。
                 if (editing == null) ...[
                   const SizedBox(height: 10),
@@ -467,6 +499,8 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
           name: name,
           url: type == CameraSourceType.rtsp ? urlCtrl.text.trim() : '',
           printerIds: printerIds,
+          flipH: flipH,
+          rotationDeg: rotationDeg,
         ));
     return;
   }
@@ -477,6 +511,8 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
     sourceType: type,
     url: type == CameraSourceType.rtsp ? urlCtrl.text.trim() : '',
     printerIds: printerIds,
+    flipH: flipH,
+    rotationDeg: rotationDeg,
   );
   await ref.read(camerasProvider.notifier).add(camera);
 }

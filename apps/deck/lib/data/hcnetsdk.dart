@@ -64,6 +64,12 @@ const hcPtzPanRight = 24;
 const hcPtzZoomIn = 11;
 const hcPtzZoomOut = 12;
 
+/// PTZ pan/tilt speed carried as a third word in the control tail. The EZVIZ
+/// app defaults to 5; 0 is slowest, 7 fastest. We pick a slower value so a
+/// hold doesn't slam the gimbal to its mechanical limit in ~2 s (that was the
+/// 8-byte no-speed tail's default = fastest).
+const hcPtzSpeedDefault = 2;
+
 /// `NET_DVR_PTZControlWithSpeed_Other` command_id, captured from the EZVIZ app
 /// driving a live camera on 192.168.100.102. The body tail is just
 /// `[channel][signed command]` — a positive word starts a direction, its
@@ -479,17 +485,21 @@ class HcNetSdkClient {
 
   /// PTZ move over the command port. [command] is an `hcPtz*` value; [stop]
   /// issues the stop for that direction. Wire format (captured from the EZVIZ
-  /// app): `[channel][signed command]`, the command negated to stop.
+  /// app): `[channel][signed command][speed]`, the command negated to stop.
+  /// The speed word was missing originally (the camera then ran at its fastest
+  /// preset and a ~2 s hold slammed the gimbal to its mechanical limit).
   Future<Uint8List> ptzControl(
     HcNetSdkSession session, {
     required int command,
     required bool stop,
     int channel = 1,
+    int speed = hcPtzSpeedDefault,
   }) {
     final signedCommand = stop ? -command : command;
     final tail = Uint8List.fromList([
       ..._u32be(channel),
       ..._u32be(signedCommand & 0xFFFFFFFF),
+      ..._u32be(speed),
     ]);
     return control(session, commandId: _ptzControlCommandId, bodyTail: tail);
   }
@@ -569,6 +579,12 @@ class HcNetSdkPtz implements PtzClient {
   HcNetSdkClient? _client;
   HcNetSdkSession? _session;
   int? _active;
+  String? _localIp;
+
+  /// Serializes PTZ operations so a START and its matching STOP can never
+  /// interleave, and a slow login can't open a second session that would
+  /// orphan a START (the "hold runs to the limit" bug).
+  Future<void> _chain = Future.value();
 
   @override
   bool get available => _session != null;
@@ -576,11 +592,20 @@ class HcNetSdkPtz implements PtzClient {
   @override
   Future<bool> probe() async {
     if (_session != null) return true;
+    return _login();
+  }
+
+  /// Full login handshake (cached local IP). Called on probe and again before
+  /// each START: EZVIZ rejects PTZ with err=151 after a handful of commands on
+  /// one session — and the live RTSP stream shortens that budget further — so a
+  /// fresh session per press is the only reliable pattern (verified against
+  /// .102: same-session locks after ~12 cmds, fresh-login-per-command never).
+  Future<bool> _login() async {
     try {
       final client = HcNetSdkClient(
         host: host,
         port: port,
-        localIp: localIp ?? await _detectLocalIp(),
+        localIp: _localIp ??= (localIp ?? await _detectLocalIp()),
       );
       // EZVIZ login: `admin` + verification code first, then the reference's
       // fallback local user whose password is the md5 slice of the code.
@@ -603,27 +628,71 @@ class HcNetSdkPtz implements PtzClient {
     }
   }
 
+  /// Queues an op behind the last one so START/STOP are strictly ordered and
+  /// at most one login is ever in flight. The chain keeps its own swallowed
+  /// tail so a throwing op can't wedge the next one.
+  Future<void> _enqueue(Future<void> Function() op) {
+    final result = _chain.then((_) => op());
+    _chain = result.catchError((Object _) {});
+    return result;
+  }
+
   @override
   Future<void> move({double pan = 0, double tilt = 0, double zoom = 0}) async {
-    final session = _session;
-    if (session == null) return;
     final command = _commandFor(pan, tilt, zoom);
     if (command == null) return;
-    // Record the live direction before the round-trip so a release that
-    // lands mid-flight still issues the right stop.
+    // HCNetSDK's START keeps the camera moving until a single STOP — unlike
+    // ONVIF ContinuousMove it has no keep-alive timeout. The pad re-issues
+    // move() every 250 ms, so dedupe: only issue a new START when the
+    // direction actually changes. `_active` is marked synchronously (before
+    // any await) so a re-issue can't open a second session mid-login — that
+    // second session's orphaned START was the "hold runs to the limit" bug.
+    if (_active == command) return;
     _active = command;
-    await _client!
-        .ptzControl(session, command: command, stop: false, channel: channel);
+    await _enqueue(() async {
+      // Superseded by stop()/a new direction while queued or mid-login:
+      // drop the START so the camera never keeps moving unattended.
+      if (_active != command) return;
+      // Fresh session per press (err=151 locks a session after a few cmds).
+      if (!await _login()) {
+        if (_active == command) _active = null;
+        return;
+      }
+      if (_active != command) return;
+      final session = _session;
+      if (session == null) return;
+      try {
+        final resp = await _client!
+            .ptzControl(session, command: command, stop: false, channel: channel);
+        // ignore: avoid_print
+        print('PTZ move cmd=$command ${_ptzVerdict(resp)}');
+      } catch (e) {
+        // ignore: avoid_print
+        print('PTZ move cmd=$command ERROR: $e');
+      }
+    });
   }
 
   @override
   Future<void> stop() async {
-    final session = _session;
+    // Clear the active direction synchronously so any in-flight move()
+    // drops its pending START; the matching STOP is queued behind it.
     final command = _active;
-    if (session == null || command == null) return;
     _active = null;
-    await _client!
-        .ptzControl(session, command: command, stop: true, channel: channel);
+    if (command == null) return;
+    await _enqueue(() async {
+      final session = _session;
+      if (session == null) return;
+      try {
+        final resp = await _client!
+            .ptzControl(session, command: command, stop: true, channel: channel);
+        // ignore: avoid_print
+        print('PTZ stop cmd=$command ${_ptzVerdict(resp)}');
+      } catch (e) {
+        // ignore: avoid_print
+        print('PTZ stop cmd=$command ERROR: $e');
+      }
+    });
   }
 
   /// Map the pad's velocity axes to the single active direction. The pad
@@ -646,6 +715,17 @@ class HcNetSdkPtz implements PtzClient {
     _session = null;
     _active = null;
   }
+}
+
+/// Human-readable accept/reject verdict for a PTZ response header, mirroring
+/// the probe tool's judgement (field_4 == field_8 and > 1 = rejection).
+String _ptzVerdict(Uint8List resp) {
+  if (resp.length < 16) return 'resp ${resp.length}B';
+  final f4 = ByteData.sublistView(resp).getUint32(4, Endian.big);
+  final f8 = ByteData.sublistView(resp).getUint32(8, Endian.big);
+  final accepted = f4 != f8 || f8 <= 1;
+  return 'f4=0x${f4.toRadixString(16)} f8=0x${f8.toRadixString(16)} '
+      '${accepted ? "OK" : "REJECTED(err=$f8)"}';
 }
 
 /// First non-loopback IPv4 interface address, used as the login/control

@@ -46,6 +46,10 @@ class CameraTileSpec {
     required this.label,
     required this.url,
     this.onToggleQuality,
+    this.flipH = false,
+    this.rotationDeg = 0,
+    this.onToggleFlip,
+    this.onSetRotation,
   });
 
   final String id;
@@ -54,6 +58,13 @@ class CameraTileSpec {
 
   /// Main/sub quality chip closure; null hides the chip.
   final VoidCallback? onToggleQuality;
+
+  /// Horizontal mirror / clockwise rotation for the picture (画面翻转和旋转
+  /// 2026-10-20). Built-in synthesized tiles leave these at defaults.
+  final bool flipH;
+  final int rotationDeg;
+  final VoidCallback? onToggleFlip;
+  final ValueChanged<int>? onSetRotation;
 }
 
 /// The camera tiles for one printer, in display order: built-in camera
@@ -84,6 +95,10 @@ List<CameraTileSpec> buildCameraSpecs(WidgetRef ref, PrinterProfile profile) {
       label: c.name,
       url: c.resolveUrl(null) ?? '',
       onToggleQuality: qualityToggler(ref, c),
+      flipH: c.flipH,
+      rotationDeg: c.rotationDeg,
+      onToggleFlip: flipToggler(ref, c),
+      onSetRotation: rotationSetter(ref, c),
     ));
   }
   return specs;
@@ -95,12 +110,30 @@ Widget cameraSectionHeader(
     BuildContext context, WidgetRef ref, PrinterProfile profile) {
   final settings =
       ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
+  final builtinOn = profile.builtinCamDefaultOn(settings.builtinCamDefault);
+  final lan = profile.mode == PrinterMode.lan;
   return Padding(
     padding: const EdgeInsets.only(bottom: 8),
     child: Row(children: [
       const Text('监控画面',
           style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
       const Spacer(),
+      // 机内摄像头快速开关 (反馈 2026-10-20): the slim printer card dropped
+      // its control row, so the switch lives on the camera section header,
+      // shown by both the dashboard and the monitor right pane.
+      Text('机内画面',
+          style: TextStyle(
+              fontSize: 12,
+              color: lan
+                  ? DeckColors.textSecondary
+                  : DeckColors.textSecondary.withValues(alpha: 0.4))),
+      Switch(
+        value: builtinOn,
+        activeThumbColor: DeckColors.running,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        onChanged: lan ? (v) => setBuiltinCam(ref, profile, v) : null,
+      ),
+      const SizedBox(width: 4),
       TextButton.icon(
         onPressed: () => PrinterCameraSection.editBindings(
             context, ref, profile, settings.builtinCamDefault),
@@ -129,7 +162,8 @@ class PrinterCameraSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final profile = ref.watch(printersProvider.notifier).byId(profileId);
+    final profile = ref.watch(printersProvider
+        .select((l) => printerByIdOf(l.valueOrNull, profileId)));
     if (profile == null) return const SizedBox.shrink();
     final settings =
         ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
@@ -169,6 +203,10 @@ class PrinterCameraSection extends ConsumerWidget {
                   streamUrl: spec.url,
                   label: spec.label,
                   onToggleQuality: spec.onToggleQuality,
+                  flipH: spec.flipH,
+                  rotationDeg: spec.rotationDeg,
+                  onToggleFlip: spec.onToggleFlip,
+                  onSetRotation: spec.onSetRotation,
                 ),
               ),
             ),
@@ -483,6 +521,10 @@ class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
               label: spec.label,
               expand: true,
               onToggleQuality: spec.onToggleQuality,
+              flipH: spec.flipH,
+              rotationDeg: spec.rotationDeg,
+              onToggleFlip: spec.onToggleFlip,
+              onSetRotation: spec.onSetRotation,
             ),
           ),
           Positioned(
@@ -510,6 +552,10 @@ class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
             label: spec.label,
             expand: true,
             onToggleQuality: spec.onToggleQuality,
+            flipH: spec.flipH,
+            rotationDeg: spec.rotationDeg,
+            onToggleFlip: spec.onToggleFlip,
+            onSetRotation: spec.onSetRotation,
           ),
         ),
         Positioned(

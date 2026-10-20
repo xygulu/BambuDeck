@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -31,6 +32,18 @@ VoidCallback? qualityToggler(WidgetRef ref, CameraProfile camera) =>
                     : RtspQuality.main));
           };
 
+/// Toggles the owning camera's horizontal mirror (画面翻转 2026-10-20).
+VoidCallback flipToggler(WidgetRef ref, CameraProfile camera) => () {
+      ref.read(camerasProvider.notifier).replace(
+          camera.copyWith(flipH: !camera.flipH));
+    };
+
+/// Sets the owning camera's clockwise rotation (画面旋转 2026-10-20).
+ValueChanged<int> rotationSetter(WidgetRef ref, CameraProfile camera) =>
+    (deg) => ref
+        .read(camerasProvider.notifier)
+        .replace(camera.copyWith(rotationDeg: deg));
+
 /// Live video tile for one stream URL (PRD FR-3). Wraps a media_kit
 /// player with connect/error states and a manual retry; RTSP streams get
 /// low-latency, TCP-forced transport settings. `bmjpeg://` URLs (the
@@ -49,6 +62,10 @@ class CameraTile extends ConsumerStatefulWidget {
     this.showLabel = true,
     this.onToggleQuality,
     this.expand = false,
+    this.flipH = false,
+    this.rotationDeg = 0,
+    this.onToggleFlip,
+    this.onSetRotation,
   });
 
   final String streamUrl;
@@ -63,6 +80,22 @@ class CameraTile extends ConsumerStatefulWidget {
   /// itself stays undistorted (contain), so a wall cell of any shape
   /// just letterboxes (camera-wall zoom uses this).
   final bool expand;
+
+  /// Horizontal mirror for the picture (画面翻转 2026-10-20).
+  final bool flipH;
+
+  /// Clockwise rotation in degrees (0/90/180/270) to right the mount
+  /// (画面旋转 2026-10-20).
+  final int rotationDeg;
+
+  /// Toggles [flipH] on the owning camera; null hides the orientation menu.
+  final VoidCallback? onToggleFlip;
+
+  /// Sets [rotationDeg] to a specific angle; null hides the orientation menu.
+  final ValueChanged<int>? onSetRotation;
+
+  /// Whether the orientation menu is shown (either callback present).
+  bool get _showOrientation => onToggleFlip != null || onSetRotation != null;
 
   @override
   ConsumerState<CameraTile> createState() => _CameraTileState();
@@ -201,13 +234,13 @@ class _CameraTileState extends ConsumerState<CameraTile> {
       if (parsed != null) {
         return ClipRRect(
           borderRadius: BorderRadius.circular(14),
-          child: _box(MjpegTile(
+          child: _box(_orient(MjpegTile(
             host: parsed.host,
             port: parsed.port,
             username: parsed.username,
             password: parsed.password,
             label: widget.showLabel ? widget.label : null,
-          )),
+          ))),
         );
       }
       // Malformed built-in URL: never let it fall through to mpv (it would
@@ -235,12 +268,12 @@ class _CameraTileState extends ConsumerState<CameraTile> {
         child: _box(
           Stack(fit: StackFit.expand, children: [
             if (controller != null && _error == null)
-              Video(
+              _orient(Video(
                   controller: controller,
                   fit: BoxFit.contain,
                   // No built-in overlay controls: monitoring tiles manage
                   // their own chips (quality/PTP/retry).
-                  controls: NoVideoControls)
+                  controls: NoVideoControls))
             else if (_error != null)
               _overlay(
                   const Icon(Icons.videocam_off_outlined,
@@ -286,6 +319,10 @@ class _CameraTileState extends ConsumerState<CameraTile> {
                         false,
                     onToggle: _toggleMute,
                   ),
+                  if (widget._showOrientation) ...[
+                    const SizedBox(width: 6),
+                    _orientationMenu(),
+                  ],
                 ]),
               ),
             if (_error == null)
@@ -333,7 +370,74 @@ class _CameraTileState extends ConsumerState<CameraTile> {
         HcNetSdkPtz(host: u.host, username: user, password: pass),
       ]);
     }
-    return PtzPad(client: _ptz!);
+    return PtzPad(
+      client: _ptz!,
+      flipH: widget.flipH,
+      rotationDeg: widget.rotationDeg,
+    );
+  }
+
+  /// Applies the persisted flip/rotation to the video frame only (the
+  /// overlay chips and PTZ pad stay upright). 90/270° letterbox inside a
+  /// 16:9 tile; the common flip/180° cases fill it exactly.
+  Widget _orient(Widget child) {
+    if (!widget.flipH && widget.rotationDeg == 0) return child;
+    final m = Matrix4.identity();
+    if (widget.flipH) m.scale(-1.0, 1.0, 1.0);
+    if (widget.rotationDeg != 0) {
+      m.rotateZ(widget.rotationDeg * math.pi / 180.0);
+    }
+    return Transform(alignment: Alignment.center, transform: m, child: child);
+  }
+
+  /// Compact popup for 画面翻转/旋转: a horizontal-mirror toggle plus the
+  /// four rotation angles (增加视频画面翻转和旋转功能 2026-10-20).
+  Widget _orientationMenu() {
+    final active = widget.flipH || widget.rotationDeg != 0;
+    return PopupMenuButton<String>(
+      tooltip: '画面翻转 / 旋转',
+      padding: EdgeInsets.zero,
+      icon: Icon(
+        Icons.screen_rotation_alt,
+        size: 16,
+        color: active ? Colors.amber : Colors.white,
+      ),
+      onSelected: (v) {
+        if (v == 'flip') {
+          widget.onToggleFlip?.call();
+        } else {
+          widget.onSetRotation?.call(int.parse(v));
+        }
+      },
+      itemBuilder: (_) => [
+        PopupMenuItem(
+          value: 'flip',
+          child: Row(children: [
+            Icon(
+                widget.flipH
+                    ? Icons.check_box
+                    : Icons.check_box_outline_blank,
+                size: 16),
+            const SizedBox(width: 8),
+            const Text('水平翻转', style: TextStyle(fontSize: 13)),
+          ]),
+        ),
+        for (final deg in const [0, 90, 180, 270])
+          PopupMenuItem(
+            value: '$deg',
+            child: Row(children: [
+              Icon(
+                  widget.rotationDeg == deg
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  size: 16),
+              const SizedBox(width: 8),
+              Text('旋转 ${deg == 0 ? '0°(正常)' : '$deg°'}',
+                  style: const TextStyle(fontSize: 13)),
+            ]),
+          ),
+      ],
+    );
   }
 
   Widget _overlay(Widget indicator, String text) => Center(

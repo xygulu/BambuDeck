@@ -18,7 +18,8 @@ class DashboardPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final profile = ref.watch(printersProvider.notifier).byId(profileId);
+    final profile = ref.watch(printersProvider
+        .select((l) => printerByIdOf(l.valueOrNull, profileId)));
     final conn = ref.watch(connectionProvider(profileId));
     final state = conn.state;
 
@@ -849,7 +850,8 @@ class _TaskCover extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final profile = ref.watch(printersProvider.notifier).byId(profileId);
+    final profile = ref.watch(printersProvider
+        .select((l) => printerByIdOf(l.valueOrNull, profileId)));
     if (profile == null || profile.token.isEmpty) {
       return const SizedBox.shrink();
     }

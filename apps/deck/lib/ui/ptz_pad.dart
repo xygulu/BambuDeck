@@ -10,9 +10,20 @@ import '../data/ptz_client.dart';
 /// held and sends Stop on release, so a dropped packet never leaves the
 /// camera spinning.
 class PtzPad extends StatefulWidget {
-  const PtzPad({super.key, required this.client});
+  const PtzPad({
+    super.key,
+    required this.client,
+    this.flipH = false,
+    this.rotationDeg = 0,
+  });
 
   final PtzClient client;
+
+  /// Horizontal mirror / clockwise rotation applied to the picture; the pad
+  /// re-maps its keys through the inverse so the arrow always moves the view
+  /// the way the (flipped/rotated) image shows it.
+  final bool flipH;
+  final int rotationDeg;
 
   @override
   State<PtzPad> createState() => _PtzPadState();
@@ -61,7 +72,9 @@ class _PtzPadState extends State<PtzPad> {
   }
 
   void _issue(double pan, double tilt) {
-    widget.client.move(pan: pan, tilt: tilt).catchError((Object _) {});
+    final (p, t) = orientPanTilt(
+        flipH: widget.flipH, rotationDeg: widget.rotationDeg, pan: pan, tilt: tilt);
+    widget.client.move(pan: p, tilt: t).catchError((Object _) {});
   }
 
   void _end() {
@@ -80,56 +93,59 @@ class _PtzPadState extends State<PtzPad> {
   @override
   Widget build(BuildContext context) {
     // Always visible so the feature is discoverable; dimmed with an
-    // explanatory tooltip while the camera has no reachable ONVIF service
-    // (用户反馈 2026-10-20: 隐藏了就没人知道有云台).
-    final hint = _available
-        ? '云台 · 长按方向键转动,松开停止'
-        : '云台不可用 - 请确认摄像头支持 ONVIF 或萤石本地服务';
-    return Tooltip(
-      message: hint,
-      child: AnimatedOpacity(
-        opacity: _available ? 1.0 : 0.45,
-        duration: const Duration(milliseconds: 150),
-        child: Container(
-          width: 104,
-          height: 104,
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.4),
-            shape: BoxShape.circle,
-          ),
-          child: Stack(children: [
-            if (_probing)
-              const Center(
-                  child: SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2)))
-            else
-              const Center(
-                  child: Icon(Icons.videocam_rounded,
-                      size: 20, color: Colors.white70)),
-            _btn(Icons.keyboard_arrow_up_rounded, 0, _speed, '上转', top: 2),
-            _btn(Icons.keyboard_arrow_down_rounded, 0, -_speed, '下转',
-                bottom: 2),
-            _btn(Icons.keyboard_arrow_left_rounded, -_speed, 0, '左转', left: 2),
-            _btn(Icons.keyboard_arrow_right_rounded, _speed, 0, '右转', right: 2),
-          ]),
+    // explanatory tooltip only while the camera has no reachable PTZ service
+    // (用户反馈 2026-10-20: 隐藏了就没人知道有云台). The direction keys carry
+    // no tooltip - hovering an arrow must not pop a hint (用户反馈 2026-10-20).
+    final pad = AnimatedOpacity(
+      opacity: _available ? 1.0 : 0.45,
+      duration: const Duration(milliseconds: 150),
+      child: Container(
+        width: 104,
+        height: 104,
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.4),
+          shape: BoxShape.circle,
         ),
+        child: Stack(children: [
+          if (_probing)
+            const Center(
+                child: SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2)))
+          else
+            const Center(
+                child:
+                    Icon(Icons.videocam_rounded, size: 20, color: Colors.white70)),
+          _btn(Icons.keyboard_arrow_up_rounded, 0, _speed, Alignment.topCenter),
+          _btn(Icons.keyboard_arrow_down_rounded, 0, -_speed,
+              Alignment.bottomCenter),
+          _btn(Icons.keyboard_arrow_left_rounded, -_speed, 0,
+              Alignment.centerLeft),
+          _btn(Icons.keyboard_arrow_right_rounded, _speed, 0,
+              Alignment.centerRight),
+        ]),
       ),
+    );
+    if (_available || _probing) return pad;
+    return Tooltip(
+      message: '云台不可用 - 请确认摄像头支持 ONVIF 或萤石本地服务',
+      child: pad,
     );
   }
 
   /// One directional key pinned to an edge of the circular pad; press and
-  /// hold is handled by the Listener (repeating ContinuousMove).
-  Widget _btn(IconData icon, double pan, double tilt, String tip,
-      {double? top, double? bottom, double? left, double? right}) {
+  /// hold is handled by the Listener (repeating ContinuousMove). Each key is
+  /// centred on its edge via [Align]: a bare `Positioned(top: …)` pins only
+  /// one axis and defaults the other to the start edge, which bunched the
+  /// arrows into the corners (箭头位置错乱 2026-10-20).
+  Widget _btn(IconData icon, double pan, double tilt, Alignment alignment) {
     final btn = Listener(
       onPointerDown: (_) => _start(pan, tilt),
       onPointerUp: (_) => _end(),
       onPointerCancel: (_) => _end(),
       child: IconButton(
         icon: Icon(icon, size: 18, color: Colors.white),
-        tooltip: tip,
         onPressed: () {}, // press-and-hold handled by the Listener
         style: IconButton.styleFrom(
           backgroundColor: Colors.black.withValues(alpha: 0.35),
@@ -138,12 +154,9 @@ class _PtzPadState extends State<PtzPad> {
         visualDensity: VisualDensity.compact,
       ),
     );
-    return Positioned(
-      top: top,
-      bottom: bottom,
-      left: left,
-      right: right,
-      child: btn,
+    return Align(
+      alignment: alignment,
+      child: Padding(padding: const EdgeInsets.all(2), child: btn),
     );
   }
 }

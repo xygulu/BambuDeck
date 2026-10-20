@@ -8,6 +8,7 @@ import '../../data/providers.dart';
 import '../../data/rtsp_quality.dart';
 import '../../ui/camera_tile.dart';
 import '../../ui/visible_tile.dart';
+import '../cameras/cameras_page.dart';
 import 'monitor_page.dart';
 
 /// Selected camera on the camera perspective.
@@ -277,6 +278,11 @@ class _CameraPane extends ConsumerWidget {
                   const Text('绑定打印机', style: TextStyle(fontSize: 12)),
             ),
             IconButton(
+              icon: const Icon(Icons.edit_outlined, size: 19),
+              tooltip: '编辑摄像头',
+              onPressed: () => showAddCameraDialog(context, ref, editing: c),
+            ),
+            IconButton(
               icon: const Icon(Icons.delete_outline, size: 20),
               tooltip: '删除摄像头',
               onPressed: () => _confirmRemove(context, ref, c),
@@ -295,6 +301,10 @@ class _CameraPane extends ConsumerWidget {
                         streamUrl: url,
                         showLabel: false,
                         onToggleQuality: qualityToggler(ref, c),
+                        flipH: c.flipH,
+                        rotationDeg: c.rotationDeg,
+                        onToggleFlip: flipToggler(ref, c),
+                        onSetRotation: rotationSetter(ref, c),
                       ),
                     )
                   : _unavailableBox(c, url),
@@ -466,6 +476,10 @@ class _CameraGridCard extends ConsumerWidget {
                       streamUrl: url,
                       showLabel: true,
                       onToggleQuality: qualityToggler(ref, c),
+                      flipH: c.flipH,
+                      rotationDeg: c.rotationDeg,
+                      onToggleFlip: flipToggler(ref, c),
+                      onSetRotation: rotationSetter(ref, c),
                     ),
                   )
                 : Container(
@@ -504,6 +518,11 @@ class _CameraGridCard extends ConsumerWidget {
                 icon: const Icon(Icons.tune, size: 18),
                 tooltip: '绑定打印机',
                 onPressed: () => bindPrintersDialog(context, ref, c),
+              ),
+              IconButton(
+                icon: const Icon(Icons.edit_outlined, size: 18),
+                tooltip: '编辑摄像头',
+                onPressed: () => showAddCameraDialog(context, ref, editing: c),
               ),
               IconButton(
                 icon: const Icon(Icons.delete_outline, size: 18),

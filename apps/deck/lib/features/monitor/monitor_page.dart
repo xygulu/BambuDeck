@@ -107,8 +107,9 @@ class _MonitorPageState extends ConsumerState<MonitorPage> {
   }
 }
 
-/// Left rail: compact card per printer with its top-line controls
-/// (暂停/恢复 + 机内摄像头画面开关, 优化需求 0/4).
+/// Left rail: slim glance card per printer (name + badge + task line +
+/// progress). Controls live in the right pane: 暂停/恢复/停止 in the status
+/// card, 机内画面开关 on the camera section header.
 class _PrinterList extends ConsumerWidget {
   const _PrinterList({
     required this.printers,
@@ -169,7 +170,8 @@ class _PrinterPane extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final profile = ref.watch(printersProvider.notifier).byId(profileId);
+    final profile = ref.watch(printersProvider
+        .select((l) => printerByIdOf(l.valueOrNull, profileId)));
     if (profile == null) {
       return const Center(child: Text('打印机不存在'));
     }

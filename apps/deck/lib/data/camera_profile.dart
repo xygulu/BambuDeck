@@ -40,6 +40,8 @@ class CameraProfile {
     this.printerIds = const [],
     this.enabled = true,
     this.quality = RtspQuality.main,
+    this.flipH = false,
+    this.rotationDeg = 0,
   });
 
   final String id;
@@ -58,12 +60,22 @@ class CameraProfile {
   /// Main vs sub stream preference for RTSP sources.
   final RtspQuality quality;
 
+  /// Horizontal mirror (left-right flip) for a camera mounted so its
+  /// picture comes out mirrored (画面翻转 2026-10-20).
+  final bool flipH;
+
+  /// Clockwise rotation in degrees to right a sideways/upside-down mount:
+  /// one of 0 / 90 / 180 / 270 (画面旋转 2026-10-20).
+  final int rotationDeg;
+
   CameraProfile copyWith({
     String? name,
     String? url,
     List<String>? printerIds,
     bool? enabled,
     RtspQuality? quality,
+    bool? flipH,
+    int? rotationDeg,
   }) =>
       CameraProfile(
         id: id,
@@ -73,6 +85,8 @@ class CameraProfile {
         printerIds: printerIds ?? this.printerIds,
         enabled: enabled ?? this.enabled,
         quality: quality ?? this.quality,
+        flipH: flipH ?? this.flipH,
+        rotationDeg: rotationDeg ?? this.rotationDeg,
       );
 
   /// Playback URL, resolving the bambu type against the printer profile
@@ -119,6 +133,8 @@ class CameraProfile {
         'printerId': printerIds.isEmpty ? '' : printerIds.first,
         'enabled': enabled,
         'quality': quality.name,
+        'flipH': flipH,
+        'rotationDeg': rotationDeg,
       };
 
   factory CameraProfile.fromJson(Map<String, dynamic> j) {
@@ -138,6 +154,8 @@ class CameraProfile {
       printerIds: ids.toSet().toList(),
       enabled: j['enabled'] as bool? ?? true,
       quality: rtspQualityFromName(j['quality'] as String?),
+      flipH: j['flipH'] as bool? ?? false,
+      rotationDeg: j['rotationDeg'] as int? ?? 0,
     );
   }
 }

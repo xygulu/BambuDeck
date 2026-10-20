@@ -120,6 +120,20 @@ final printersProvider =
     AsyncNotifierProvider<PrintersNotifier, List<PrinterProfile>>(
         PrintersNotifier.new);
 
+/// Reactive single-printer lookup: watches the list and returns the profile
+/// with [id], or null while the list is loading / once it is removed. Widgets
+/// must use this (via `printersProvider.select`) instead of
+/// `printersProvider.notifier.byId(id)` - the notifier listenable does not
+/// rebuild on list changes, so a cosmetic edit (机内画面 toggle) would leave
+/// the switch and camera tiles stale.
+PrinterProfile? printerByIdOf(List<PrinterProfile>? list, String id) {
+  if (list == null) return null;
+  for (final p in list) {
+    if (p.id == id) return p;
+  }
+  return null;
+}
+
 /// Live connection state for one printer (keyed by profile id).
 class PrinterConnection {
   const PrinterConnection({
@@ -154,6 +168,19 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
   StreamSubscription<BambuState>? _stateSub;
   StreamSubscription<BambuConnStatus>? _statusSub;
 
+  /// Last connection key we wired up; cosmetic edits (name / builtinCam /
+  /// model) change the profile object identity and re-run [build], but only
+  /// a key change tears down the live link and reconnects.
+  (String, String, String, String, CloudRegion, String, String)? _lastConnKey;
+
+  /// Latest connection state, mirrored in a field so [build] can return it
+  /// on a no-op rebuild. Riverpod forbids reading `state` inside [build]
+  /// (it is uninitialized there), so the cosmetic-edit path must not
+  /// `return state` - that threw "Tried to read the state of an
+  /// uninitialized provider" and red-screened the app (机内画面 2026-10-20).
+  PrinterConnection _current =
+      const PrinterConnection(status: BambuConnStatus.disconnected);
+
   @override
   PrinterConnection build(String arg) {
     final profile = ref.watch(printersProvider
@@ -162,26 +189,37 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
     // Profile gone (removed / still loading): idle.
     if (profile == null) {
       _teardown();
-      return const PrinterConnection(status: BambuConnStatus.disconnected);
+      _lastConnKey = null;
+      _current = const PrinterConnection(status: BambuConnStatus.disconnected);
+      return _current;
     }
 
-    // Rebuild fires whenever the profile changes -> fresh connection.
+    ref.onDispose(_teardown);
+
+    // Only connection-relevant fields reconnect. A cosmetic edit must NOT
+    // rebuild the page (toggling 机内画面 was reconnecting the whole MQTT
+    // link and refreshing the monitor - 反馈 2026-10-20).
+    if (profile.connectionKey == _lastConnKey) {
+      return _current;
+    }
+    _lastConnKey = profile.connectionKey;
     _teardown();
     _connect(profile);
-
-    ref.onDispose(_teardown);
-    return const PrinterConnection(status: BambuConnStatus.connecting);
+    _current = const PrinterConnection(status: BambuConnStatus.connecting);
+    return _current;
   }
 
   Future<void> _connect(PrinterProfile profile) async {
     final link = ref.read(printerLinkFactoryProvider)(profile);
     _link = link;
     _statusSub = link.status.listen((s) {
-      state = state.copyWith(status: s);
+      _current = _current.copyWith(status: s);
+      state = _current;
     });
     _stateSub = link.states.listen((s) {
-      final prev = state.state;
-      state = state.copyWith(state: s, lastError: null);
+      final prev = _current.state;
+      _current = _current.copyWith(state: s, lastError: null);
+      state = _current;
       printEvents.observe(profile, prev, s);
     });
     await link.connect();

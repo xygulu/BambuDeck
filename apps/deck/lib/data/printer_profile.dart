@@ -49,6 +49,14 @@ class PrinterProfile {
 
   String get modeLabel => mode == PrinterMode.lan ? '局域网' : '云端';
 
+  /// Value-comparable key of the fields that actually decide the MQTT
+  /// connection. [ConnectionNotifier] reconnects only when this changes, so
+  /// cosmetic edits (name / builtinCam / model) don't tear down the live
+  /// link and blank the monitoring page.
+  (String, String, String, String, CloudRegion, String, String)
+      get connectionKey =>
+          (mode.name, serial, ip, accessCode, region, token, userId);
+
   /// Effective default-load decision given the global switch.
   bool builtinCamDefaultOn(bool globalDefault) => switch (builtinCam) {
         BuiltinCamSetting.on => true,

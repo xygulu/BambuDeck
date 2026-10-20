@@ -51,7 +51,7 @@ class SettingsPage extends ConsumerWidget {
         SwitchListTile(
           title: const Text('机内摄像头默认开启'),
           subtitle: const Text('点击打印机后自动加载机内画面;'
-              '每台打印机可在卡片开关或「绑定与默认设置」里单独覆盖',
+              '每台打印机可在监控画面的「机内画面」开关或「绑定摄像头」里单独覆盖',
               style: TextStyle(fontSize: 12)),
           value: settings.builtinCamDefault,
           onChanged: (v) =>
