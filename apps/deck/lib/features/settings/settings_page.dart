@@ -47,6 +47,17 @@ class SettingsPage extends ConsumerWidget {
               notifier.set(settings.copyWith(notifyOnError: v)),
         ),
         const SizedBox(height: 18),
+        _sectionLabel('摄像头'),
+        SwitchListTile(
+          title: const Text('机内摄像头默认开启'),
+          subtitle: const Text('点击打印机后自动加载机内画面;'
+              '每台打印机可在卡片开关或「绑定与默认设置」里单独覆盖',
+              style: TextStyle(fontSize: 12)),
+          value: settings.builtinCamDefault,
+          onChanged: (v) =>
+              notifier.set(settings.copyWith(builtinCamDefault: v)),
+        ),
+        const SizedBox(height: 18),
         _sectionLabel('运行日志'),
         ListTile(
           leading: const Icon(Icons.article_outlined),

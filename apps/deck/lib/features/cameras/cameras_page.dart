@@ -102,7 +102,7 @@ class _CameraCardState extends ConsumerState<_CameraCard> {
     final camera = widget.camera;
     PrinterProfile? linked;
     for (final p in widget.printers) {
-      if (p.id == camera.printerId) linked = p;
+      if (camera.printerIds.contains(p.id)) linked = p;
     }
     final url = camera.resolveUrl(linked);
 
@@ -120,7 +120,8 @@ class _CameraCardState extends ConsumerState<_CameraCard> {
             Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Expanded(
             child: url != null && camera.enabled && _visible
-                ? CameraTile(streamUrl: url, label: camera.name)
+                ? CameraTile(streamUrl: url, label: camera.name,
+                    onToggleQuality: qualityToggler(ref, camera))
                 : Container(
                     color: Colors.black,
                     alignment: Alignment.center,
@@ -443,7 +444,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
     name: name,
     sourceType: type,
     url: type == CameraSourceType.rtsp ? urlCtrl.text.trim() : '',
-    printerId: linked?.id ?? '',
+    printerIds: linked?.id == null ? const [] : [linked!.id],
   );
   await ref.read(camerasProvider.notifier).add(camera);
 }
