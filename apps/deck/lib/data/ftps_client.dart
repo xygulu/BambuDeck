@@ -112,12 +112,12 @@ class FtpsClient {
   Future<FtpReply> _command(String cmd, {Duration? timeout}) async {
     final sock = _control;
     if (sock == null) throw FtpsException('control socket not open');
-    _logLine('> $cmd');
+    _logLine('> ${cmd.startsWith('PASS ') ? 'PASS ***' : cmd}');
     sock.add(utf8.encode('$cmd\r\n'));
     try {
       return await _waitForReply(timeout: timeout);
     } on TimeoutException {
-      throw FtpsException('$cmd 超时(打印机无响应)');
+      throw FtpsException('${cmd.startsWith('PASS ') ? 'PASS' : cmd} 超时(打印机无响应)');
     }
   }
 
@@ -150,8 +150,15 @@ class FtpsClient {
     if (greeting.code != 220) {
       throw FtpsException('FTP 欢迎语异常: ${greeting.code}');
     }
-    await _expect('USER $username');
-    await _expect('PASS $password');
+    // RFC 959 login dance: USER answers 230 (no password wanted) or 331
+    // (user ok, send PASS) - 331 is the normal path for Bambu's bblp, not a
+    // rejection, so it must not go through the 2xx-only _expect.
+    final user = await _command('USER $username');
+    if (user.code == 331) {
+      await _expect('PASS $password');
+    } else if (!user.isPositiveCompletion) {
+      throw FtpsException('FTP 登录被拒绝: ${user.code} ${user.text}');
+    }
     await _expect('TYPE I');
     await _expect('PBSZ 0');
     await _expect('PROT P');
