@@ -10,6 +10,17 @@ import '../../ui/widgets.dart';
 import '../dashboard/dashboard_page.dart';
 import '../dashboard/printer_camera_section.dart';
 
+/// Which primary view the monitoring shell shows.
+enum MonitorPerspective { printers, cameras }
+
+/// Shell-level perspective switch (打印机视角 / 摄像头视角).
+final monitorPerspectiveProvider =
+    StateProvider<MonitorPerspective>((_) => MonitorPerspective.printers);
+
+/// Selected printer on the printer perspective. Shared so the camera
+/// perspective's bound-printer cards can jump straight here.
+final monitorSelectedPrinterProvider = StateProvider<String?>((_) => null);
+
 /// Single monitoring screen (FR-1, 优化需求 1): printer cards down the
 /// left, the selected printer's cameras + dashboard + controls on the
 /// right. Narrow windows fall back to the card grid with a pushed
@@ -25,14 +36,13 @@ class MonitorPage extends ConsumerStatefulWidget {
 }
 
 class _MonitorPageState extends ConsumerState<MonitorPage> {
-  String? _selectedId;
-
   static const _listWidth = 330.0;
   static const _paneMinWidth = 900.0;
 
   @override
   Widget build(BuildContext context) {
     final printers = ref.watch(printersProvider);
+    final rawSelected = ref.watch(monitorSelectedPrinterProvider);
 
     return printers.when(
       loading: () => const Center(child: CircularProgressIndicator()),
@@ -45,10 +55,10 @@ class _MonitorPageState extends ConsumerState<MonitorPage> {
         }
         // Selection heals itself: a deleted printer falls back to the
         // first one so the right pane never goes blank on purpose.
-        if (_selectedId == null ||
-            !list.any((p) => p.id == _selectedId)) {
-          _selectedId = list.first.id;
-        }
+        final selectedId =
+            rawSelected != null && list.any((p) => p.id == rawSelected)
+                ? rawSelected
+                : list.first.id;
         return LayoutBuilder(builder: (context, constraints) {
           final wide = constraints.maxWidth >= _paneMinWidth;
           if (wide) {
@@ -59,14 +69,16 @@ class _MonitorPageState extends ConsumerState<MonitorPage> {
                   width: _listWidth,
                   child: _PrinterList(
                     printers: list,
-                    selectedId: _selectedId!,
+                    selectedId: selectedId,
                     onAdd: widget.onAddPrinter,
-                    onSelect: (id) => setState(() => _selectedId = id),
+                    onSelect: (id) => ref
+                        .read(monitorSelectedPrinterProvider.notifier)
+                        .state = id,
                   ),
                 ),
                 const VerticalDivider(width: 1, thickness: 1),
                 Expanded(
-                  child: _PrinterPane(profileId: _selectedId!),
+                  child: _PrinterPane(profileId: selectedId),
                 ),
               ],
             );
@@ -83,7 +95,7 @@ class _MonitorPageState extends ConsumerState<MonitorPage> {
               for (final p in list)
                 MonitorPrinterCard(
                   profile: p,
-                  selected: p.id == _selectedId,
+                  selected: p.id == selectedId,
                   onTap: () => Navigator.of(context).push(MaterialPageRoute(
                     builder: (_) => DashboardPage(profileId: p.id),
                   )),
@@ -148,8 +160,9 @@ class _PrinterList extends ConsumerWidget {
   }
 }
 
-/// Right pane: selected printer's name + delete, then the same dashboard
-/// body the pushed route shows - camera section on top, state, controls.
+/// Right pane: selected printer's name + delete, then the compact
+/// dashboard body - slim status bar up top, cameras get the space below
+/// (优化需求 3).
 class _PrinterPane extends ConsumerWidget {
   const _PrinterPane({required this.profileId});
 
@@ -185,6 +198,7 @@ class _PrinterPane extends ConsumerWidget {
             profileId: profileId,
             conn: conn,
             state: conn.state,
+            compact: true,
           ),
         ),
       ],
@@ -239,7 +253,9 @@ class MonitorPrinterCard extends ConsumerWidget {
     final state = conn.state;
     final settings =
         ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
-    final builtinOn = ref.watch(builtinCamManualProvider(profile.id)) ??
+    // Effective built-in camera choice; the switch writes the persisted
+    // per-printer tri-state so it stays in sync with the binding dialog.
+    final builtinOn =
         profile.builtinCamDefaultOn(settings.builtinCamDefault);
     final canPause = conn.live &&
         state != null &&
@@ -368,9 +384,7 @@ class MonitorPrinterCard extends ConsumerWidget {
                       title: const Text('机内画面',
                           style: TextStyle(fontSize: 12)),
                       value: builtinOn,
-                      onChanged: (v) => ref
-                          .read(builtinCamManualProvider(profile.id).notifier)
-                          .state = v,
+                      onChanged: (v) => setBuiltinCam(ref, profile, v),
                     ),
                   ),
               ]),

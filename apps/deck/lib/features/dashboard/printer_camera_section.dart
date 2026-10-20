@@ -1,7 +1,6 @@
 import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:visibility_detector/visibility_detector.dart';
 
 import '../../core/theme.dart';
 import '../../data/app_settings.dart';
@@ -9,14 +8,24 @@ import '../../data/camera_profile.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 import '../../ui/camera_tile.dart';
+import '../../ui/visible_tile.dart';
 import '../cameras/cameras_page.dart';
 
-/// Session-scoped manual override of the built-in camera picture: null
-/// follows the per-printer tri-state + global default; true/false is what
-/// the card switch or the 打开机内摄像头 button last chose (not persisted -
-/// the persisted preference is the tri-state in the binding dialog).
-final builtinCamManualProvider =
-    StateProvider.family<bool?, String>((ref, id) => null);
+/// Single source of truth for the built-in camera default-load choice of
+/// one printer: the persisted per-printer tri-state. The card switch, the
+/// 打开机内摄像头 button and the binding dialog all read/write this, so
+/// they can never drift apart (反馈 2026-10-20).
+Future<void> setBuiltinCam(WidgetRef ref, PrinterProfile profile, bool on) async {
+  final printers = ref.read(printersProvider).valueOrNull ?? const [];
+  await ref.read(printersProvider.notifier).replaceAll([
+    for (final p in printers)
+      p.id == profile.id
+          ? p.copyWith(
+              builtinCam:
+                  on ? BuiltinCamSetting.on : BuiltinCamSetting.off)
+          : p,
+  ]);
+}
 
 /// Camera area for one printer (FR-4 组合画面 + 机内摄像头默认开关):
 /// the built-in camera per the effective policy, then every RTSP camera
@@ -35,9 +44,8 @@ class PrinterCameraSection extends ConsumerWidget {
     final settings = ref.watch(appSettingsProvider).valueOrNull ??
         const AppSettings();
     final cameras = ref.watch(camerasProvider).valueOrNull ?? const [];
-    final manual = ref.watch(builtinCamManualProvider(profileId));
     final builtinOn =
-        manual ?? profile.builtinCamDefaultOn(settings.builtinCamDefault);
+        profile.builtinCamDefaultOn(settings.builtinCamDefault);
     final bound = cameras
         .where((c) =>
             c.sourceType == CameraSourceType.rtsp &&
@@ -55,16 +63,19 @@ class PrinterCameraSection extends ConsumerWidget {
             const Text('监控画面',
                 style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
             const Spacer(),
-            IconButton(
-              icon: const Icon(Icons.tune, size: 20),
-              tooltip: '绑定与默认设置',
+            TextButton.icon(
               onPressed: () =>
                   _editBindings(context, ref, profile, settings.builtinCamDefault),
+              icon: const Icon(Icons.tune, size: 16),
+              label: const Text('绑定摄像头',
+                  style: TextStyle(fontSize: 12)),
             ),
-            IconButton(
-              icon: const Icon(Icons.video_call, size: 20),
-              tooltip: '添加摄像头',
+            const SizedBox(width: 4),
+            TextButton.icon(
               onPressed: () => showAddCameraDialog(context, ref),
+              icon: const Icon(Icons.video_call, size: 16),
+              label: const Text('添加摄像头',
+                  style: TextStyle(fontSize: 12)),
             ),
           ]),
         ),
@@ -82,8 +93,9 @@ class PrinterCameraSection extends ConsumerWidget {
           if (builtinOn && profile.mode == PrinterMode.lan)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: _LiveTile(
-                cameraId: '$profileId-builtin',
+              child: VisibleOnlyTile(
+                key: ValueKey('$profileId-builtin'),
+                streamId: '$profileId-builtin',
                 child: CameraTile(
                   streamUrl: _builtinUrl(profile),
                   label: '机内摄像头',
@@ -94,16 +106,15 @@ class PrinterCameraSection extends ConsumerWidget {
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: _OpenBuiltinTile(
-                onOpen: () => ref
-                    .read(builtinCamManualProvider(profileId).notifier)
-                    .state = true,
+                onOpen: () => setBuiltinCam(ref, profile, true),
               ),
             ),
           for (final c in bound)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: _LiveTile(
-                cameraId: c.id,
+              child: VisibleOnlyTile(
+                key: ValueKey(c.id),
+                streamId: c.id,
                 child: CameraTile(
                   streamUrl: c.resolveUrl(null) ?? '',
                   label: c.name,
@@ -221,7 +232,8 @@ class PrinterCameraSection extends ConsumerWidget {
     );
     if (ok != true) return;
 
-    // Persist the tri-state and the RTSP bindings.
+    // Persist the tri-state and the RTSP bindings (the card switch reads
+    // the same field, so both stay in sync).
     final printers = ref.read(printersProvider).valueOrNull ?? const [];
     await ref.read(printersProvider.notifier).replaceAll([
       for (final p in printers)
@@ -238,50 +250,6 @@ class PrinterCameraSection extends ConsumerWidget {
                 : c.printerIds.where((id) => id != profile.id).toList(),
           ));
     }
-    // A saved tri-state supersedes the session toggle.
-    ref.invalidate(builtinCamManualProvider(profileId));
-  }
-}
-
-/// Mounts the tile only while visible (NFR-3): scrolled-out streams stop
-/// pulling; a placeholder says why the picture went away.
-class _LiveTile extends StatefulWidget {
-  const _LiveTile({required this.cameraId, required this.child});
-
-  final String cameraId;
-  final Widget child;
-
-  @override
-  State<_LiveTile> createState() => _LiveTileState();
-}
-
-class _LiveTileState extends State<_LiveTile> {
-  bool _visible = true;
-
-  @override
-  Widget build(BuildContext context) {
-    return VisibilityDetector(
-      key: Key('sec-${widget.cameraId}'),
-      onVisibilityChanged: (info) {
-        final visible = info.visibleFraction > 0.05;
-        if (mounted && visible != _visible) {
-          setState(() => _visible = visible);
-        }
-      },
-      child: _visible
-          ? widget.child
-          : ClipRRect(
-              borderRadius: BorderRadius.circular(14),
-              child: Container(
-                color: Colors.black,
-                height: 120,
-                alignment: Alignment.center,
-                child: const Text('画面已在后台暂停',
-                    style: TextStyle(
-                        fontSize: 13, color: DeckColors.textSecondary)),
-              ),
-            ),
-    );
   }
 }
 
