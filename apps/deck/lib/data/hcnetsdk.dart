@@ -605,7 +605,7 @@ class HcNetSdkPtz implements PtzClient {
       final client = HcNetSdkClient(
         host: host,
         port: port,
-        localIp: _localIp ??= (localIp ?? await _detectLocalIp()),
+        localIp: _localIp ??= (localIp ?? await detectLocalIpv4()),
       );
       // EZVIZ login: `admin` + verification code first, then the reference's
       // fallback local user whose password is the md5 slice of the code.
@@ -729,8 +729,9 @@ String _ptzVerdict(Uint8List resp) {
 }
 
 /// First non-loopback IPv4 interface address, used as the login/control
-/// "local IP word" when the caller doesn't supply one.
-Future<String> _detectLocalIp() async {
+/// "local IP word" when the caller doesn't supply one. Also public: the
+/// EZVIZ cloud-import flow derives the default LAN prefix from it.
+Future<String> detectLocalIpv4() async {
   for (final itf
       in await NetworkInterface.list(type: InternetAddressType.IPv4)) {
     for (final a in itf.addresses) {

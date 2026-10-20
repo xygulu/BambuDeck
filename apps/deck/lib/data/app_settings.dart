@@ -31,6 +31,8 @@ class AppSettings {
     this.kioskRotateSec = 15,
     this.builtinCamDefault = true,
     this.cameraMuted = false,
+    this.ezvizAppKey = '',
+    this.ezvizAppSecret = '',
   });
 
   final bool notifyOnFinish;
@@ -46,6 +48,13 @@ class AppSettings {
   /// same field, so the choice survives restarts (反馈 2026-10-20).
   final bool cameraMuted;
 
+  /// EZVIZ open-platform credentials (萤石云端导入 2026-10-20): the AppKey/
+  /// AppSecret pair from open.ys7.com, persisted with the rest of the
+  /// settings in the OS secure store. The accessToken is fetched on demand
+  /// and never stored - it expires in 7 days anyway.
+  final String ezvizAppKey;
+  final String ezvizAppSecret;
+
   AppSettings copyWith({
     bool? notifyOnFinish,
     bool? notifyOnError,
@@ -53,6 +62,8 @@ class AppSettings {
     int? kioskRotateSec,
     bool? builtinCamDefault,
     bool? cameraMuted,
+    String? ezvizAppKey,
+    String? ezvizAppSecret,
   }) =>
       AppSettings(
         notifyOnFinish: notifyOnFinish ?? this.notifyOnFinish,
@@ -61,6 +72,8 @@ class AppSettings {
         kioskRotateSec: kioskRotateSec ?? this.kioskRotateSec,
         builtinCamDefault: builtinCamDefault ?? this.builtinCamDefault,
         cameraMuted: cameraMuted ?? this.cameraMuted,
+        ezvizAppKey: ezvizAppKey ?? this.ezvizAppKey,
+        ezvizAppSecret: ezvizAppSecret ?? this.ezvizAppSecret,
       );
 
   Map<String, dynamic> toJson() => {
@@ -70,6 +83,8 @@ class AppSettings {
         'kioskRotateSec': kioskRotateSec,
         'builtinCamDefault': builtinCamDefault,
         'cameraMuted': cameraMuted,
+        'ezvizAppKey': ezvizAppKey,
+        'ezvizAppSecret': ezvizAppSecret,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -80,6 +95,8 @@ class AppSettings {
         kioskRotateSec: j['kioskRotateSec'] as int? ?? 15,
         builtinCamDefault: j['builtinCamDefault'] as bool? ?? true,
         cameraMuted: j['cameraMuted'] as bool? ?? false,
+        ezvizAppKey: j['ezvizAppKey'] as String? ?? '',
+        ezvizAppSecret: j['ezvizAppSecret'] as String? ?? '',
       );
 }
 

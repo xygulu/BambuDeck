@@ -9,6 +9,7 @@ import '../../data/rtsp_quality.dart';
 import '../../ui/camera_tile.dart';
 import '../../ui/visible_tile.dart';
 import '../cameras/cameras_page.dart';
+import '../cameras/ezviz_import_sheet.dart';
 import 'monitor_page.dart';
 
 /// Selected camera on the camera perspective.
@@ -117,6 +118,11 @@ class _CameraList extends ConsumerWidget {
                 style: const TextStyle(
                     fontSize: 14, fontWeight: FontWeight.w700)),
             const Spacer(),
+            IconButton(
+              icon: const Icon(Icons.cloud_download_outlined, size: 20),
+              tooltip: '萤石云端导入',
+              onPressed: () => showEzvizImportSheet(context, ref),
+            ),
             IconButton(
               icon: const Icon(Icons.add, size: 20),
               tooltip: '添加摄像头',
