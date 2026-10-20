@@ -110,7 +110,9 @@ class _CameraCardState extends ConsumerState<_CameraCard> {
       key: Key('cam-${camera.id}'),
       onVisibilityChanged: (info) {
         final visible = info.visibleFraction > 0.05;
-        if (visible != _visible) setState(() => _visible = visible);
+        if (mounted && visible != _visible) {
+          setState(() => _visible = visible);
+        }
       },
       child: Card(
         clipBehavior: Clip.antiAlias,

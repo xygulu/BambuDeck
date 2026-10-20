@@ -53,6 +53,17 @@ class _CameraTileState extends State<CameraTile> {
   }
 
   Future<void> _open(String url) async {
+    // Log the (credential-masked) source so stream failures in the log
+    // name the exact URL that failed.
+    LogBuffer.instance.add('[${widget.label}] 打开视频源: '
+        '${_maskCredentials(url)}');
+    // bmjpeg:// is served by MjpegTile in build() - no mpv player here.
+    // Handing the scheme to media_kit would just spew playlist errors.
+    if (url.startsWith('bmjpeg://')) {
+      await _teardown();
+      if (mounted) setState(() => _error = null);
+      return;
+    }
     setState(() => _error = null);
     await _teardown();
 
@@ -126,6 +137,21 @@ class _CameraTileState extends State<CameraTile> {
           ),
         );
       }
+      // Malformed built-in URL: never let it fall through to mpv (it would
+      // come back as a baffling playlist error).
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          color: Colors.black,
+          child: AspectRatio(
+            aspectRatio: widget.aspectRatio,
+            child: _overlay(
+                const Icon(Icons.videocam_off_outlined,
+                    size: 34, color: DeckColors.error),
+                '打印机摄像头地址无效'),
+          ),
+        ),
+      );
     }
     final controller = _controller;
     return ClipRRect(
@@ -190,4 +216,9 @@ class _CameraTileState extends State<CameraTile> {
           ),
         ]),
       );
+
+  /// `rtsp://user:secret@host` → `rtsp://user:***@host`.
+  static String _maskCredentials(String url) =>
+      url.replaceAllMapped(RegExp(r'(://[^:@/]+:)[^@/]+(@)'),
+          (m) => '${m.group(1)}***${m.group(2)}');
 }

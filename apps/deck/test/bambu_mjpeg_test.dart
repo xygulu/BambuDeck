@@ -6,6 +6,30 @@ import 'package:deck/data/camera_profile.dart';
 import 'package:deck/data/printer_profile.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+Uint8List _frame(int n, {bool jpeg = true}) {
+  final b = BytesBuilder();
+  final head = ByteData(16)
+    ..setUint32(0, n, Endian.little)
+    ..setUint32(4, 0, Endian.little)
+    ..setUint32(8, 1, Endian.little)
+    ..setUint32(12, 0, Endian.little);
+  b.add(head.buffer.asUint8List());
+  if (jpeg) {
+    b.add([0xFF, 0xD8, ...List.filled(n - 4, 0x11), 0xFF, 0xD9]);
+  } else {
+    b.add(List.filled(n, 0x00));
+  }
+  return b.takeBytes();
+}
+
+void _expectFrame(Uint8List f, int size) {
+  expect(f.length, size);
+  expect(f[0], 0xFF);
+  expect(f[1], 0xD8);
+  expect(f[f.length - 2], 0xFF);
+  expect(f[f.length - 1], 0xD9);
+}
+
 void main() {
   test('auth packet: 80 bytes, LE header, NUL-padded credentials', () {
     final p = buildMjpegAuthPacket('bblp', 'ABC12345');
@@ -82,5 +106,73 @@ void main() {
           serial: 'SN',
         )),
         isNull);
+  });
+
+  test('legacy rtsp://bblp url pointing at the linked printer heals', () {
+    final linked = PrinterProfile(
+      id: 'p',
+      name: 'A1',
+      mode: PrinterMode.lan,
+      serial: 'SN',
+      ip: '192.168.100.110',
+      accessCode: 'secret',
+      model: 'A1',
+    );
+    // M2 stored built-in cameras with this exact shape.
+    final legacy = CameraProfile(
+      id: 'c',
+      name: '机内',
+      sourceType: CameraSourceType.rtsp,
+      url: 'rtsp://bblp:stale@192.168.100.110/stream_live',
+      printerId: 'p',
+    );
+    expect(legacy.resolveUrl(linked), 'bmjpeg://bblp:secret@192.168.100.110');
+    // The same shape against a different host stays untouched.
+    final other = CameraProfile(
+      id: 'c2',
+      name: '外部',
+      sourceType: CameraSourceType.rtsp,
+      url: 'rtsp://admin:x@192.168.100.102:554/h264/ch1/main/av_stream',
+    );
+    expect(other.resolveUrl(linked),
+        'rtsp://admin:x@192.168.100.102:554/h264/ch1/main/av_stream');
+  });
+
+  test('framer: two frames in one chunk both parse (header reset bug)', () {
+    final framer = MjpegFramer();
+    final frames = framer.add([..._frame(100), ..._frame(120)]);
+    expect(frames.length, 2);
+    _expectFrame(frames[0], 100);
+    _expectFrame(frames[1], 120);
+  });
+
+  test('framer: frames split at every byte boundary still parse', () {
+    final wire = [..._frame(50), ..._frame(70), ..._frame(60)];
+    for (var cut = 1; cut < wire.length - 1; cut += 7) {
+      final framer = MjpegFramer();
+      final frames = [
+        ...framer.add(wire.sublist(0, cut)),
+        ...framer.add(wire.sublist(cut)),
+      ];
+      expect(frames.length, 3, reason: 'cut at $cut');
+      _expectFrame(frames[0], 50);
+      _expectFrame(frames[1], 70);
+      _expectFrame(frames[2], 60);
+    }
+  });
+
+  test('framer: non-JPEG payloads are dropped, framing survives', () {
+    final framer = MjpegFramer();
+    final frames = framer.add([..._frame(40, jpeg: false), ..._frame(80)]);
+    expect(frames.length, 1);
+    _expectFrame(frames[0], 80);
+  });
+
+  test('framer: bogus size does not crash or emit', () {
+    final framer = MjpegFramer();
+    final bogus = Uint8List(16)
+      ..buffer.asByteData().setUint32(0, 5 << 20, Endian.little);
+    expect(framer.add(bogus), isEmpty);
+    expect(framer.add([..._frame(30)]).length, 1);
   });
 }

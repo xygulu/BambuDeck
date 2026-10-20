@@ -50,17 +50,36 @@ class CameraProfile {
 
   /// Playback URL, resolving the bambu type against the printer profile
   /// and its model's camera transport. Returns null when a bambu camera
-  /// has no (usable) linked printer.
-  String? resolveUrl(PrinterProfile? linked) => switch (sourceType) {
-        CameraSourceType.rtsp => url.isEmpty ? null : url,
-        CameraSourceType.bambu =>
-          linked == null || linked.mode != PrinterMode.lan || linked.ip.isEmpty
-              ? null
-              : cameraSchemeForModel(linked.model) == BambuCameraScheme.rtsps
-                  ? 'rtsps://bblp:${linked.accessCode}'
-                      '@${linked.ip}:322/streaming/live/1'
-                  : 'bmjpeg://bblp:${linked.accessCode}@${linked.ip}',
-      };
+  /// has no (usable) linked printer. Legacy M2 entries stored built-in
+  /// cameras as `rtsp://bblp:code@ip/stream_live`; when such an rtsp URL
+  /// points at the linked LAN printer it is re-derived from the model so
+  /// it rides the right transport instead of hitting mpv blind.
+  String? resolveUrl(PrinterProfile? linked) {
+    if (sourceType == CameraSourceType.bambu) {
+      if (linked == null ||
+          linked.mode != PrinterMode.lan ||
+          linked.ip.isEmpty) {
+        return null;
+      }
+      return _builtInUrl(linked);
+    }
+    if (url.isEmpty) return null;
+    final u = Uri.tryParse(url);
+    if (linked != null &&
+        linked.mode == PrinterMode.lan &&
+        linked.ip.isNotEmpty &&
+        u != null &&
+        u.userInfo.startsWith('bblp') &&
+        u.host == linked.ip) {
+      return _builtInUrl(linked);
+    }
+    return url;
+  }
+
+  String _builtInUrl(PrinterProfile linked) =>
+      cameraSchemeForModel(linked.model) == BambuCameraScheme.rtsps
+          ? 'rtsps://bblp:${linked.accessCode}@${linked.ip}:322/streaming/live/1'
+          : 'bmjpeg://bblp:${linked.accessCode}@${linked.ip}';
 
   Map<String, dynamic> toJson() => {
         'id': id,

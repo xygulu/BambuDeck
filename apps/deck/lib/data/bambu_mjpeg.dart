@@ -72,6 +72,69 @@ Uint8List _pad32(String s) {
   );
 }
 
+/// Stateful frame splitter for the 16-byte-header MJPEG framing. Feed it
+/// raw TCP chunks; it hands back complete, SOI/EOI-validated JPEG frames.
+/// Malformed frames (bad size or missing JPEG markers) are dropped, not
+/// surfaced - the decoder must never see them.
+class MjpegFramer {
+  static const _headerBytes = 16;
+  static const _maxFrameBytes = 4 << 20;
+
+  final _header = Uint8List(_headerBytes);
+  var _headerFill = 0;
+  var _payloadSize = 0;
+  final _body = BytesBuilder(copy: false);
+
+  /// Consumes [chunk]; returns every frame completed by it (may be empty,
+  /// may be several).
+  List<Uint8List> add(List<int> chunk) {
+    final frames = <Uint8List>[];
+    var data = chunk;
+    while (data.isNotEmpty) {
+      if (_payloadSize == 0) {
+        final take = (_headerBytes - _headerFill).clamp(0, data.length);
+        _header.setRange(_headerFill, _headerFill + take, data);
+        _headerFill += take;
+        data = data.sublist(take);
+        if (_headerFill == _headerBytes) {
+          _headerFill = 0; // reset for the next frame's header
+          final bd = ByteData.sublistView(_header);
+          _payloadSize = bd.getUint32(0, Endian.little);
+          _body.clear();
+          if (_payloadSize == 0 || _payloadSize > _maxFrameBytes) {
+            // Framing lost - drop everything and wait for a clean header.
+            _payloadSize = 0;
+            data = const [];
+          }
+        }
+      } else {
+        final take = (_payloadSize - _body.length).clamp(0, data.length);
+        _body.add(data.sublist(0, take));
+        data = data.sublist(take);
+        if (_body.length == _payloadSize) {
+          final frame = bodyFrame();
+          _payloadSize = 0;
+          if (frame != null) frames.add(frame);
+        }
+      }
+    }
+    return frames;
+  }
+
+  /// The completed payload as a JPEG, or null when markers say it is not.
+  Uint8List? bodyFrame() {
+    final frame = _body.takeBytes();
+    const soi = [0xFF, 0xD8];
+    const eoi = [0xFF, 0xD9];
+    final ok = frame.length >= 4 &&
+        frame[0] == soi[0] &&
+        frame[1] == soi[1] &&
+        frame[frame.length - 2] == eoi[0] &&
+        frame[frame.length - 1] == eoi[1];
+    return ok ? frame : null;
+  }
+}
+
 /// Long-lived MJPEG connection with automatic reconnect. One JPEG frame
 /// per [onFrame] call; errors surface through [onError] (reconnects keep
 /// going in the background regardless).
@@ -97,7 +160,6 @@ class BambuMjpegStream {
   Timer? _retry;
 
   static const _connectTimeout = Duration(seconds: 5);
-  static const _maxFrameBytes = 4 << 20;
   var _retryDelay = const Duration(milliseconds: 800);
 
   void start() {
@@ -134,36 +196,10 @@ class BambuMjpegStream {
   /// Reads framed JPEGs until the socket dies. Returns normally on close;
   /// errors propagate to _run's catch.
   Future<void> _pump(SecureSocket socket) async {
-    final body = BytesBuilder(copy: false);
-    final header = Uint8List(16);
-    var headerFill = 0;
-    var payloadSize = 0;
-
+    final framer = MjpegFramer();
     await for (final chunk in socket) {
-      var data = chunk;
-      while (data.isNotEmpty) {
-        if (payloadSize == 0) {
-          final take = (16 - headerFill).clamp(0, data.length);
-          header.setRange(headerFill, headerFill + take, data);
-          headerFill += take;
-          data = data.sublist(take);
-          if (headerFill == 16) {
-            final bd = ByteData.sublistView(header);
-            payloadSize = bd.getUint32(0, Endian.little);
-            if (payloadSize == 0 || payloadSize > _maxFrameBytes) {
-              throw SocketException('bad frame size $payloadSize');
-            }
-            body.clear();
-          }
-        } else {
-          final take = (payloadSize - body.length).clamp(0, data.length);
-          body.add(data.sublist(0, take));
-          data = data.sublist(take);
-          if (body.length == payloadSize) {
-            onFrame?.call(body.takeBytes());
-            payloadSize = 0;
-          }
-        }
+      for (final frame in framer.add(chunk)) {
+        onFrame?.call(frame);
       }
     }
   }
