@@ -2,6 +2,10 @@ import 'dart:convert';
 
 import 'package:bambu_protocol/bambu_protocol.dart';
 
+/// Whether a printer's built-in camera loads by default. `follow` defers
+/// to the global setting in AppSettings (PRD 机内摄像头默认开关).
+enum BuiltinCamSetting { follow, on, off }
+
 /// One configured printer. Credentials ride inside the profile; the store
 /// keeps the whole list in the platform secure store (Keychain /
 /// Credential Manager / Keystore), never plaintext (PRD FR-8).
@@ -17,6 +21,7 @@ class PrinterProfile {
     this.token = '',
     this.userId = '',
     this.model = '',
+    this.builtinCam = BuiltinCamSetting.follow,
   });
 
   final String id;
@@ -39,7 +44,17 @@ class PrinterProfile {
   /// [cameraSchemeForModel] in camera_profile.dart.
   final String model;
 
+  /// Built-in camera default-load policy for this printer.
+  final BuiltinCamSetting builtinCam;
+
   String get modeLabel => mode == PrinterMode.lan ? '局域网' : '云端';
+
+  /// Effective default-load decision given the global switch.
+  bool builtinCamDefaultOn(bool globalDefault) => switch (builtinCam) {
+        BuiltinCamSetting.on => true,
+        BuiltinCamSetting.off => false,
+        BuiltinCamSetting.follow => globalDefault,
+      };
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -52,6 +67,7 @@ class PrinterProfile {
         'token': token,
         'userId': userId,
         'model': model,
+        'builtinCam': builtinCam.name,
       };
 
   factory PrinterProfile.fromJson(Map<String, dynamic> j) => PrinterProfile(
@@ -66,6 +82,11 @@ class PrinterProfile {
         token: j['token'] as String? ?? '',
         userId: j['userId'] as String? ?? '',
         model: j['model'] as String? ?? '',
+        builtinCam: j['builtinCam'] is String
+            ? BuiltinCamSetting.values.firstWhere(
+                (v) => v.name == j['builtinCam'],
+                orElse: () => BuiltinCamSetting.follow)
+            : BuiltinCamSetting.follow,
       );
 
   BambuMqttConfig toMqttConfig() => mode == PrinterMode.lan
@@ -81,6 +102,7 @@ class PrinterProfile {
     String? token,
     String? userId,
     String? model,
+    BuiltinCamSetting? builtinCam,
   }) =>
       PrinterProfile(
         id: id,
@@ -93,6 +115,7 @@ class PrinterProfile {
         token: token ?? this.token,
         userId: userId ?? this.userId,
         model: model ?? this.model,
+        builtinCam: builtinCam ?? this.builtinCam,
       );
 }
 

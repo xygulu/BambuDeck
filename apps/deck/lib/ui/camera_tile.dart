@@ -1,19 +1,42 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../core/theme.dart';
 import '../data/bambu_mjpeg.dart';
+import '../data/camera_profile.dart';
 import '../data/log_buffer.dart';
+import '../data/onvif_ptz.dart';
+import '../data/rtsp_quality.dart';
 import 'mjpeg_tile.dart';
+import 'ptz_pad.dart';
+
+/// Callback factory for the tiles' main/sub quality chip: null when the
+/// camera cannot swap streams (built-in, or a URL without a recognizable
+/// stream marker), otherwise a closure that flips and persists [camera].
+VoidCallback? qualityToggler(WidgetRef ref, CameraProfile camera) =>
+    camera.sourceType != CameraSourceType.rtsp ||
+            !rtspQualitySwappable(camera.url)
+        ? null
+        : () {
+            ref.read(camerasProvider.notifier).replace(camera.copyWith(
+                quality: camera.quality == RtspQuality.main
+                    ? RtspQuality.sub
+                    : RtspQuality.main));
+          };
 
 /// Live video tile for one stream URL (PRD FR-3). Wraps a media_kit
 /// player with connect/error states and a manual retry; RTSP streams get
 /// low-latency, TCP-forced transport settings. `bmjpeg://` URLs (the
 /// A1/P1-family built-in camera) dispatch to [MjpegTile] instead - that
 /// protocol is not something libmpv can demux.
+///
+/// RTSP tiles also carry camera controls: a main/sub quality chip (when
+/// [onToggleQuality] is given and the URL encodes a swappable stream) and
+/// an ONVIF PTZ pad built from the URL's own credentials.
 class CameraTile extends StatefulWidget {
   const CameraTile({
     super.key,
@@ -21,12 +44,16 @@ class CameraTile extends StatefulWidget {
     this.label = '',
     this.aspectRatio = 16 / 9,
     this.showLabel = true,
+    this.onToggleQuality,
   });
 
   final String streamUrl;
   final String label;
   final double aspectRatio;
   final bool showLabel;
+
+  /// Null hides the quality chip (built-in cameras, dashboard previews).
+  final VoidCallback? onToggleQuality;
 
   @override
   State<CameraTile> createState() => _CameraTileState();
@@ -37,6 +64,7 @@ class _CameraTileState extends State<CameraTile> {
   VideoController? _controller;
   String? _error;
   StreamSubscription<String>? _errSub;
+  OnvifPtz? _ptz;
 
   @override
   void initState() {
@@ -109,6 +137,8 @@ class _CameraTileState extends State<CameraTile> {
     final p = _player;
     _player = null;
     _controller = null;
+    _ptz?.dispose();
+    _ptz = null;
     await p?.dispose();
   }
 
@@ -154,6 +184,10 @@ class _CameraTileState extends State<CameraTile> {
       );
     }
     final controller = _controller;
+    final url = widget.streamUrl;
+    final showQuality = widget.onToggleQuality != null &&
+        rtspQualitySwappable(url) &&
+        _error == null;
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
       child: Container(
@@ -185,7 +219,22 @@ class _CameraTileState extends State<CameraTile> {
                           color: Colors.white, fontSize: 12)),
                 ),
               ),
-            if (_error != null)
+            if (showQuality)
+              Positioned(
+                right: 10,
+                top: 10,
+                child: QualityToggle(
+                  isSub: rtspQualityOfUrl(url) == RtspQuality.sub,
+                  onToggle: widget.onToggleQuality!,
+                ),
+              ),
+            if (_error == null)
+              Positioned(
+                right: 10,
+                bottom: 10,
+                child: _ptzPadFor(url),
+              )
+            else
               Positioned(
                 right: 10,
                 bottom: 10,
@@ -199,6 +248,29 @@ class _CameraTileState extends State<CameraTile> {
         ),
       ),
     );
+  }
+
+  /// ONVIF pad for third-party RTSP cameras. The client lives in this
+  /// widget's state (created once per stream URL); the pad hides itself
+  /// when the camera has no ONVIF service.
+  Widget _ptzPadFor(String url) {
+    final u = Uri.tryParse(url);
+    if (u == null ||
+        (u.scheme != 'rtsp' && u.scheme != 'rtsps') ||
+        u.userInfo.isEmpty ||
+        u.host.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    if (_ptz == null) {
+      final sep = u.userInfo.indexOf(':');
+      final user = sep < 0 ? u.userInfo : u.userInfo.substring(0, sep);
+      final pass = sep < 0
+          ? ''
+          : Uri.decodeComponent(u.userInfo.substring(sep + 1));
+      _ptz = OnvifPtz(
+          host: u.host, port: 8899, username: user, password: pass);
+    }
+    return PtzPad(client: _ptz!);
   }
 
   Widget _overlay(Widget indicator, String text) => Center(

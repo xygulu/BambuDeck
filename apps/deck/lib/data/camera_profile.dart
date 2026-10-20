@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'bambu_mjpeg.dart';
 import 'printer_profile.dart';
+import 'rtsp_quality.dart';
 
 /// Where a camera stream comes from (PRD FR-3).
 enum CameraSourceType {
@@ -25,14 +26,19 @@ enum CameraSourceType {
 
 /// One configured video source. Credentials ride inside the profile like
 /// printer profiles do; the store keeps them in the OS secure store.
+///
+/// Binding is many-to-many for RTSP cameras ([printerIds]); built-in
+/// (bambu) cameras stay 1:1 - their URL is derived from the one printer
+/// they physically belong to.
 class CameraProfile {
   CameraProfile({
     required this.id,
     required this.name,
     required this.sourceType,
     this.url = '',
-    this.printerId = '',
+    this.printerIds = const [],
     this.enabled = true,
+    this.quality = RtspQuality.main,
   });
 
   final String id;
@@ -42,11 +48,31 @@ class CameraProfile {
   /// Stream URL for [CameraSourceType.rtsp], e.g. rtsp://user:pass@host:554/1
   final String url;
 
-  /// Linked printer for [CameraSourceType.bambu] and for the dashboard
-  /// embed (FR-4 组合画面): the camera shows on that printer's dashboard.
-  final String printerId;
+  /// Bound printers (FR-4 组合画面 / 监控屏右侧画面). Built-in cameras
+  /// carry exactly one; RTSP cameras may carry several.
+  final List<String> printerIds;
 
   final bool enabled;
+
+  /// Main vs sub stream preference for RTSP sources.
+  final RtspQuality quality;
+
+  CameraProfile copyWith({
+    String? name,
+    String? url,
+    List<String>? printerIds,
+    bool? enabled,
+    RtspQuality? quality,
+  }) =>
+      CameraProfile(
+        id: id,
+        name: name ?? this.name,
+        sourceType: sourceType,
+        url: url ?? this.url,
+        printerIds: printerIds ?? this.printerIds,
+        enabled: enabled ?? this.enabled,
+        quality: quality ?? this.quality,
+      );
 
   /// Playback URL, resolving the bambu type against the printer profile
   /// and its model's camera transport. Returns null when a bambu camera
@@ -73,7 +99,7 @@ class CameraProfile {
         u.host == linked.ip) {
       return _builtInUrl(linked);
     }
-    return url;
+    return applyRtspQuality(url, quality);
   }
 
   String _builtInUrl(PrinterProfile linked) =>
@@ -86,20 +112,33 @@ class CameraProfile {
         'name': name,
         'sourceType': sourceType.name,
         'url': url,
-        'printerId': printerId,
+        'printerIds': printerIds,
+        // Legacy single-binding key kept so an older app build can still
+        // read at least the first binding.
+        'printerId': printerIds.isEmpty ? '' : printerIds.first,
         'enabled': enabled,
+        'quality': quality.name,
       };
 
-  factory CameraProfile.fromJson(Map<String, dynamic> j) => CameraProfile(
-        id: j['id'] as String,
-        name: j['name'] as String? ?? '',
-        sourceType: CameraSourceType.values.firstWhere(
-            (t) => t.name == j['sourceType'],
-            orElse: () => CameraSourceType.rtsp),
-        url: j['url'] as String? ?? '',
-        printerId: j['printerId'] as String? ?? '',
-        enabled: j['enabled'] as bool? ?? true,
-      );
+  factory CameraProfile.fromJson(Map<String, dynamic> j) {
+    final ids = <String>[
+      ...((j['printerIds'] as List<dynamic>? ?? const [])
+              .whereType<String>()),
+      if (j['printerId'] is String && (j['printerId'] as String).isNotEmpty)
+        j['printerId'] as String,
+    ];
+    return CameraProfile(
+      id: j['id'] as String,
+      name: j['name'] as String? ?? '',
+      sourceType: CameraSourceType.values.firstWhere(
+          (t) => t.name == j['sourceType'],
+          orElse: () => CameraSourceType.rtsp),
+      url: j['url'] as String? ?? '',
+      printerIds: ids.toSet().toList(),
+      enabled: j['enabled'] as bool? ?? true,
+      quality: rtspQualityFromName(j['quality'] as String?),
+    );
+  }
 }
 
 /// Persistence boundary; overridable in tests.
@@ -152,6 +191,16 @@ class CamerasNotifier extends AsyncNotifier<List<CameraProfile>> {
     final store = ref.read(cameraStoreProvider);
     state = AsyncData(
         (state.valueOrNull ?? []).where((c) => c.id != id).toList());
+    await store.save(state.valueOrNull ?? []);
+  }
+
+  /// Replaces one camera (matched by id) and persists.
+  Future<void> replace(CameraProfile camera) async {
+    final store = ref.read(cameraStoreProvider);
+    state = AsyncData([
+      for (final c in state.valueOrNull ?? [])
+        if (c.id == camera.id) camera else c,
+    ]);
     await store.save(state.valueOrNull ?? []);
   }
 }

@@ -30,6 +30,7 @@ class AppSettings {
     this.notifyOnError = true,
     this.kioskMode = KioskMode.off,
     this.kioskRotateSec = 15,
+    this.builtinCamDefault = true,
   });
 
   final bool notifyOnFinish;
@@ -37,17 +38,23 @@ class AppSettings {
   final KioskMode kioskMode;
   final int kioskRotateSec;
 
+  /// Global built-in-camera default. Printers whose [PrinterProfile.builtinCam]
+  /// is `follow` (the default tri-state) inherit this.
+  final bool builtinCamDefault;
+
   AppSettings copyWith({
     bool? notifyOnFinish,
     bool? notifyOnError,
     KioskMode? kioskMode,
     int? kioskRotateSec,
+    bool? builtinCamDefault,
   }) =>
       AppSettings(
         notifyOnFinish: notifyOnFinish ?? this.notifyOnFinish,
         notifyOnError: notifyOnError ?? this.notifyOnError,
         kioskMode: kioskMode ?? this.kioskMode,
         kioskRotateSec: kioskRotateSec ?? this.kioskRotateSec,
+        builtinCamDefault: builtinCamDefault ?? this.builtinCamDefault,
       );
 
   Map<String, dynamic> toJson() => {
@@ -55,6 +62,7 @@ class AppSettings {
         'notifyOnError': notifyOnError,
         'kioskMode': kioskMode.name,
         'kioskRotateSec': kioskRotateSec,
+        'builtinCamDefault': builtinCamDefault,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -64,6 +72,7 @@ class AppSettings {
             (m) => m.name == j['kioskMode'],
             orElse: () => KioskMode.off),
         kioskRotateSec: j['kioskRotateSec'] as int? ?? 15,
+        builtinCamDefault: j['builtinCamDefault'] as bool? ?? true,
       );
 }
 

@@ -23,14 +23,25 @@ void main() {
       name: '门口',
       sourceType: CameraSourceType.rtsp,
       url: 'rtsp://u:p@10.0.0.3:554/1',
-      printerId: 'p1',
+      printerIds: const ['p1', 'p2'],
     );
     final back = CameraProfile.fromJson(
         jsonDecode(jsonEncode(rtsp.toJson())) as Map<String, dynamic>);
     expect(back.sourceType, CameraSourceType.rtsp);
     expect(back.url, rtsp.url);
-    expect(back.printerId, 'p1');
+    expect(back.printerIds, ['p1', 'p2']);
     expect(back.enabled, isTrue);
+  });
+
+  test('legacy single printerId migrates into printerIds', () {
+    final back = CameraProfile.fromJson({
+      'id': 'c9',
+      'name': '旧',
+      'sourceType': 'rtsp',
+      'url': 'rtsp://u:p@10.0.0.9:554/1',
+      'printerId': 'p1',
+    });
+    expect(back.printerIds, ['p1']);
   });
 
   test('bambu camera resolves from the linked LAN printer model', () {

@@ -124,7 +124,7 @@ void main() {
       name: '机内',
       sourceType: CameraSourceType.rtsp,
       url: 'rtsp://bblp:stale@192.168.100.110/stream_live',
-      printerId: 'p',
+      printerIds: const ['p'],
     );
     expect(legacy.resolveUrl(linked), 'bmjpeg://bblp:secret@192.168.100.110');
     // The same shape against a different host stays untouched.
