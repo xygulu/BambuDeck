@@ -844,25 +844,6 @@ class _StatusCard extends ConsumerWidget {
                           ? () => confirmStopPrint(context, notifier)
                           : null,
                     ),
-                    if (canSwap) ...[
-                      const SizedBox(width: 4),
-                      // canSwap's profile!=null promotes the local - no
-                      // re-check needed here.
-                      OutlinedButton.icon(
-                        onPressed: () =>
-                            confirmPlateSwap(context, ref, profile, notifier),
-                        icon: const Icon(Icons.auto_awesome_motion_outlined,
-                            size: 16),
-                        label: const Text('一键换盘',
-                            style: TextStyle(fontSize: 12)),
-                        style: OutlinedButton.styleFrom(
-                          padding:
-                              const EdgeInsets.symmetric(horizontal: 12),
-                          minimumSize: const Size(0, 32),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                      ),
-                    ],
                     const Text('速度',
                         style: TextStyle(
                             fontSize: 12, color: DeckColors.textSecondary)),
@@ -903,6 +884,26 @@ class _StatusCard extends ConsumerWidget {
                         materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       ),
                     ),
+                    // 换盘放灯光控制之后 (用户要求 2026-10-21)。
+                    if (canSwap) ...[
+                      const SizedBox(width: 4),
+                      // canSwap's profile!=null promotes the local - no
+                      // re-check needed here.
+                      OutlinedButton.icon(
+                        onPressed: () =>
+                            confirmPlateSwap(context, ref, profile, notifier),
+                        icon: const Icon(Icons.auto_awesome_motion_outlined,
+                            size: 16),
+                        label: const Text('一键换盘',
+                            style: TextStyle(fontSize: 12)),
+                        style: OutlinedButton.styleFrom(
+                          padding:
+                              const EdgeInsets.symmetric(horizontal: 12),
+                          minimumSize: const Size(0, 32),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
