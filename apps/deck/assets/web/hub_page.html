@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BambuDeck · 网页监控</title>
+<style>
+  :root {
+    --bg: #0f1115; --surface: #171a21; --line: #262b36;
+    --text: #e7eaf0; --dim: #8b93a3;
+    --run: #3fb950; --pause: #d29922; --err: #f85149; --fin: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 10px;
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 16px; margin: 0; }
+  header .st { font-size: 12px; color: var(--dim); }
+  main { padding: 16px; max-width: 1400px; margin: 0 auto; }
+  h2 { font-size: 13px; color: var(--dim); margin: 18px 0 8px; font-weight: 600; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  .cams { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .name { font-size: 15px; font-weight: 700; }
+  .badge { font-size: 11px; padding: 2px 9px; border-radius: 20px; background: #2a2f3a; color: var(--dim); white-space: nowrap; }
+  .badge.RUNNING { background: rgba(63,185,80,.16); color: var(--run); }
+  .badge.PAUSE   { background: rgba(210,153,34,.16); color: var(--pause); }
+  .badge.FAILED  { background: rgba(248,81,73,.16); color: var(--err); }
+  .badge.FINISH  { background: rgba(88,166,255,.16); color: var(--fin); }
+  .sub { font-size: 12px; color: var(--dim); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { height: 7px; border-radius: 4px; background: #242936; margin: 10px 0 6px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--run); border-radius: 4px; transition: width .6s; }
+  .metrics { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--dim); margin-top: 6px; }
+  .metrics b { color: var(--text); font-weight: 600; }
+  .errline { margin-top: 8px; font-size: 12px; color: var(--err); }
+  .cam img, .cam .off {
+    width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #000;
+    border-radius: 8px; display: block; margin-top: 10px;
+  }
+  .cam .off { display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 12px; }
+  .empty { color: var(--dim); font-size: 13px; padding: 24px 0; text-align: center; }
+  #gate { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column;
+          align-items: center; justify-content: center; gap: 12px; z-index: 9; }
+  #gate input { background: var(--surface); border: 1px solid var(--line); color: var(--text);
+                border-radius: 8px; padding: 10px 14px; font-size: 14px; width: 240px; text-align: center; }
+  #gate button { background: #2f81f7; border: 0; color: #fff; border-radius: 8px; padding: 10px 22px; font-size: 14px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="gate" class="hidden">
+  <div>请输入访问令牌(app 设置 → 网页访问)</div>
+  <input id="tok" placeholder="访问令牌">
+  <button id="go">进入</button>
+</div>
+<header>
+  <h1>BambuDeck · 网页监控</h1>
+  <span class="st" id="conn">连接中…</span>
+  <span class="st" id="clock"></span>
+</header>
+<main>
+  <h2>打印机</h2>
+  <div class="grid" id="printers"><div class="empty">等待数据…</div></div>
+  <h2>摄像头</h2>
+  <div class="grid cams" id="cameras"></div>
+</main>
+<script>
+'use strict';
+let TOKEN = localStorage.getItem('hubToken') || '';
+const $ = id => document.getElementById(id);
+
+// ?token= is only a handoff from the settings page URL - store it and
+// clean the address bar so the token never sits in history.
+const q = new URLSearchParams(location.search);
+if (q.get('token')) {
+  TOKEN = q.get('token');
+  localStorage.setItem('hubToken', TOKEN);
+  q.delete('token');
+  const rest = q.toString();
+  history.replaceState(null, '', location.pathname + (rest ? '?' + rest : ''));
+}
+if (!TOKEN) $('gate').classList.remove('hidden');
+$('go').onclick = () => {
+  TOKEN = $('tok').value.trim();
+  if (!TOKEN) return;
+  localStorage.setItem('hubToken', TOKEN);
+  $('gate').classList.add('hidden');
+  boot();
+};
+$('tok').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
+
+const api = path => path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
+const fmtRemaining = m => m > 0
+  ? (m >= 60 ? Math.floor(m / 60) + '时' + (m % 60) + '分' : m + '分') : '';
+const fmtTemp = (t, tg) => (t ? t.toFixed(0) : '0') + (tg ? ' / ' + tg.toFixed(0) : '') + '°';
+
+function renderPrinters(list) {
+  const el = $('printers');
+  if (!list.length) { el.innerHTML = '<div class="empty">还没有打印机配置</div>'; return; }
+  el.innerHTML = list.map(p => {
+    const s = p.state || {};
+    const g = s.gcode || 'UNKNOWN';
+    const pct = s.progress || 0;
+    const remain = fmtRemaining(s.remainingMinutes);
+    const task = s.subtaskName ? `<div class="sub">${esc(s.subtaskName)}</div>` : '';
+    const stage = s.stage ? ` · ${esc(s.stage)}` : '';
+    const layer = s.totalLayers ? `<span>层 <b>${s.layerNum || 0}</b>/${s.totalLayers}</span>` : '';
+    const err = s.hasError
+      ? `<div class="errline">⚠ 打印机报错${s.printError ? ' (print_error ' + s.printError + ')' : ''}</div>` : '';
+    return `<div class="card">
+      <div class="row"><span class="name">${esc(p.name)}</span>
+        <span class="badge ${esc(g)}">${esc(g)}</span></div>
+      ${task}
+      <div class="bar"><i style="width:${pct}%"></i></div>
+      <div class="row"><span>${pct}%${remain ? ' · 剩余 ' + remain : ''}${stage}</span></div>
+      <div class="metrics">
+        <span>喷嘴 <b>${fmtTemp(s.nozzleTemp, s.nozzleTarget)}</b></span>
+        <span>热床 <b>${fmtTemp(s.bedTemp, s.bedTarget)}</b></span>
+        ${layer}
+      </div>${err}</div>`;
+  }).join('');
+}
+
+function renderCameras(list) {
+  const el = $('cameras');
+  if (!list.length) { el.innerHTML = '<div class="empty" style="grid-column:1/-1">还没有摄像头配置</div>'; return; }
+  el.innerHTML = '';
+  for (const c of list) {
+    const card = document.createElement('div');
+    card.className = 'card cam';
+    card.innerHTML = `<div class="row"><span class="name">${esc(c.name)}</span>
+      <span class="badge">${esc(c.type || '')}</span></div>`;
+    if (c.stream) {
+      const img = document.createElement('img');
+      img.alt = c.name;
+      img.onerror = () => { img.replaceWith(off('画面不可用')); };
+      img.src = api(c.stream);
+      card.appendChild(img);
+    } else {
+      card.appendChild(off(c.enabled === false ? '已停用' : '视频源不可用'));
+    }
+    el.appendChild(card);
+  }
+}
+const off = t => { const d = document.createElement('div'); d.className = 'off'; d.textContent = t; return d; };
+const esc = s => String(s).replace(/[&<>"]/g, ch =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
+
+function apply(data) {
+  renderPrinters(data.printers || []);
+  renderCameras(data.cameras || []);
+  $('clock').textContent = '更新 ' + new Date().toLocaleTimeString('zh-CN');
+}
+
+let ws = null;
+function connect() {
+  if (!TOKEN) return;
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
+  ws.onopen = () => { $('conn').textContent = '已连接'; $('conn').style.color = 'var(--run)'; };
+  ws.onmessage = e => { try { apply(JSON.parse(e.data)); } catch (_) {} };
+  ws.onclose = ws.onerror = () => {
+    $('conn').textContent = '已断开,重连中…'; $('conn').style.color = 'var(--err)';
+    setTimeout(connect, 3000);
+  };
+}
+
+async function boot() {
+  try {
+    const r = await fetch(api('/api/state'));
+    if (r.status === 401) { localStorage.removeItem('hubToken'); TOKEN = '';
+      $('gate').classList.remove('hidden'); return; }
+    apply(await r.json());
+  } catch (_) { /* ws reconnect will surface status */ }
+  if (!ws) connect();
+}
+if (TOKEN) boot();
+</script>
+</body>
+</html>

@@ -34,3 +34,5 @@ flutter:
     # Bundled plate-swap model (单盘换盘): its tail gcode shakes the finished
     # print off and ejects the plate - "printing" it IS the plate swap.
     - assets/plate_swap/auto_plate_swap.3mf
+    # Web hub page (网页访问): served at / by lib/data/hub_server.dart.
+    - assets/web/hub_page.html

@@ -8,6 +8,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme.dart';
 import '../../data/app_settings.dart';
 import '../../data/camera_profile.dart';
+import '../../data/hcnetsdk.dart' show detectLocalIpv4;
+import '../../data/hub_server.dart';
 import '../../data/log_buffer.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
@@ -61,6 +63,7 @@ class SettingsPage extends ConsumerWidget {
               notifier.set(settings.copyWith(builtinCamDefault: v)),
         ),
         _visionSection(context, ref, settings, notifier),
+        _hubSection(context, ref, settings, notifier),
         const SizedBox(height: 18),
         _sectionLabel('运行日志'),
         ListTile(
@@ -227,8 +230,8 @@ class SettingsPage extends ConsumerWidget {
                 label: const Text('测试判读'),
               ),
               const SizedBox(width: 10),
-              Expanded(
-                child: const Text(
+              const Expanded(
+                child: Text(
                   '仅打印进行中时运行;glm-4v-flash 免费',
                   style: TextStyle(
                       fontSize: 11, color: DeckColors.textSecondary),
@@ -249,6 +252,89 @@ class SettingsPage extends ConsumerWidget {
         ),
       ]);
     });
+  }
+
+  /// 网页访问 (服务端和网页端 2026-10-20): serves the monitoring page on the
+  /// LAN; the shareable URL carries the access token once, the web page
+  /// keeps it in localStorage and strips it from the address bar.
+  Widget _hubSection(BuildContext context, WidgetRef ref,
+      AppSettings settings, AppSettingsNotifier notifier) {
+    Future<void> save(AppSettings s) => notifier.set(s);
+    final portCtrl = TextEditingController(text: '${settings.hubPort}');
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const SizedBox(height: 18),
+      _sectionLabel('网页访问'),
+      SwitchListTile(
+        title: const Text('启用网页端'),
+        subtitle: const Text('局域网内浏览器打开即可查看打印机状态与摄像头画面',
+            style: TextStyle(fontSize: 12)),
+        value: settings.hubEnabled,
+        onChanged: (v) {
+          var token = settings.hubToken;
+          if (v && token.isEmpty) token = generateHubToken();
+          save(settings.copyWith(hubEnabled: v, hubToken: token));
+        },
+      ),
+      if (settings.hubEnabled) ...[
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Column(children: [
+            Row(children: [
+              SizedBox(
+                width: 120,
+                child: TextField(
+                  controller: portCtrl,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                  ],
+                  decoration: const InputDecoration(labelText: '端口'),
+                  onSubmitted: (v) {
+                    final port = int.tryParse(v.trim());
+                    if (port == null || port < 1 || port > 65535) return;
+                    save(settings.copyWith(hubPort: port));
+                  },
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  '端口修改后自动重启服务',
+                  style: TextStyle(
+                      fontSize: 11, color: DeckColors.textSecondary),
+                ),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            Row(children: [
+              OutlinedButton.icon(
+                icon: const Icon(Icons.copy, size: 16),
+                label: const Text('复制访问地址'),
+                onPressed: () async {
+                  final host = await detectLocalIpv4();
+                  final url =
+                      'http://$host:${settings.hubPort}/?token=${settings.hubToken}';
+                  await Clipboard.setData(ClipboardData(text: url));
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('已复制: $url')));
+                  }
+                },
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  '令牌 ${settings.hubToken.isEmpty ? "(生成中)" : settings.hubToken}',
+                  style: const TextStyle(
+                      fontSize: 11, color: DeckColors.textSecondary),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ]),
+          ]),
+        ),
+      ],
+    ]);
   }
 
   Future<void> _exportConfig(

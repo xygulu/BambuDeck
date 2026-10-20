@@ -39,6 +39,9 @@ class AppSettings {
     this.visionModel = 'glm-4v-flash',
     this.visionIntervalSec = 60,
     this.visionAutoPause = false,
+    this.hubEnabled = false,
+    this.hubPort = 8787,
+    this.hubToken = '',
   });
 
   final bool notifyOnFinish;
@@ -74,6 +77,14 @@ class AppSettings {
   /// Auto-pause a print the model flagged as abnormal (suspected 炒面/空打).
   final bool visionAutoPause;
 
+  /// Web access (服务端和网页端 2026-10-20): when on, the app serves a
+  /// monitoring page (printers + live MJPEG views) on the LAN. All
+  /// non-page routes require the [hubToken]; it is generated on first
+  /// enable and shown in settings for the shareable URL.
+  final bool hubEnabled;
+  final int hubPort;
+  final String hubToken;
+
   AppSettings copyWith({
     bool? notifyOnFinish,
     bool? notifyOnError,
@@ -89,6 +100,9 @@ class AppSettings {
     String? visionModel,
     int? visionIntervalSec,
     bool? visionAutoPause,
+    bool? hubEnabled,
+    int? hubPort,
+    String? hubToken,
   }) =>
       AppSettings(
         notifyOnFinish: notifyOnFinish ?? this.notifyOnFinish,
@@ -105,6 +119,9 @@ class AppSettings {
         visionModel: visionModel ?? this.visionModel,
         visionIntervalSec: visionIntervalSec ?? this.visionIntervalSec,
         visionAutoPause: visionAutoPause ?? this.visionAutoPause,
+        hubEnabled: hubEnabled ?? this.hubEnabled,
+        hubPort: hubPort ?? this.hubPort,
+        hubToken: hubToken ?? this.hubToken,
       );
 
   Map<String, dynamic> toJson() => {
@@ -122,6 +139,9 @@ class AppSettings {
         'visionModel': visionModel,
         'visionIntervalSec': visionIntervalSec,
         'visionAutoPause': visionAutoPause,
+        'hubEnabled': hubEnabled,
+        'hubPort': hubPort,
+        'hubToken': hubToken,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -141,6 +161,9 @@ class AppSettings {
         visionModel: j['visionModel'] as String? ?? 'glm-4v-flash',
         visionIntervalSec: j['visionIntervalSec'] as int? ?? 60,
         visionAutoPause: j['visionAutoPause'] as bool? ?? false,
+        hubEnabled: j['hubEnabled'] as bool? ?? false,
+        hubPort: j['hubPort'] as int? ?? 8787,
+        hubToken: j['hubToken'] as String? ?? '',
       );
 }
 

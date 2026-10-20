@@ -35,6 +35,9 @@ class CameraFrameRegistry {
       if (!entry.key.startsWith('$cameraId|')) continue;
       final ctx = entry.value.currentContext;
       if (ctx == null) continue;
+      // Not a widget-mount context - it lives for the render tree's life,
+      // and the attached/size checks below guard every use.
+      // ignore: use_build_context_synchronously
       final ro = ctx.findRenderObject();
       if (ro is! RenderRepaintBoundary || !ro.attached) continue;
       if (ro.size.isEmpty || ro.debugNeedsLayout) continue;

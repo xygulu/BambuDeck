@@ -7,6 +7,7 @@ import 'package:media_kit/media_kit.dart';
 import 'core/theme.dart';
 import 'data/app_settings.dart';
 import 'data/camera_profile.dart';
+import 'data/hub_server.dart';
 import 'data/print_events.dart';
 import 'data/printer_profile.dart';
 import 'data/vision_guard.dart';
@@ -110,12 +111,31 @@ class _DeckAppState extends ConsumerState<DeckApp> {
       if (s != null) {
         printEvents.settings = s;
         visionGuard.settings = s;
+        _syncHub(s);
       }
     });
     ref.listenManual(camerasProvider, (_, next) {
       final list = next.valueOrNull;
-      if (list != null) visionGuard.cameras = list;
+      if (list != null) {
+        visionGuard.cameras = list;
+        hubServer.cameras = list;
+      }
     });
+    ref.listenManual(printersProvider, (_, next) {
+      final list = next.valueOrNull;
+      if (list != null) hubServer.printers = list;
+    });
+  }
+
+  /// Start/stop the web hub (网页访问) with its switch; a port change while
+  /// running restarts the listener.
+  void _syncHub(AppSettings s) {
+    hubServer.settings = s;
+    if (s.hubEnabled && (!hubServer.running || hubServer.port != s.hubPort)) {
+      hubServer.stop().whenComplete(hubServer.start);
+    } else if (!s.hubEnabled && hubServer.running) {
+      hubServer.stop();
+    }
   }
 
   @override

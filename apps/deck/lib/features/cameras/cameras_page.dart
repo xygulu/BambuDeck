@@ -320,7 +320,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                   ),
                 ),
                 const SizedBox(height: 14),
-                Text('画面方向',
+                const Text('画面方向',
                     style: TextStyle(
                         fontSize: 12, color: DeckColors.textSecondary)),
                 const SizedBox(height: 6),

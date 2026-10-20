@@ -4,6 +4,7 @@ import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'cloud_api.dart';
+import 'hub_server.dart';
 import 'log_buffer.dart';
 import 'print_events.dart';
 import 'printer_profile.dart';
@@ -241,6 +242,7 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
       state = _current;
       printEvents.observe(profile, prev, s);
       visionGuard.observeState(profile, s);
+      hubServer.observeState(profile, s);
     });
     await link.connect();
   }
