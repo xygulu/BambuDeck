@@ -15,6 +15,8 @@ class PtzPad extends StatefulWidget {
     required this.client,
     this.flipH = false,
     this.rotationDeg = 0,
+    this.invertPan = false,
+    this.invertTilt = false,
   });
 
   final PtzClient client;
@@ -24,6 +26,13 @@ class PtzPad extends StatefulWidget {
   /// the way the (flipped/rotated) image shows it.
   final bool flipH;
   final int rotationDeg;
+
+  /// Per-camera axis calibration (云台方向校准 2026-10-21): flips applied
+  /// after the orientation inverse for cameras whose physical pan/tilt runs
+  /// opposite to the HIK/ONVIF command semantics (one pair of arrows wrong
+  /// in every orientation is the tell).
+  final bool invertPan;
+  final bool invertTilt;
 
   @override
   State<PtzPad> createState() => _PtzPadState();
@@ -72,8 +81,10 @@ class _PtzPadState extends State<PtzPad> {
   }
 
   void _issue(double pan, double tilt) {
-    final (p, t) = orientPanTilt(
+    var (p, t) = orientPanTilt(
         flipH: widget.flipH, rotationDeg: widget.rotationDeg, pan: pan, tilt: tilt);
+    if (widget.invertPan) p = -p;
+    if (widget.invertTilt) t = -t;
     widget.client.move(pan: p, tilt: t).catchError((Object _) {});
   }
 

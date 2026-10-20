@@ -42,6 +42,8 @@ class CameraProfile {
     this.quality = RtspQuality.main,
     this.flipH = false,
     this.rotationDeg = 0,
+    this.ptzInvertPan = false,
+    this.ptzInvertTilt = false,
   });
 
   final String id;
@@ -68,6 +70,14 @@ class CameraProfile {
   /// one of 0 / 90 / 180 / 270 (画面旋转 2026-10-20).
   final int rotationDeg;
 
+  /// PTZ direction calibration (云台方向校准 2026-10-21): some cameras -
+  /// ceiling mounts, certain EZVIZ firmware - physically invert one axis
+  /// against the HIK/ONVIF command semantics, so two arrows track the
+  /// picture and the other two move the wrong way. These flips the pad's
+  /// pan / tilt after the picture-orientation inverse.
+  final bool ptzInvertPan;
+  final bool ptzInvertTilt;
+
   CameraProfile copyWith({
     String? name,
     String? url,
@@ -76,6 +86,8 @@ class CameraProfile {
     RtspQuality? quality,
     bool? flipH,
     int? rotationDeg,
+    bool? ptzInvertPan,
+    bool? ptzInvertTilt,
   }) =>
       CameraProfile(
         id: id,
@@ -87,6 +99,8 @@ class CameraProfile {
         quality: quality ?? this.quality,
         flipH: flipH ?? this.flipH,
         rotationDeg: rotationDeg ?? this.rotationDeg,
+        ptzInvertPan: ptzInvertPan ?? this.ptzInvertPan,
+        ptzInvertTilt: ptzInvertTilt ?? this.ptzInvertTilt,
       );
 
   /// Playback URL, resolving the bambu type against the printer profile
@@ -135,6 +149,8 @@ class CameraProfile {
         'quality': quality.name,
         'flipH': flipH,
         'rotationDeg': rotationDeg,
+        'ptzInvertPan': ptzInvertPan,
+        'ptzInvertTilt': ptzInvertTilt,
       };
 
   factory CameraProfile.fromJson(Map<String, dynamic> j) {
@@ -156,6 +172,8 @@ class CameraProfile {
       quality: rtspQualityFromName(j['quality'] as String?),
       flipH: j['flipH'] as bool? ?? false,
       rotationDeg: j['rotationDeg'] as int? ?? 0,
+      ptzInvertPan: j['ptzInvertPan'] as bool? ?? false,
+      ptzInvertTilt: j['ptzInvertTilt'] as bool? ?? false,
     );
   }
 }

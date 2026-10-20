@@ -710,6 +710,14 @@ class _StatusCard extends ConsumerWidget {
     final notifier = ref.read(connectionProvider(profileId).notifier);
     final canPause = live && s.gcodeState == GcodeState.running;
     final canResume = live && s.gcodeState == GcodeState.pause;
+    // Same gate as the wide layout's _ControlBar swap button - the compact
+    // pane must offer it too (反馈 2026-10-21: 勾了配置却找不到按钮).
+    final profile = ref.watch(
+        printersProvider.select((l) => printerByIdOf(l.valueOrNull, profileId)));
+    final canSwap = live &&
+        profile != null &&
+        profile.autoPlateSwap &&
+        profile.mode == PrinterMode.lan;
 
     return Card(
       child: Padding(
@@ -836,6 +844,25 @@ class _StatusCard extends ConsumerWidget {
                           ? () => confirmStopPrint(context, notifier)
                           : null,
                     ),
+                    if (canSwap) ...[
+                      const SizedBox(width: 4),
+                      // canSwap's profile!=null promotes the local - no
+                      // re-check needed here.
+                      OutlinedButton.icon(
+                        onPressed: () =>
+                            confirmPlateSwap(context, ref, profile, notifier),
+                        icon: const Icon(Icons.auto_awesome_motion_outlined,
+                            size: 16),
+                        label: const Text('一键换盘',
+                            style: TextStyle(fontSize: 12)),
+                        style: OutlinedButton.styleFrom(
+                          padding:
+                              const EdgeInsets.symmetric(horizontal: 12),
+                          minimumSize: const Size(0, 32),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                      ),
+                    ],
                     const Text('速度',
                         style: TextStyle(
                             fontSize: 12, color: DeckColors.textSecondary)),

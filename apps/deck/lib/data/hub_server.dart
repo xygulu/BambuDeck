@@ -168,11 +168,17 @@ class CameraRelay {
       _bambu = s;
       s.start(); // reconnects internally, never completes
     } else if (url.startsWith('rtsp')) {
+      _log('[网页] ${camera.name}: 网页端开始转码拉流 (${_mask(url)}, '
+          'ffmpeg=$ffmpegPath)');
       _runFfmpeg(url);
     } else {
-      _log('[网页] ${camera.name}: 不支持的源 $url');
+      _log('[网页] ${camera.name}: 不支持的源 ${_mask(url)}');
     }
   }
+
+  /// URLs carry the access code - never write them to the log verbatim.
+  static String _mask(String url) => url.replaceFirstMapped(
+      RegExp(r'://([^:@/]*):([^@/]*)@'), (m) => '://${m[1]}:***@');
 
   Future<void> _runFfmpeg(String url) async {
     try {
@@ -197,9 +203,28 @@ class CameraRelay {
         onError: (_) => _sourceDied(),
         cancelOnError: true,
       );
-      proc.stderr.drain<String>().ignore();
+      // Surface why a source died: keep the first stderr lines and log
+      // them when ffmpeg exits (black screen needs a visible reason).
+      final stderrTail = <String>[];
+      proc.stderr.transform(utf8.decoder).listen((chunk) {
+        for (final line in chunk.split('\n')) {
+          final l = line.trim();
+          if (l.isEmpty) continue;
+          if (stderrTail.length < 3) stderrTail.add(l);
+        }
+      }, onDone: () {
+        if (stderrTail.isNotEmpty) {
+          _log('[网页] ${camera.name}: ffmpeg 退出 - '
+              '${stderrTail.join(' | ')}');
+        }
+      });
+      proc.exitCode.then((code) {
+        if (code != 0) {
+          _log('[网页] ${camera.name}: ffmpeg 进程退出码 $code');
+        }
+      });
     } catch (e) {
-      _log('[网页] ${camera.name}: ffmpeg 启动失败 $e');
+      _log('[网页] ${camera.name}: ffmpeg 启动失败 $e (检查安装与路径)');
       _sourceDied();
     }
   }

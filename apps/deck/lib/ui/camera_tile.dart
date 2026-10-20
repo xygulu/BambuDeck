@@ -65,6 +65,8 @@ class CameraTile extends ConsumerStatefulWidget {
     this.expand = false,
     this.flipH = false,
     this.rotationDeg = 0,
+    this.ptzInvertPan = false,
+    this.ptzInvertTilt = false,
     this.onToggleFlip,
     this.onSetRotation,
     this.cameraId,
@@ -90,6 +92,10 @@ class CameraTile extends ConsumerStatefulWidget {
   /// Clockwise rotation in degrees (0/90/180/270) to right the mount
   /// (画面旋转 2026-10-20).
   final int rotationDeg;
+
+  /// PTZ axis calibration passed through to [PtzPad] (云台方向校准).
+  final bool ptzInvertPan;
+  final bool ptzInvertTilt;
 
   /// Toggles [flipH] on the owning camera; null hides the orientation menu.
   final VoidCallback? onToggleFlip;
@@ -387,6 +393,8 @@ class _CameraTileState extends ConsumerState<CameraTile> {
       client: _ptz!,
       flipH: widget.flipH,
       rotationDeg: widget.rotationDeg,
+      invertPan: widget.ptzInvertPan,
+      invertTilt: widget.ptzInvertTilt,
     );
   }
 

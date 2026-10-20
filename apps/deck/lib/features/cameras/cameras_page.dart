@@ -122,7 +122,11 @@ class _CameraCardState extends ConsumerState<_CameraCard> {
             child: url != null && camera.enabled && _visible
                 ? CameraTile(streamUrl: url, label: camera.name,
                     onToggleQuality: qualityToggler(ref, camera),
-                    cameraId: camera.id, frameSlot: 'cameras-grid')
+                    cameraId: camera.id, frameSlot: 'cameras-grid',
+                    flipH: camera.flipH,
+                    rotationDeg: camera.rotationDeg,
+                    ptzInvertPan: camera.ptzInvertPan,
+                    ptzInvertTilt: camera.ptzInvertTilt)
                 : Container(
                     color: Colors.black,
                     alignment: Alignment.center,
@@ -200,6 +204,8 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
   var type = editing?.sourceType ?? CameraSourceType.rtsp;
   var flipH = editing?.flipH ?? false;
   var rotationDeg = editing?.rotationDeg ?? 0;
+  var ptzInvertPan = editing?.ptzInvertPan ?? false;
+  var ptzInvertTilt = editing?.ptzInvertTilt ?? false;
   PrinterProfile? linked;
   if (editing != null && editing.printerIds.isNotEmpty) {
     final printers = ref.read(printersProvider).valueOrNull ?? const [];
@@ -347,6 +353,30 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                         setState(() => rotationDeg = s.first),
                     style: const ButtonStyle(
                         visualDensity: VisualDensity.compact),
+                  ),
+                ]),
+                const SizedBox(height: 6),
+                // 云台方向校准 (2026-10-21): 个别摄像头(吊装/固件)某个轴的
+                // 物理转向与命令语义相反, 表现为固定一对箭头方向不对。
+                Row(children: [
+                  const Text('云台方向校准',
+                      style: TextStyle(
+                          fontSize: 12, color: DeckColors.textSecondary)),
+                  const SizedBox(width: 16),
+                  const Text('左右反转', style: TextStyle(fontSize: 13)),
+                  Switch(
+                    value: ptzInvertPan,
+                    activeThumbColor: DeckColors.running,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    onChanged: (v) => setState(() => ptzInvertPan = v),
+                  ),
+                  const SizedBox(width: 16),
+                  const Text('上下反转', style: TextStyle(fontSize: 13)),
+                  Switch(
+                    value: ptzInvertTilt,
+                    activeThumbColor: DeckColors.running,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    onChanged: (v) => setState(() => ptzInvertTilt = v),
                   ),
                 ]),
                 // 编辑模式只改名称/连接信息, 网段扫描是添加时的入口。
@@ -502,6 +532,8 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
           printerIds: printerIds,
           flipH: flipH,
           rotationDeg: rotationDeg,
+          ptzInvertPan: ptzInvertPan,
+          ptzInvertTilt: ptzInvertTilt,
         ));
     return;
   }
@@ -514,6 +546,8 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
     printerIds: printerIds,
     flipH: flipH,
     rotationDeg: rotationDeg,
+    ptzInvertPan: ptzInvertPan,
+    ptzInvertTilt: ptzInvertTilt,
   );
   await ref.read(camerasProvider.notifier).add(camera);
 }

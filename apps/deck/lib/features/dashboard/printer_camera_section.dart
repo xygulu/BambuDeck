@@ -48,6 +48,8 @@ class CameraTileSpec {
     this.onToggleQuality,
     this.flipH = false,
     this.rotationDeg = 0,
+    this.ptzInvertPan = false,
+    this.ptzInvertTilt = false,
     this.onToggleFlip,
     this.onSetRotation,
   });
@@ -63,6 +65,10 @@ class CameraTileSpec {
   /// 2026-10-20). Built-in synthesized tiles leave these at defaults.
   final bool flipH;
   final int rotationDeg;
+
+  /// PTZ axis calibration carried to [CameraTile] (云台方向校准).
+  final bool ptzInvertPan;
+  final bool ptzInvertTilt;
   final VoidCallback? onToggleFlip;
   final ValueChanged<int>? onSetRotation;
 }
@@ -97,6 +103,8 @@ List<CameraTileSpec> buildCameraSpecs(WidgetRef ref, PrinterProfile profile) {
       onToggleQuality: qualityToggler(ref, c),
       flipH: c.flipH,
       rotationDeg: c.rotationDeg,
+      ptzInvertPan: c.ptzInvertPan,
+      ptzInvertTilt: c.ptzInvertTilt,
       onToggleFlip: flipToggler(ref, c),
       onSetRotation: rotationSetter(ref, c),
     ));
@@ -207,6 +215,8 @@ class PrinterCameraSection extends ConsumerWidget {
                   onToggleQuality: spec.onToggleQuality,
                   flipH: spec.flipH,
                   rotationDeg: spec.rotationDeg,
+                  ptzInvertPan: spec.ptzInvertPan,
+                  ptzInvertTilt: spec.ptzInvertTilt,
                   onToggleFlip: spec.onToggleFlip,
                   onSetRotation: spec.onSetRotation,
                 ),
@@ -527,6 +537,8 @@ class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
               onToggleQuality: spec.onToggleQuality,
               flipH: spec.flipH,
               rotationDeg: spec.rotationDeg,
+              ptzInvertPan: spec.ptzInvertPan,
+              ptzInvertTilt: spec.ptzInvertTilt,
               onToggleFlip: spec.onToggleFlip,
               onSetRotation: spec.onSetRotation,
             ),
