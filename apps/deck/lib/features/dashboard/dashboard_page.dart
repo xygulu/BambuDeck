@@ -679,6 +679,22 @@ Future<void> confirmPlateSwap(BuildContext context, WidgetRef ref,
   if (ok != true || !context.mounted) return;
   final messenger = ScaffoldMessenger.of(context);
   try {
+    // The card's `live` gate counts connecting/reconnecting too, so the
+    // button is clickable while the MQTT link is mid-reconnect - the FTPS
+    // step would still succeed and the publish would abort with a baffling
+    // "未连接". Wait out a reconnect blip first (换盘 2026-10-21).
+    if (!await _waitForConnected(() {
+      // The widget may be gone mid-poll; a dead ref must not crash the
+      // wait - treat it as "still not connected".
+      try {
+        return ref.read(connectionProvider(profile.id)).status ==
+            BambuConnStatus.connected;
+      } catch (_) {
+        return false;
+      }
+    })) {
+      throw Exception('打印机当前未连接(可能在重连),请确认打印机在线后重试');
+    }
     await startPlateSwap(profile, sendPrint: notifier.printProjectFile);
     messenger.showSnackBar(
         const SnackBar(content: Text('换盘任务已发送,打印机会自动执行换盘流程')));
@@ -687,6 +703,21 @@ Future<void> confirmPlateSwap(BuildContext context, WidgetRef ref,
         backgroundColor: DeckColors.error,
         content: Text('换盘失败: $e')));
   }
+}
+
+/// Polls the connection until it is truly `connected` (not just isLive) or
+/// the timeout elapses - a reconnecting link usually lands within a couple
+/// of seconds.
+Future<bool> _waitForConnected(bool Function() isConnected,
+    {Duration timeout = const Duration(seconds: 8)}) async {
+  const step = Duration(milliseconds: 400);
+  var waited = Duration.zero;
+  while (!isConnected()) {
+    if (waited >= timeout) return false;
+    await Future.delayed(step);
+    waited += step;
+  }
+  return true;
 }
 
 /// Status + control card for the compact pane's top info row: dense task,
