@@ -27,6 +27,97 @@ Future<void> setBuiltinCam(WidgetRef ref, PrinterProfile profile, bool on) async
   ]);
 }
 
+/// Stream URL of a printer's built-in camera ('' when not derivable, e.g.
+/// cloud-mode printers).
+String builtinCameraUrl(PrinterProfile profile) {
+  final camera = CameraProfile(
+    id: 'builtin',
+    name: '机内摄像头',
+    sourceType: CameraSourceType.bambu,
+    printerIds: [profile.id],
+  );
+  return camera.resolveUrl(profile) ?? '';
+}
+
+/// One tile in a printer's camera wall: enough to render a [CameraTile].
+class CameraTileSpec {
+  const CameraTileSpec({
+    required this.id,
+    required this.label,
+    required this.url,
+    this.onToggleQuality,
+  });
+
+  final String id;
+  final String label;
+  final String url;
+
+  /// Main/sub quality chip closure; null hides the chip.
+  final VoidCallback? onToggleQuality;
+}
+
+/// The camera tiles for one printer, in display order: built-in camera
+/// first (when the persisted policy turns it on), then every enabled RTSP
+/// camera bound to this printer. Shared by the vertical section and the
+/// camera wall.
+List<CameraTileSpec> buildCameraSpecs(WidgetRef ref, PrinterProfile profile) {
+  final settings =
+      ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
+  final cameras = ref.watch(camerasProvider).valueOrNull ?? const [];
+  final specs = <CameraTileSpec>[];
+  if (profile.builtinCamDefaultOn(settings.builtinCamDefault) &&
+      profile.mode == PrinterMode.lan) {
+    specs.add(CameraTileSpec(
+      id: '${profile.id}-builtin',
+      label: '机内摄像头',
+      url: builtinCameraUrl(profile),
+    ));
+  }
+  for (final c in cameras) {
+    if (c.sourceType != CameraSourceType.rtsp ||
+        !c.enabled ||
+        !c.printerIds.contains(profile.id)) {
+      continue;
+    }
+    specs.add(CameraTileSpec(
+      id: c.id,
+      label: c.name,
+      url: c.resolveUrl(null) ?? '',
+      onToggleQuality: qualityToggler(ref, c),
+    ));
+  }
+  return specs;
+}
+
+/// 监控画面 title row with the binding/add-camera entries, shared by the
+/// vertical section and the camera wall.
+Widget cameraSectionHeader(
+    BuildContext context, WidgetRef ref, PrinterProfile profile) {
+  final settings =
+      ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
+  return Padding(
+    padding: const EdgeInsets.only(bottom: 8),
+    child: Row(children: [
+      const Text('监控画面',
+          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+      const Spacer(),
+      TextButton.icon(
+        onPressed: () =>
+            PrinterCameraSection.editBindings(context, ref, profile,
+                settings.builtinCamDefault),
+        icon: const Icon(Icons.tune, size: 16),
+        label: const Text('绑定摄像头', style: TextStyle(fontSize: 12)),
+      ),
+      const SizedBox(width: 4),
+      TextButton.icon(
+        onPressed: () => showAddCameraDialog(context, ref),
+        icon: const Icon(Icons.video_call, size: 16),
+        label: const Text('添加摄像头', style: TextStyle(fontSize: 12)),
+      ),
+    ]),
+  );
+}
+
 /// Camera area for one printer (FR-4 组合画面 + 机内摄像头默认开关):
 /// the built-in camera per the effective policy, then every RTSP camera
 /// bound to this printer, plus the binding/add-camera entry points.
@@ -43,43 +134,15 @@ class PrinterCameraSection extends ConsumerWidget {
     if (profile == null) return const SizedBox.shrink();
     final settings = ref.watch(appSettingsProvider).valueOrNull ??
         const AppSettings();
-    final cameras = ref.watch(camerasProvider).valueOrNull ?? const [];
-    final builtinOn =
-        profile.builtinCamDefaultOn(settings.builtinCamDefault);
-    final bound = cameras
-        .where((c) =>
-            c.sourceType == CameraSourceType.rtsp &&
-            c.enabled &&
-            c.printerIds.contains(profileId))
-        .toList();
+    final specs = buildCameraSpecs(ref, profile);
+    final builtinOfferable = profile.mode == PrinterMode.lan &&
+        !profile.builtinCamDefaultOn(settings.builtinCamDefault);
 
-    final hasAny = builtinOn || bound.isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Row(children: [
-            const Text('监控画面',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-            const Spacer(),
-            TextButton.icon(
-              onPressed: () =>
-                  _editBindings(context, ref, profile, settings.builtinCamDefault),
-              icon: const Icon(Icons.tune, size: 16),
-              label: const Text('绑定摄像头',
-                  style: TextStyle(fontSize: 12)),
-            ),
-            const SizedBox(width: 4),
-            TextButton.icon(
-              onPressed: () => showAddCameraDialog(context, ref),
-              icon: const Icon(Icons.video_call, size: 16),
-              label: const Text('添加摄像头',
-                  style: TextStyle(fontSize: 12)),
-            ),
-          ]),
-        ),
-        if (!hasAny)
+        cameraSectionHeader(context, ref, profile),
+        if (specs.isEmpty && !builtinOfferable)
           Padding(
             padding: const EdgeInsets.only(bottom: 14),
             child: Text(
@@ -90,35 +153,23 @@ class PrinterCameraSection extends ConsumerWidget {
             ),
           )
         else ...[
-          if (builtinOn && profile.mode == PrinterMode.lan)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: VisibleOnlyTile(
-                key: ValueKey('$profileId-builtin'),
-                streamId: '$profileId-builtin',
-                child: CameraTile(
-                  streamUrl: _builtinUrl(profile),
-                  label: '机内摄像头',
-                ),
-              ),
-            )
-          else if (profile.mode == PrinterMode.lan)
+          if (builtinOfferable)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: _OpenBuiltinTile(
                 onOpen: () => setBuiltinCam(ref, profile, true),
               ),
             ),
-          for (final c in bound)
+          for (final spec in specs)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
               child: VisibleOnlyTile(
-                key: ValueKey(c.id),
-                streamId: c.id,
+                key: ValueKey(spec.id),
+                streamId: spec.id,
                 child: CameraTile(
-                  streamUrl: c.resolveUrl(null) ?? '',
-                  label: c.name,
-                  onToggleQuality: qualityToggler(ref, c),
+                  streamUrl: spec.url,
+                  label: spec.label,
+                  onToggleQuality: spec.onToggleQuality,
                 ),
               ),
             ),
@@ -127,19 +178,10 @@ class PrinterCameraSection extends ConsumerWidget {
     );
   }
 
-  String _builtinUrl(PrinterProfile profile) {
-    final camera = CameraProfile(
-      id: 'builtin',
-      name: '机内摄像头',
-      sourceType: CameraSourceType.bambu,
-      printerIds: [profile.id],
-    );
-    return camera.resolveUrl(profile) ?? '';
-  }
-
   /// Binding management: per-printer built-in camera tri-state (跟随全局 /
   /// 开启 / 关闭) plus multi-select binding of RTSP cameras (FR-4 多对多).
-  Future<void> _editBindings(
+  /// Static - the camera wall's header uses it too.
+  static Future<void> editBindings(
     BuildContext context,
     WidgetRef ref,
     PrinterProfile profile,
@@ -274,6 +316,213 @@ class _OpenBuiltinTile extends StatelessWidget {
           label: const Text('打开机内摄像头'),
         ),
       ),
+    );
+  }
+}
+
+/// Camera wall for the compact monitoring pane (反馈 2026-10-20): the
+/// printer's feeds arranged into the best-fitting grid for the available
+/// space so everything fits one screen regardless of camera count.
+/// Tapping a feed zooms it to fill the pane; the 缩小 button (or nothing
+/// else - the wall is gone while zoomed) returns to the grid.
+class CameraWallSection extends ConsumerStatefulWidget {
+  const CameraWallSection({super.key, required this.profileId});
+
+  final String profileId;
+
+  @override
+  ConsumerState<CameraWallSection> createState() => _CameraWallSectionState();
+}
+
+class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
+  /// Id of the zoomed feed; null shows the grid.
+  String? _zoomedId;
+
+  @override
+  Widget build(BuildContext context) {
+    final printers =
+        ref.watch(printersProvider).valueOrNull ?? const <PrinterProfile>[];
+    final matches = [
+      for (final p in printers)
+        if (p.id == widget.profileId) p,
+    ];
+    if (matches.isEmpty) return const SizedBox.shrink();
+    // Final local so the promoted non-null type survives into the
+    // closures below (LayoutBuilder builder, button callbacks).
+    final profile = matches.first;
+    final settings =
+        ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
+    final specs = buildCameraSpecs(ref, profile);
+    final builtinOfferable = profile.mode == PrinterMode.lan &&
+        !profile.builtinCamDefaultOn(settings.builtinCamDefault);
+
+    CameraTileSpec? zoomed;
+    if (_zoomedId != null) {
+      for (final s in specs) {
+        if (s.id == _zoomedId) zoomed = s;
+      }
+      if (zoomed == null) {
+        // Zoom target vanished (unbound/disabled) - fall back to the wall.
+        _zoomedId = null;
+      }
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (zoomed == null)
+            cameraSectionHeader(context, ref, profile)
+          else
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(children: [
+                Text(zoomed.label,
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600)),
+              ]),
+            ),
+          Expanded(
+            child: zoomed != null
+                ? _zoomedView(zoomed)
+                : LayoutBuilder(
+                    builder: (context, box) =>
+                        _wall(context, box, profile, specs, builtinOfferable)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Grid with the column count whose cell aspect lands closest to 16:9,
+  /// so the wall always uses the whole pane however many cameras there
+  /// are (反馈 2026-10-20 自动缩放).
+  Widget _wall(BuildContext context, BoxConstraints box, PrinterProfile profile,
+      List<CameraTileSpec> specs, bool builtinOfferable) {
+    final cells = <Widget>[
+      if (builtinOfferable)
+        ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            color: Colors.black,
+            alignment: Alignment.center,
+            child: FilledButton.tonalIcon(
+              onPressed: () => setBuiltinCam(ref, profile, true),
+              icon: const Icon(Icons.videocam_outlined, size: 18),
+              label: const Text('打开机内摄像头'),
+            ),
+          ),
+        ),
+      for (final spec in specs) _cell(spec),
+    ];
+    if (cells.isEmpty) {
+      return Center(
+        child: Text(
+          '暂无画面 - 点右上角添加摄像头,或在绑定设置里开启机内摄像头',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+              fontSize: 12,
+              color: DeckColors.textSecondary.withValues(alpha: 0.9)),
+        ),
+      );
+    }
+
+    final n = cells.length;
+    final w = box.maxWidth > 0 ? box.maxWidth : 1.0;
+    final h = box.maxHeight > 0 ? box.maxHeight : 1.0;
+    var bestCols = 1;
+    var bestErr = double.infinity;
+    for (var cols = 1; cols <= n; cols++) {
+      final r = (n / cols).ceil();
+      final err = ((w / cols) / (h / r) / (16 / 9) - 1).abs();
+      if (err < bestErr) {
+        bestErr = err;
+        bestCols = cols;
+      }
+    }
+    final rows = (n / bestCols).ceil();
+
+    return Column(
+      children: [
+        for (var r = 0; r < rows; r++)
+          Expanded(
+            child: Row(
+              children: [
+                for (var i = r * bestCols;
+                    i < (r + 1) * bestCols && i < n;
+                    i++)
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.all(4),
+                      child: cells[i],
+                    ),
+                  ),
+                // Invisible spacers keep the last (partial) row's cells the
+                // same width as the rows above.
+                for (var i = n; i < (r + 1) * bestCols; i++)
+                  const Expanded(child: SizedBox()),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// One wall cell: the feed filling the cell, tap to zoom.
+  Widget _cell(CameraTileSpec spec) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => setState(() => _zoomedId = spec.id),
+        child: Stack(fit: StackFit.expand, children: [
+          VisibleOnlyTile(
+            key: ValueKey(spec.id),
+            streamId: spec.id,
+            child: CameraTile(
+              streamUrl: spec.url,
+              label: spec.label,
+              expand: true,
+              onToggleQuality: spec.onToggleQuality,
+            ),
+          ),
+          Positioned(
+            right: 8,
+            bottom: 8,
+            child: Icon(Icons.open_in_full,
+                size: 13, color: Colors.white.withValues(alpha: 0.75)),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  /// Zoomed feed filling the pane, with a shrink button back to the wall.
+  Widget _zoomedView(CameraTileSpec spec) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: Stack(fit: StackFit.expand, children: [
+        VisibleOnlyTile(
+          key: ValueKey(spec.id),
+          streamId: spec.id,
+          child: CameraTile(
+            streamUrl: spec.url,
+            label: spec.label,
+            expand: true,
+            onToggleQuality: spec.onToggleQuality,
+          ),
+        ),
+        Positioned(
+          top: 10,
+          right: 10,
+          child: IconButton.filledTonal(
+            icon: const Icon(Icons.close_fullscreen, size: 18),
+            tooltip: '缩小',
+            onPressed: () => setState(() => _zoomedId = null),
+          ),
+        ),
+      ]),
     );
   }
 }

@@ -45,6 +45,7 @@ class CameraTile extends StatefulWidget {
     this.aspectRatio = 16 / 9,
     this.showLabel = true,
     this.onToggleQuality,
+    this.expand = false,
   });
 
   final String streamUrl;
@@ -54,6 +55,11 @@ class CameraTile extends StatefulWidget {
 
   /// Null hides the quality chip (built-in cameras, dashboard previews).
   final VoidCallback? onToggleQuality;
+
+  /// Fill the parent box instead of locking to [aspectRatio]. The video
+  /// itself stays undistorted (contain), so a wall cell of any shape
+  /// just letterboxes (camera-wall zoom uses this).
+  final bool expand;
 
   @override
   State<CameraTile> createState() => _CameraTileState();
@@ -110,6 +116,11 @@ class _CameraTileState extends State<CameraTile> {
         await platform.setProperty('rtsp-transport', 'tcp');
         await platform.setProperty('profile', 'low-latency');
         await platform.setProperty('network-timeout', '5');
+        // Software-decode RTSP video: media_kit_video 0.0.4 cannot take
+        // VideoToolbox hardware frames on macOS - the stream plays (audio
+        // is audible) but the picture stays black (萤石 HEVC 实测 2026-10-20).
+        // Sw decode of 1440p HEVC is trivial for Apple Silicon.
+        await platform.setProperty('hwdec', 'no');
       }
     } catch (_) {
       // Non-fatal: defaults still play.
@@ -148,6 +159,12 @@ class _CameraTileState extends State<CameraTile> {
     super.dispose();
   }
 
+  /// AspectRatio lock unless [CameraTile.expand] - the video itself is
+  /// contain-fit either way.
+  Widget _box(Widget child) => widget.expand
+      ? SizedBox.expand(child: child)
+      : AspectRatio(aspectRatio: widget.aspectRatio, child: child);
+
   @override
   Widget build(BuildContext context) {
     if (widget.streamUrl.startsWith('bmjpeg://')) {
@@ -155,16 +172,13 @@ class _CameraTileState extends State<CameraTile> {
       if (parsed != null) {
         return ClipRRect(
           borderRadius: BorderRadius.circular(14),
-          child: AspectRatio(
-            aspectRatio: widget.aspectRatio,
-            child: MjpegTile(
-              host: parsed.host,
-              port: parsed.port,
-              username: parsed.username,
-              password: parsed.password,
-              label: widget.showLabel ? widget.label : null,
-            ),
-          ),
+          child: _box(MjpegTile(
+            host: parsed.host,
+            port: parsed.port,
+            username: parsed.username,
+            password: parsed.password,
+            label: widget.showLabel ? widget.label : null,
+          )),
         );
       }
       // Malformed built-in URL: never let it fall through to mpv (it would
@@ -173,13 +187,10 @@ class _CameraTileState extends State<CameraTile> {
         borderRadius: BorderRadius.circular(14),
         child: Container(
           color: Colors.black,
-          child: AspectRatio(
-            aspectRatio: widget.aspectRatio,
-            child: _overlay(
-                const Icon(Icons.videocam_off_outlined,
-                    size: 34, color: DeckColors.error),
-                '打印机摄像头地址无效'),
-          ),
+          child: _box(_overlay(
+              const Icon(Icons.videocam_off_outlined,
+                  size: 34, color: DeckColors.error),
+              '打印机摄像头地址无效')),
         ),
       );
     }
@@ -192,9 +203,7 @@ class _CameraTileState extends State<CameraTile> {
       borderRadius: BorderRadius.circular(14),
       child: Container(
         color: Colors.black,
-        child: AspectRatio(
-          aspectRatio: widget.aspectRatio,
-          child: Stack(fit: StackFit.expand, children: [
+        child: _box(Stack(fit: StackFit.expand, children: [
             if (controller != null && _error == null)
               Video(controller: controller, fit: BoxFit.contain)
             else if (_error != null)

@@ -74,9 +74,9 @@ class DashboardPage extends ConsumerWidget {
 ///
 /// - `compact: false` (default, narrow pushed route): big progress ring,
 ///   temperature card and control bar.
-/// - `compact: true` (monitoring screen's right pane, 优化需求 3): a slim
-///   status bar pinned at the top, the camera section taking the rest of
-///   the space, AMS/HMS/device info collapsed into a bottom tile.
+/// - `compact: true` (monitoring screen's right pane, 反馈 2026-10-20): a
+///   slim side-by-side info row at the top (status/AMS/device, plus HMS
+///   while erroring) and the auto-fit camera wall taking the rest.
 class DashboardBody extends ConsumerWidget {
   const DashboardBody({
     super.key,
@@ -118,21 +118,52 @@ class DashboardBody extends ConsumerWidget {
     final accent = stateColor(s.gcodeState);
 
     if (compact) {
+      // 反馈 2026-10-20: status/AMS/HMS/device side by side in one slim
+      // top row, the camera wall taking all remaining space (auto-fit to
+      // camera count, tap to zoom).
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _CompactStatusBar(
-              profileId: profileId, s: s, accent: accent, live: conn.live),
-          const SizedBox(height: 8),
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-              children: [
-                PrinterCameraSection(profileId: profileId),
-                _ExtrasTile(s: s),
-              ],
-            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            // Fixed height, not IntrinsicHeight: SegmentedButton's render
+            // object cannot answer the dry-layout pass intrinsics need
+            // (crashed on first frame). Adaptive instead: wide enough for
+            // one control line keeps the row slim; below ~1080 the status
+            // card's controls wrap and need the taller box.
+            child: LayoutBuilder(builder: (context, box) {
+              // While HMS reports an error a 4th card joins the row and
+              // squeezes everyone - give the row the taller box then.
+              final h = box.maxWidth >= 1080 && !s.hasError ? 150.0 : 196.0;
+              return SizedBox(
+                height: h,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      flex: 5,
+                      child: _StatusCard(
+                          profileId: profileId,
+                          s: s,
+                          accent: accent,
+                          live: conn.live),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(flex: 4, child: AmsCard(s: s)),
+                    const SizedBox(width: 8),
+                    Expanded(flex: 4, child: DeviceCard(s: s)),
+                    if (s.hasError) ...[
+                      const SizedBox(width: 8),
+                      Expanded(
+                          flex: 4, child: HmsCard(state: s, maxEntries: 2)),
+                    ],
+                  ],
+                ),
+              );
+            }),
           ),
+          const SizedBox(height: 8),
+          Expanded(child: CameraWallSection(profileId: profileId)),
         ],
       );
     }
@@ -214,8 +245,7 @@ class _HeaderCard extends StatelessWidget {
             Row(children: [
               StateBadge(state: s.gcodeState),
               const Spacer(),
-              if (s.doorOpen == true)
-                const _DoorChip(),
+              if (s.doorOpen == true) const _DoorChip(),
             ]),
             const SizedBox(height: 16),
             ProgressRing(
@@ -285,16 +315,24 @@ class _TempCard extends StatelessWidget {
           color: DeckColors.nozzle,
         ),
       StatChip(
-          label: '热床', value: fmtTemp(s.bedTemp, s.bedTarget), color: DeckColors.bed),
+          label: '热床',
+          value: fmtTemp(s.bedTemp, s.bedTarget),
+          color: DeckColors.bed),
       if (s.chamberTemp > 0)
         StatChip(
-            label: '腔体', value: fmtTemp(s.chamberTemp), color: DeckColors.chamber),
+            label: '腔体',
+            value: fmtTemp(s.chamberTemp),
+            color: DeckColors.chamber),
       StatChip(
-          label: '散热风扇', value: '${s.fans.cooling}%', color: DeckColors.running),
+          label: '散热风扇',
+          value: '${s.fans.cooling}%',
+          color: DeckColors.running),
       StatChip(
           label: '辅助风扇', value: '${s.fans.aux}%', color: DeckColors.prepare),
       StatChip(
-          label: '腔体风扇', value: '${s.fans.chamber}%', color: DeckColors.chamber),
+          label: '腔体风扇',
+          value: '${s.fans.chamber}%',
+          color: DeckColors.chamber),
     ];
 
     return Card(
@@ -326,12 +364,19 @@ class AmsCard extends StatelessWidget {
             const Text('AMS 耗材',
                 style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
             const SizedBox(height: 10),
-            if (s.ams != null)
-              AmsStrip(ams: s.ams!)
-            else
-              const Text('未检测到 AMS',
-                  style: TextStyle(
-                      fontSize: 13, color: DeckColors.textSecondary)),
+            // Scroll instead of overflowing when the compact top row's
+            // fixed height is shorter than the strip needs (narrow panes
+            // wrap the tray swatches); loose flex keeps natural height in
+            // the full dashboard.
+            Flexible(
+              child: SingleChildScrollView(
+                child: s.ams != null
+                    ? AmsStrip(ams: s.ams!)
+                    : const Text('未检测到 AMS',
+                        style: TextStyle(
+                            fontSize: 13, color: DeckColors.textSecondary)),
+              ),
+            ),
           ],
         ),
       ),
@@ -355,10 +400,8 @@ class DeviceCard extends StatelessWidget {
           children: [
             _kv('WiFi', s.wifiSignal != null ? '${s.wifiSignal} dBm' : '-'),
             _kv('IP', s.localIp.isEmpty ? '-' : s.localIp),
-            _kv('速度',
-                s.speedLevel > 0 ? _speedLabel(s.speedLevel) : '-'),
-            _kv('腔灯',
-                s.lightState < 0 ? '-' : (s.lightState == 1 ? '开' : '关')),
+            _kv('速度', s.speedLevel > 0 ? _speedLabel(s.speedLevel) : '-'),
+            _kv('腔灯', s.lightState < 0 ? '-' : (s.lightState == 1 ? '开' : '关')),
           ],
         ),
       ),
@@ -439,8 +482,8 @@ class _ControlBar extends ConsumerWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                      backgroundColor: DeckColors.error),
+                  style:
+                      FilledButton.styleFrom(backgroundColor: DeckColors.error),
                   onPressed: enabled
                       ? () => confirmStopPrint(context, notifier)
                       : null,
@@ -451,7 +494,9 @@ class _ControlBar extends ConsumerWidget {
             ]),
             const SizedBox(height: 10),
             Row(children: [
-              const Text('速度', style: TextStyle(fontSize: 12, color: DeckColors.textSecondary)),
+              const Text('速度',
+                  style:
+                      TextStyle(fontSize: 12, color: DeckColors.textSecondary)),
               const SizedBox(width: 8),
               Expanded(
                 child: SegmentedButton<int>(
@@ -462,9 +507,8 @@ class _ControlBar extends ConsumerWidget {
                     ButtonSegment(value: 4, label: Text('疯狂')),
                   ],
                   selected: {s.speedLevel > 0 ? s.speedLevel : 2},
-                  onSelectionChanged: enabled
-                      ? (sel) => notifier.setSpeed(sel.first)
-                      : null,
+                  onSelectionChanged:
+                      enabled ? (sel) => notifier.setSpeed(sel.first) : null,
                   style: const ButtonStyle(
                     visualDensity: VisualDensity.compact,
                   ),
@@ -473,7 +517,9 @@ class _ControlBar extends ConsumerWidget {
             ]),
             const SizedBox(height: 10),
             Row(children: [
-              const Text('腔灯', style: TextStyle(fontSize: 12, color: DeckColors.textSecondary)),
+              const Text('腔灯',
+                  style:
+                      TextStyle(fontSize: 12, color: DeckColors.textSecondary)),
               const Spacer(),
               Switch(
                 value: s.lightState == 1,
@@ -485,7 +531,6 @@ class _ControlBar extends ConsumerWidget {
       ),
     );
   }
-
 }
 
 /// Shared stop confirmation (control bar + compact status bar).
@@ -514,11 +559,11 @@ void confirmStopPrint(BuildContext context, ConnectionNotifier notifier) {
   );
 }
 
-/// Slim status + control bar for the compact pane (优化需求 3): two dense
-/// rows pinned at the top of the right pane, leaving the pane's height
-/// to the camera section below.
-class _CompactStatusBar extends ConsumerWidget {
-  const _CompactStatusBar({
+/// Status + control card for the compact pane's top info row: dense task,
+/// progress, temps and controls so the row stays slim and the camera wall
+/// below keeps the space (反馈 2026-10-20).
+class _StatusCard extends ConsumerWidget {
+  const _StatusCard({
     required this.profileId,
     required this.s,
     required this.accent,
@@ -537,7 +582,6 @@ class _CompactStatusBar extends ConsumerWidget {
     final canResume = live && s.gcodeState == GcodeState.pause;
 
     return Card(
-      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
         child: Column(
@@ -586,74 +630,84 @@ class _CompactStatusBar extends ConsumerWidget {
                 _temp('热床', s.bedTemp, s.bedTarget),
                 if (s.chamberTemp > 0) _temp('腔体', s.chamberTemp, null),
                 if (s.printing)
-                  Text('层 ${s.layerNum}/${s.totalLayers} · 剩 ${fmtRemaining(s.remainingMinutes)}',
+                  Text(
+                      '层 ${s.layerNum}/${s.totalLayers} · 剩 ${fmtRemaining(s.remainingMinutes)}',
                       style: const TextStyle(
                           fontSize: 12, color: DeckColors.textSecondary)),
               ],
             ),
             const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 6,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                if (canPause || canResume)
-                  FilledButton.tonalIcon(
-                    onPressed: () async =>
-                        canPause ? notifier.pause() : notifier.resume(),
-                    icon: Icon(canPause ? Icons.pause : Icons.play_arrow,
-                        size: 16),
-                    label: Text(canPause ? '暂停' : '恢复',
-                        style: const TextStyle(fontSize: 12)),
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      minimumSize: const Size(0, 32),
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            // Controls are the row's compressible part: in the compact top
+            // row's fixed height a narrow card can't show every control
+            // line - scroll instead of painting overflow stripes.
+            Flexible(
+              child: SingleChildScrollView(
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    if (canPause || canResume)
+                      FilledButton.tonalIcon(
+                        onPressed: () async =>
+                            canPause ? notifier.pause() : notifier.resume(),
+                        icon: Icon(canPause ? Icons.pause : Icons.play_arrow,
+                            size: 16),
+                        label: Text(canPause ? '暂停' : '恢复',
+                            style: const TextStyle(fontSize: 12)),
+                        style: FilledButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          minimumSize: const Size(0, 32),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                      ),
+                    IconButton.filledTonal(
+                      tooltip: '停止',
+                      icon: const Icon(Icons.stop, size: 18),
+                      style: IconButton.styleFrom(
+                        backgroundColor:
+                            DeckColors.error.withValues(alpha: 0.15),
+                        foregroundColor: DeckColors.error,
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      onPressed: live
+                          ? () => confirmStopPrint(context, notifier)
+                          : null,
                     ),
-                  ),
-                IconButton.filledTonal(
-                  tooltip: '停止',
-                  icon: const Icon(Icons.stop, size: 18),
-                  style: IconButton.styleFrom(
-                    backgroundColor: DeckColors.error.withValues(alpha: 0.15),
-                    foregroundColor: DeckColors.error,
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  onPressed:
-                      live ? () => confirmStopPrint(context, notifier) : null,
-                ),
-                const Text('速度',
-                    style: TextStyle(
-                        fontSize: 12, color: DeckColors.textSecondary)),
-                SegmentedButton<int>(
-                  segments: const [
-                    ButtonSegment(value: 1, label: Text('静音')),
-                    ButtonSegment(value: 2, label: Text('标准')),
-                    ButtonSegment(value: 3, label: Text('运动')),
-                    ButtonSegment(value: 4, label: Text('疯狂')),
+                    const Text('速度',
+                        style: TextStyle(
+                            fontSize: 12, color: DeckColors.textSecondary)),
+                    SegmentedButton<int>(
+                      segments: const [
+                        ButtonSegment(value: 1, label: Text('静音')),
+                        ButtonSegment(value: 2, label: Text('标准')),
+                        ButtonSegment(value: 3, label: Text('运动')),
+                        ButtonSegment(value: 4, label: Text('疯狂')),
+                      ],
+                      selected: {s.speedLevel > 0 ? s.speedLevel : 2},
+                      onSelectionChanged:
+                          live ? (sel) => notifier.setSpeed(sel.first) : null,
+                      showSelectedIcon: false,
+                      style: const ButtonStyle(
+                        visualDensity:
+                            VisualDensity(horizontal: -4, vertical: -2),
+                        textStyle:
+                            WidgetStatePropertyAll(TextStyle(fontSize: 11)),
+                      ),
+                    ),
+                    const Icon(Icons.lightbulb_outline,
+                        size: 14, color: DeckColors.textSecondary),
+                    Transform.scale(
+                      scale: 0.8,
+                      child: Switch(
+                        value: s.lightState == 1,
+                        onChanged: live ? (v) => notifier.setLight(v) : null,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ),
                   ],
-                  selected: {s.speedLevel > 0 ? s.speedLevel : 2},
-                  onSelectionChanged:
-                      live ? (sel) => notifier.setSpeed(sel.first) : null,
-                  showSelectedIcon: false,
-                  style: const ButtonStyle(
-                    visualDensity:
-                        VisualDensity(horizontal: -4, vertical: -2),
-                    textStyle:
-                        WidgetStatePropertyAll(TextStyle(fontSize: 11)),
-                  ),
                 ),
-                const Icon(Icons.lightbulb_outline,
-                    size: 14, color: DeckColors.textSecondary),
-                Transform.scale(
-                  scale: 0.8,
-                  child: Switch(
-                    value: s.lightState == 1,
-                    onChanged: live ? (v) => notifier.setLight(v) : null,
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                ),
-              ],
+              ),
             ),
           ],
         ),
@@ -665,35 +719,6 @@ class _CompactStatusBar extends ConsumerWidget {
         target != null && target > 0
             ? '$label ${t.round()}°/${target.round()}°'
             : '$label ${t.round()}°',
-        style: const TextStyle(
-            fontSize: 12, color: DeckColors.textSecondary),
+        style: const TextStyle(fontSize: 12, color: DeckColors.textSecondary),
       );
-}
-
-/// Collapsible AMS / HMS / device details at the bottom of the compact
-/// pane; auto-opens when the printer is reporting an error.
-class _ExtrasTile extends StatelessWidget {
-  const _ExtrasTile({required this.s});
-
-  final BambuState s;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      child: ExpansionTile(
-        tilePadding: const EdgeInsets.symmetric(horizontal: 14),
-        childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-        initiallyExpanded: s.hasError,
-        title: const Text('AMS / 报错 / 设备信息',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-        children: [
-          AmsCard(s: s),
-          const SizedBox(height: 10),
-          HmsCard(state: s),
-          const SizedBox(height: 10),
-          DeviceCard(s: s),
-        ],
-      ),
-    );
-  }
 }

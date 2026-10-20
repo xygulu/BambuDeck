@@ -391,8 +391,12 @@ class _TraySwatch extends StatelessWidget {
 /// HMS error card: worst-first list with severity color coding
 /// (fatal red / serious orange / common yellow).
 class HmsCard extends StatelessWidget {
-  const HmsCard({super.key, required this.state});
+  const HmsCard({super.key, required this.state, this.maxEntries = 4});
   final BambuState state;
+
+  /// Cap on listed HMS entries - the compact top row passes 2 so the
+  /// whole info row stays slim even when the printer is chatty.
+  final int maxEntries;
 
   @override
   Widget build(BuildContext context) {
@@ -426,7 +430,7 @@ class HmsCard extends StatelessWidget {
           ]),
           const SizedBox(height: 6),
           if (state.hms.isNotEmpty)
-            for (final e in state.hms.take(4))
+            for (final e in state.hms.take(maxEntries))
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 2),
                 child: Column(
