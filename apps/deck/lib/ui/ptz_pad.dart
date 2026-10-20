@@ -2,16 +2,17 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../data/onvif_ptz.dart';
+import '../data/ptz_client.dart';
 
-/// Press-and-hold PTZ pad for ONVIF cameras. Probes lazily on first
-/// build; hides itself when the camera has no reachable ONVIF service.
-/// Movement re-issues ContinuousMove every 250 ms while held and sends
-/// Stop on release, so a dropped packet never leaves the camera spinning.
+/// Press-and-hold PTZ pad. The concrete transport is a [PtzClient] (ONVIF or
+/// HCNetSDK) chosen by the enclosing tile; this widget only drives the common
+/// probe/move/stop surface. Movement re-issues the move every 250 ms while
+/// held and sends Stop on release, so a dropped packet never leaves the
+/// camera spinning.
 class PtzPad extends StatefulWidget {
   const PtzPad({super.key, required this.client});
 
-  final OnvifPtz client;
+  final PtzClient client;
 
   @override
   State<PtzPad> createState() => _PtzPadState();
@@ -83,7 +84,7 @@ class _PtzPadState extends State<PtzPad> {
     // (用户反馈 2026-10-20: 隐藏了就没人知道有云台).
     final hint = _available
         ? '云台 · 长按方向键转动,松开停止'
-        : '云台不可用 - 需在摄像头 App 里开启 ONVIF(萤石:设备设置 → 本地服务)';
+        : '云台不可用 - 请确认摄像头支持 ONVIF 或萤石本地服务';
     return Tooltip(
       message: hint,
       child: AnimatedOpacity(

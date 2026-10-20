@@ -4,6 +4,8 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 
+import 'ptz_client.dart';
+
 /// Minimal ONVIF PTZ client (ver20/wsdl) for third-party cameras.
 /// Covers what the monitoring tiles need: probe the device for a media
 /// profile token, then ContinuousMove while a pad button is held and Stop
@@ -14,7 +16,7 @@ import 'package:crypto/crypto.dart';
 /// Devices expose their services under /onvif/*; the exact suffix varies
 /// (…_service vs plain), so [probe] walks the common candidates once and
 /// remembers what worked.
-class OnvifPtz {
+class OnvifPtz implements PtzClient {
   OnvifPtz({
     required this.host,
     this.port = 8899,
@@ -34,11 +36,13 @@ class OnvifPtz {
   String? _ptzPath;
   final _http = HttpClient()..connectionTimeout = const Duration(seconds: 3);
 
+  @override
   bool get available => _profileToken != null;
 
   /// Returns true when the camera answered GetProfiles with a profile
   /// token (i.e. ONVIF is reachable and credentials work). Safe to call
   /// repeatedly - the result is cached.
+  @override
   Future<bool> probe() async {
     if (_profileToken != null) return true;
     for (final path in _mediaPaths) {
@@ -59,6 +63,7 @@ class OnvifPtz {
 
   /// Continuous move. [pan]/[tilt] in -1..1, [zoom] 0..1; a repeat timer
   /// on the UI side keeps re-issuing this while the button is held.
+  @override
   Future<void> move({double pan = 0, double tilt = 0, double zoom = 0}) async {
     final token = _profileToken;
     if (token == null) return;
@@ -73,6 +78,7 @@ class OnvifPtz {
 </ContinuousMove>''');
   }
 
+  @override
   Future<void> stop() async {
     final token = _profileToken;
     if (token == null) return;
@@ -139,5 +145,6 @@ class OnvifPtz {
     return text;
   }
 
+  @override
   void dispose() => _http.close();
 }

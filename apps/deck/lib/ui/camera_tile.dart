@@ -9,8 +9,10 @@ import '../core/theme.dart';
 import '../data/app_settings.dart';
 import '../data/bambu_mjpeg.dart';
 import '../data/camera_profile.dart';
+import '../data/hcnetsdk.dart';
 import '../data/log_buffer.dart';
 import '../data/onvif_ptz.dart';
+import '../data/ptz_client.dart';
 import '../data/rtsp_quality.dart';
 import 'mjpeg_tile.dart';
 import 'ptz_pad.dart';
@@ -71,7 +73,7 @@ class _CameraTileState extends ConsumerState<CameraTile> {
   VideoController? _controller;
   String? _error;
   StreamSubscription<String>? _errSub;
-  OnvifPtz? _ptz;
+  PtzClient? _ptz;
 
   @override
   void initState() {
@@ -308,9 +310,11 @@ class _CameraTileState extends ConsumerState<CameraTile> {
     );
   }
 
-  /// ONVIF pad for third-party RTSP cameras. The client lives in this
-  /// widget's state (created once per stream URL); the pad hides itself
-  /// when the camera has no ONVIF service.
+  /// PTZ pad for third-party RTSP cameras. The client lives in this widget's
+  /// state (created once per stream URL); it probes ONVIF first and falls back
+  /// to the EZVIZ/Hikvision command port, so a camera works whether or not
+  /// ONVIF is enabled in its own app. The pad stays visible (dimmed) when no
+  /// transport is reachable.
   Widget _ptzPadFor(String url) {
     final u = Uri.tryParse(url);
     if (u == null ||
@@ -324,7 +328,10 @@ class _CameraTileState extends ConsumerState<CameraTile> {
       final user = sep < 0 ? u.userInfo : u.userInfo.substring(0, sep);
       final pass =
           sep < 0 ? '' : Uri.decodeComponent(u.userInfo.substring(sep + 1));
-      _ptz = OnvifPtz(host: u.host, port: 8899, username: user, password: pass);
+      _ptz = FallbackPtz([
+        OnvifPtz(host: u.host, port: 8899, username: user, password: pass),
+        HcNetSdkPtz(host: u.host, username: user, password: pass),
+      ]);
     }
     return PtzPad(client: _ptz!);
   }
