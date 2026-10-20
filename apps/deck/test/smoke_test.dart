@@ -124,7 +124,7 @@ void main() {
     expect(find.text('打印房 P1S'), findsOneWidget);
     expect(find.text('局域网 · 已连接'), findsOneWidget);
     expect(find.text('打印中'), findsOneWidget); // state badge
-    expect(find.text('42%'), findsOneWidget); // progress ring
+    expect(find.text('benchy'), findsOneWidget); // slim card task line
   });
 
   testWidgets('progress ring paints and reports percent', (tester) async {

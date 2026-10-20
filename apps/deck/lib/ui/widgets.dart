@@ -363,9 +363,13 @@ class _TraySwatch extends StatelessWidget {
               decoration: BoxDecoration(
                 color: color,
                 shape: BoxShape.circle,
+                // 深色耗材(尤其黑色)在深色背景下糊成一团: 常驻一圈半透明
+                // 白色细线描边 (反馈 2026-10-20); 进料中换绿环。
                 border: Border.all(
-                  color: active ? DeckColors.running : Colors.transparent,
-                  width: active ? 2.5 : 0,
+                  color: active
+                      ? DeckColors.running
+                      : Colors.white.withValues(alpha: 0.7),
+                  width: active ? 2.5 : 1.5,
                 ),
               ),
             ),

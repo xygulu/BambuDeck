@@ -158,6 +158,12 @@ class _CameraCardState extends ConsumerState<_CameraCard> {
                     ]),
               ),
               IconButton(
+                icon: const Icon(Icons.edit_outlined, size: 19),
+                tooltip: '编辑摄像头',
+                onPressed: () => showAddCameraDialog(context, ref,
+                    editing: camera),
+              ),
+              IconButton(
                 icon: const Icon(Icons.delete_outline, size: 20),
                 tooltip: '删除摄像头',
                 onPressed: widget.onDelete,
@@ -172,21 +178,32 @@ class _CameraCardState extends ConsumerState<_CameraCard> {
 
 /// Add-camera dialog: RTSP/ONVIF URL (with LAN auto-scan) or the
 /// printer's own camera.
-Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
-  final nameCtrl = TextEditingController();
+/// 添加 / 编辑摄像头 ([editing] 传入既有条目即为编辑模式, 反馈 2026-10-20:
+/// 名称 / RTSP 连接信息可改)。编辑保持 id / enabled / 码流档位不变。
+Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
+    {CameraProfile? editing}) async {
+  final nameCtrl = TextEditingController(text: editing?.name ?? '');
   final subnetCtrl = TextEditingController(text: await _guessSubnet());
   if (!context.mounted) return;
   // The RTSP field starts as an editable template - the cursor sits right
   // after "admin:" so the password is the first thing typed. The hint
   // would vanish on first keystroke; this never does.
   final template = 'rtsp://admin:密码@${subnetCtrl.text}.10:554/stream1';
-  final urlCtrl = TextEditingController(text: template)
+  final initialUrl =
+      editing == null ? template : (editing.url.isEmpty ? template : editing.url);
+  final urlCtrl = TextEditingController(text: initialUrl)
     ..value = TextEditingValue(
-      text: template,
-      selection: const TextSelection.collapsed(offset: 12),
+      text: initialUrl,
+      selection: TextSelection.collapsed(offset: initialUrl.length),
     );
-  var type = CameraSourceType.rtsp;
+  var type = editing?.sourceType ?? CameraSourceType.rtsp;
   PrinterProfile? linked;
+  if (editing != null && editing.printerIds.isNotEmpty) {
+    final printers = ref.read(printersProvider).valueOrNull ?? const [];
+    for (final p in printers) {
+      if (p.id == editing.printerIds.first) linked = p;
+    }
+  }
 
   // LAN scan state.
   var scanning = false;
@@ -262,7 +279,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setState) => AlertDialog(
         backgroundColor: DeckColors.surface,
-        title: const Text('添加摄像头'),
+        title: Text(editing == null ? '添加摄像头' : '编辑摄像头'),
         content: SizedBox(
           width: 460,
           child: SingleChildScrollView(
@@ -299,23 +316,26 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
                     errorText: urlError.isEmpty ? null : urlError,
                   ),
                 ),
-                const SizedBox(height: 10),
-                Row(children: [
-                  Expanded(
-                    child: TextField(
-                      controller: subnetCtrl,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                          labelText: '扫描网段前缀',
-                          hintText: '192.168.100'),
+                // 编辑模式只改名称/连接信息, 网段扫描是添加时的入口。
+                if (editing == null) ...[
+                  const SizedBox(height: 10),
+                  Row(children: [
+                    Expanded(
+                      child: TextField(
+                        controller: subnetCtrl,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                            labelText: '扫描网段前缀',
+                            hintText: '192.168.100'),
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton.tonal(
-                    onPressed: scanning ? null : () => runScan(setState),
-                    child: Text(scanning ? '扫描中…' : '自动扫描'),
-                  ),
-                ]),
+                    const SizedBox(width: 8),
+                    FilledButton.tonal(
+                      onPressed: scanning ? null : () => runScan(setState),
+                      child: Text(scanning ? '扫描中…' : '自动扫描'),
+                    ),
+                  ]),
+                ],
                 if (scanning) ...[
                   const SizedBox(height: 8),
                   LinearProgressIndicator(value: total == 0 ? null : done / total),
@@ -427,7 +447,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
                 }
                 Navigator.pop(ctx, true);
               },
-              child: const Text('添加')),
+              child: Text(editing == null ? '添加' : '保存')),
         ],
       ),
     ),
@@ -439,12 +459,24 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref) async {
           ? (linked?.name ?? '打印机摄像头')
           : '摄像头')
       : nameCtrl.text.trim();
+  final printerIds = linked?.id == null ? const <String>[] : [linked!.id];
+
+  if (editing != null) {
+    // 编辑: 保留 id / enabled / 码流档位, 只改名称、连接信息与绑定。
+    await ref.read(camerasProvider.notifier).replace(editing.copyWith(
+          name: name,
+          url: type == CameraSourceType.rtsp ? urlCtrl.text.trim() : '',
+          printerIds: printerIds,
+        ));
+    return;
+  }
+
   final camera = CameraProfile(
     id: 'c_${DateTime.now().millisecondsSinceEpoch}',
     name: name,
     sourceType: type,
     url: type == CameraSourceType.rtsp ? urlCtrl.text.trim() : '',
-    printerIds: linked?.id == null ? const [] : [linked!.id],
+    printerIds: printerIds,
   );
   await ref.read(camerasProvider.notifier).add(camera);
 }

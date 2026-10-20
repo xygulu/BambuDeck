@@ -1,0 +1,97 @@
+import 'package:bambu_protocol/bambu_protocol.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../core/theme.dart';
+import '../../data/printer_profile.dart';
+import '../../data/providers.dart';
+
+/// 编辑打印机 (反馈 2026-10-20): 名称, 局域网连接信息 (IP / 访问码 /
+/// 序列号)。云端打印机只开放改名 - 连接信息随账号。保存即写回 profile,
+/// ConnectionNotifier 对 profile 的 watch 会自动用新配置重连。访问码输入
+/// 框打码, 且不落日志。
+Future<void> showEditPrinterDialog(
+    BuildContext context, WidgetRef ref, PrinterProfile profile) async {
+  final lan = profile.mode == PrinterMode.lan;
+  final nameCtrl = TextEditingController(text: profile.name);
+  final ipCtrl = TextEditingController(text: profile.ip);
+  final codeCtrl = TextEditingController(text: profile.accessCode);
+  final serialCtrl = TextEditingController(text: profile.serial);
+
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: DeckColors.surface,
+      title: Text('编辑打印机 · ${profile.name}'),
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: nameCtrl,
+              decoration: const InputDecoration(labelText: '名称'),
+            ),
+            if (lan) ...[
+              const SizedBox(height: 12),
+              TextField(
+                controller: ipCtrl,
+                decoration: const InputDecoration(
+                    labelText: 'IP / 主机', hintText: '192.168.100.110'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: codeCtrl,
+                obscureText: true,
+                decoration: const InputDecoration(
+                    labelText: '访问码', hintText: '打印机屏幕 >> 局域网'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: serialCtrl,
+                decoration: const InputDecoration(labelText: '序列号'),
+              ),
+            ] else ...[
+              const SizedBox(height: 12),
+              Text(
+                '云端打印机仅支持改名;连接信息跟随拓竹账号。',
+                style: TextStyle(
+                    fontSize: 12,
+                    color: DeckColors.textSecondary.withValues(alpha: 0.9)),
+              ),
+            ],
+          ]),
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消')),
+        FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('保存')),
+      ],
+    ),
+  );
+  if (ok != true) return;
+
+  final printers = ref.read(printersProvider).valueOrNull ?? const [];
+  await ref.read(printersProvider.notifier).replaceAll([
+    for (final p in printers)
+      if (p.id == profile.id)
+        PrinterProfile(
+          id: p.id,
+          name: nameCtrl.text.trim().isEmpty ? p.name : nameCtrl.text.trim(),
+          mode: p.mode,
+          serial: lan ? serialCtrl.text.trim() : p.serial,
+          ip: ipCtrl.text.trim(),
+          accessCode: codeCtrl.text.trim(),
+          region: p.region,
+          token: p.token,
+          userId: p.userId,
+          model: p.model,
+          builtinCam: p.builtinCam,
+        )
+      else
+        p,
+  ]);
+}

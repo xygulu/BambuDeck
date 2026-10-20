@@ -6,6 +6,7 @@ import '../../core/format.dart';
 import '../../core/theme.dart';
 import '../../data/providers.dart';
 import '../../ui/widgets.dart';
+import '../printers/edit_printer_dialog.dart';
 import 'printer_camera_section.dart';
 
 /// Full monitoring dashboard for one printer: progress ring, temperatures,
@@ -37,6 +38,11 @@ class DashboardPage extends ConsumerWidget {
               padding: const EdgeInsets.only(right: 4),
               child: Center(child: NetworkInfoText(s: state)),
             ),
+          IconButton(
+            icon: const Icon(Icons.edit_outlined, size: 20),
+            tooltip: '编辑打印机',
+            onPressed: () => showEditPrinterDialog(context, ref, profile),
+          ),
           IconButton(
             icon: const Icon(Icons.delete_outline),
             tooltip: '删除打印机',
@@ -656,6 +662,10 @@ class _StatusCard extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Row(children: [
+              // 任务预览图 (反馈 2026-10-20): 云端任务封面上屏, 同 Bambu
+              // Handy; 无云端凭据的打印机整个不占位。
+              _TaskCover(profileId: profileId, taskName: s.subtaskName),
+              const SizedBox(width: 8),
               StateBadge(state: s.gcodeState),
               const SizedBox(width: 8),
               Expanded(
@@ -826,4 +836,43 @@ class _StatusCard extends ConsumerWidget {
             : '$label ${t.round()}°',
         style: const TextStyle(fontSize: 12, color: DeckColors.textSecondary),
       );
+}
+
+/// Plate preview of the current task (Bambu Handy 风格, 反馈 2026-10-20):
+/// the cloud task cover, fetched per (printer, task). Hidden entirely for
+/// printers without a cloud token; placeholder box while loading/missing.
+class _TaskCover extends ConsumerWidget {
+  const _TaskCover({required this.profileId, required this.taskName});
+
+  final String profileId;
+  final String taskName;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final profile = ref.watch(printersProvider.notifier).byId(profileId);
+    if (profile == null || profile.token.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final cover = ref
+        .watch(taskCoverProvider((profileId, taskName)))
+        .valueOrNull;
+    final placeholder = Container(
+      width: 46,
+      height: 46,
+      color: DeckColors.border.withValues(alpha: 0.35),
+      alignment: Alignment.center,
+      child: const Icon(Icons.image_outlined,
+          size: 18, color: DeckColors.textSecondary),
+    );
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: cover == null
+          ? placeholder
+          : Image.network(cover,
+              width: 46,
+              height: 46,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => placeholder),
+    );
+  }
 }

@@ -3,12 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
-import '../../data/app_settings.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 import '../../ui/widgets.dart';
 import '../dashboard/dashboard_page.dart';
-import '../dashboard/printer_camera_section.dart';
+import '../printers/edit_printer_dialog.dart';
 
 /// Which primary view the monitoring shell shows.
 enum MonitorPerspective { printers, cameras }
@@ -192,6 +191,11 @@ class _PrinterPane extends ConsumerWidget {
               const SizedBox(width: 10),
             ],
             IconButton(
+              icon: const Icon(Icons.edit_outlined, size: 19),
+              tooltip: '编辑打印机',
+              onPressed: () => showEditPrinterDialog(context, ref, profile),
+            ),
+            IconButton(
               icon: const Icon(Icons.delete_outline, size: 20),
               tooltip: '删除打印机',
               onPressed: () => _confirmRemove(context, ref, profile.name),
@@ -237,9 +241,9 @@ class _PrinterPane extends ConsumerWidget {
 }
 
 /// The printer card shared by the left rail and the narrow-window grid.
-/// Shows state at a glance (需求 0) and carries the two inline controls:
-/// 暂停/恢复 for a running/paused job and the built-in camera switch that
-/// drives the right pane's picture (session override).
+/// Slim glance card (反馈 2026-10-20: 去掉控制行、去重状态详情): name +
+/// state badge + one task line + a hairline progress bar; temperature,
+/// layer and control detail live only in the right pane's status card.
 class MonitorPrinterCard extends ConsumerWidget {
   const MonitorPrinterCard({
     super.key,
@@ -256,17 +260,6 @@ class MonitorPrinterCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final conn = ref.watch(connectionProvider(profile.id));
     final state = conn.state;
-    final settings =
-        ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
-    // Effective built-in camera choice; the switch writes the persisted
-    // per-printer tri-state so it stays in sync with the binding dialog.
-    final builtinOn =
-        profile.builtinCamDefaultOn(settings.builtinCamDefault);
-    final canPause = conn.live &&
-        state != null &&
-        state.gcodeState == GcodeState.running;
-    final canResume =
-        conn.live && state != null && state.gcodeState == GcodeState.pause;
 
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -309,90 +302,31 @@ class MonitorPrinterCard extends ConsumerWidget {
                 else
                   _connDot(conn.status),
               ]),
-              const SizedBox(height: 10),
-              Row(children: [
-                SizedBox(
-                  width: 56,
-                  height: 56,
-                  child: ProgressRing(
-                    progress: state?.progress ?? 0,
-                    color: state == null
-                        ? DeckColors.idle
-                        : stateColor(state.gcodeState),
-                    size: 56,
-                    stroke: 6,
+              if (state != null) ...[
+                const SizedBox(height: 8),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(2),
+                  child: LinearProgressIndicator(
+                    value: state.progress / 100,
+                    minHeight: 3,
+                    color: stateColor(state.gcodeState),
+                    backgroundColor: DeckColors.border.withValues(alpha: 0.6),
                   ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        state?.subtaskName.isNotEmpty == true
-                            ? state!.subtaskName
-                            : '无任务',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontSize: 13, color: DeckColors.textPrimary),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        state == null
-                            ? '等待连接…'
-                            : '喷嘴 ${state.nozzleTemp.round()}° · 热床 ${state.bedTemp.round()}° · 层 ${state.layerNum}/${state.totalLayers}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontSize: 12, color: DeckColors.textSecondary),
-                      ),
-                      if (state?.hasError == true) ...[
-                        const SizedBox(height: 6),
-                        const Text('⚠ 打印机错误',
-                            style: TextStyle(
-                                fontSize: 12, color: DeckColors.error)),
-                      ],
-                    ],
-                  ),
+                const SizedBox(height: 6),
+                Text(
+                  state.subtaskName.isNotEmpty ? state.subtaskName : '无任务',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 12, color: DeckColors.textSecondary),
                 ),
-              ]),
-              if (canPause || canResume || profile.mode == PrinterMode.lan)
-                const SizedBox(height: 10),
-              Row(children: [
-                if (canPause || canResume)
-                  Expanded(
-                    child: FilledButton.tonalIcon(
-                      onPressed: () async {
-                        final notifier = ref.read(
-                            connectionProvider(profile.id).notifier);
-                        await (canPause ? notifier.pause() : notifier.resume());
-                      },
-                      icon: Icon(
-                          canPause ? Icons.pause : Icons.play_arrow,
-                          size: 18),
-                      label: Text(canPause ? '暂停' : '恢复',
-                          style: const TextStyle(fontSize: 13)),
-                    ),
-                  ),
-                if ((canPause || canResume) &&
-                    profile.mode == PrinterMode.lan)
-                  const SizedBox(width: 10),
-                if (profile.mode == PrinterMode.lan)
-                  Expanded(
-                    child: SwitchListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      visualDensity: VisualDensity.compact,
-                      controlAffinity: ListTileControlAffinity.leading,
-                      activeThumbColor: DeckColors.running,
-                      title: const Text('机内画面',
-                          style: TextStyle(fontSize: 12)),
-                      value: builtinOn,
-                      onChanged: (v) => setBuiltinCam(ref, profile, v),
-                    ),
-                  ),
-              ]),
+              ],
+              if (state?.hasError == true) ...[
+                const SizedBox(height: 6),
+                const Text('⚠ 打印机错误',
+                    style: TextStyle(fontSize: 12, color: DeckColors.error)),
+              ],
             ],
           ),
         ),

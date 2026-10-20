@@ -210,3 +210,27 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
 
 final connectionProvider = NotifierProvider.family<ConnectionNotifier,
     PrinterConnection, String>(ConnectionNotifier.new);
+
+/// Cover (plate preview) URL of a printer's latest cloud task - the same
+/// picture Bambu Handy shows (反馈 2026-10-20). Keyed by (profile, task):
+/// a new job name refetches. Null for LAN-only profiles (no token) or
+/// when the account has no covered task; failures degrade to null, the
+/// preview is best-effort decoration, never an error surface.
+final taskCoverProvider =
+    FutureProvider.family<String?, (String, String)>((ref, key) async {
+  final (profileId, _) = key;
+  final printers = ref.watch(printersProvider).valueOrNull ?? const [];
+  PrinterProfile? profile;
+  for (final p in printers) {
+    if (p.id == profileId) profile = p;
+  }
+  if (profile == null || profile.token.isEmpty || profile.serial.isEmpty) {
+    return null;
+  }
+  try {
+    return await fetchCloudTaskCover(
+        profile.token, profile.region, profile.serial);
+  } catch (_) {
+    return null;
+  }
+});

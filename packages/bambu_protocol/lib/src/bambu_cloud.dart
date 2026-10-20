@@ -233,3 +233,56 @@ Future<List<CloudDevice>> fetchCloudDevices(String token, CloudRegion region,
     if (client == null) own.close();
   }
 }
+
+/// Cover image URL of a device's most recent task that has one (Bambu
+/// Handy's 任务预览图). GET `{region.apiBase}/v1/user-service/my/tasks`
+/// with Bearer auth; nodes come newest-first, so the first entry for
+/// [devId] carrying a non-empty `cover` wins. Null when none does.
+Future<String?> fetchCloudTaskCover(
+  String token,
+  CloudRegion region,
+  String devId, {
+  HttpClient? client,
+}) async {
+  final own = client ?? HttpClient();
+  final uri = Uri.parse('${region.apiBase}/v1/user-service/my/tasks');
+  try {
+    final req = await own.getUrl(uri);
+    req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+    // The WAF in front of user-service drops requests without the agent UA.
+    req.headers.set(
+        HttpHeaders.userAgentHeader, 'bambu_network_agent/01.09.05.01');
+    final res = await req.close();
+    final body = await utf8.decodeStream(res);
+    if (res.statusCode != 200) {
+      throw HttpException('tasks API ${res.statusCode}: $body', uri: uri);
+    }
+    final doc = jsonDecode(body);
+    // Shape seen in the wild: {data: {nodes: [...]}}; accept a bare list
+    // under data too, and dev_id either nested or flattened on the node.
+    List<Object?> nodes = const [];
+    if (doc is Map<String, dynamic>) {
+      final data = doc['data'];
+      if (data is Map<String, dynamic>) {
+        nodes = data['nodes'] as List? ?? const [];
+      } else if (data is List) {
+        nodes = data;
+      }
+    } else if (doc is List) {
+      nodes = doc;
+    }
+    for (final n in nodes) {
+      if (n is! Map<String, dynamic>) continue;
+      final info = n['device_info'];
+      final nodeId = info is Map<String, dynamic>
+          ? info['dev_id']?.toString()
+          : n['dev_id']?.toString();
+      if (nodeId != devId) continue;
+      final cover = n['cover']?.toString() ?? '';
+      if (cover.isNotEmpty) return cover;
+    }
+    return null;
+  } finally {
+    if (client == null) own.close();
+  }
+}
