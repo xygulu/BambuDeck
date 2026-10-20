@@ -83,8 +83,10 @@ class _RingPainter extends CustomPainter {
     final center = Offset(size.width / 2, size.height / 2);
     final rect = Rect.fromCircle(center: center, radius: radius);
 
-    final startAngle = -135 * _deg;
-    final sweep = 270 * _deg;
+    // Full circle: a 270° gauge left the bottom quarter open even at
+    // 100%, which read as "the ring never closes" (反馈 2026-10-20).
+    final startAngle = -90 * _deg;
+    final sweep = 360 * _deg;
 
     final track = Paint()
       ..style = PaintingStyle.stroke
@@ -359,11 +361,24 @@ class _TraySwatch extends StatelessWidget {
       ),
       const SizedBox(height: 3),
       SizedBox(
-        width: 38,
+        width: 46,
+        child: Text(
+          tray.present && tray.type.isNotEmpty ? tray.type : '-',
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              color: DeckColors.textPrimary),
+        ),
+      ),
+      SizedBox(
+        width: 46,
         child: Text(
           tray.present
               ? '${tray.remain >= 0 ? tray.remain : '?'}%'
-              : '-',
+              : '',
           textAlign: TextAlign.center,
           style: const TextStyle(
               fontSize: 10, color: DeckColors.textSecondary),
