@@ -6,6 +6,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../core/theme.dart';
+import '../data/app_settings.dart';
 import '../data/bambu_mjpeg.dart';
 import '../data/camera_profile.dart';
 import '../data/log_buffer.dart';
@@ -37,7 +38,7 @@ VoidCallback? qualityToggler(WidgetRef ref, CameraProfile camera) =>
 /// RTSP tiles also carry camera controls: a main/sub quality chip (when
 /// [onToggleQuality] is given and the URL encodes a swappable stream) and
 /// an ONVIF PTZ pad built from the URL's own credentials.
-class CameraTile extends StatefulWidget {
+class CameraTile extends ConsumerStatefulWidget {
   const CameraTile({
     super.key,
     required this.streamUrl,
@@ -62,10 +63,10 @@ class CameraTile extends StatefulWidget {
   final bool expand;
 
   @override
-  State<CameraTile> createState() => _CameraTileState();
+  ConsumerState<CameraTile> createState() => _CameraTileState();
 }
 
-class _CameraTileState extends State<CameraTile> {
+class _CameraTileState extends ConsumerState<CameraTile> {
   Player? _player;
   VideoController? _controller;
   String? _error;
@@ -106,6 +107,12 @@ class _CameraTileState extends State<CameraTile> {
       // Live view: keep the buffer small so the picture stays close to now.
       bufferSize: 4 * 1024 * 1024,
     ));
+    // media_kit 1.2.6 has no setMuted - muting is volume 0. Start with the
+    // persisted choice so a fresh stream never blares before the toggle is
+    // touched.
+    if (ref.read(appSettingsProvider).valueOrNull?.cameraMuted ?? false) {
+      await player.setVolume(0);
+    }
     final controller = VideoController(player);
     try {
       // RTSP over TCP avoids UDP artifact storms on lossy Wi-Fi; low-latency
@@ -140,6 +147,18 @@ class _CameraTileState extends State<CameraTile> {
       LogBuffer.instance.add('[${widget.label}] 无法连接视频源: $e');
       if (mounted) setState(() => _error = '无法连接视频源: $e');
     }
+  }
+
+  /// Flip the global camera mute (persisted) and apply it to the live
+  /// player immediately.
+  void _toggleMute() {
+    final settings =
+        ref.read(appSettingsProvider).valueOrNull ?? const AppSettings();
+    final want = !settings.cameraMuted;
+    ref
+        .read(appSettingsProvider.notifier)
+        .set(settings.copyWith(cameraMuted: want));
+    _player?.setVolume(want ? 0 : 100);
   }
 
   Future<void> _teardown() async {
@@ -211,7 +230,8 @@ class _CameraTileState extends State<CameraTile> {
       borderRadius: BorderRadius.circular(14),
       child: Container(
         color: Colors.black,
-        child: _box(Stack(fit: StackFit.expand, children: [
+        child: _box(
+          Stack(fit: StackFit.expand, children: [
             if (controller != null && _error == null)
               Video(
                   controller: controller,
@@ -220,11 +240,13 @@ class _CameraTileState extends State<CameraTile> {
                   // their own chips (quality/PTP/retry).
                   controls: NoVideoControls)
             else if (_error != null)
-              _overlay(const Icon(Icons.videocam_off_outlined,
-                  size: 34, color: DeckColors.error), _error!)
+              _overlay(
+                  const Icon(Icons.videocam_off_outlined,
+                      size: 34, color: DeckColors.error),
+                  _error!)
             else
-              _overlay(const CircularProgressIndicator(strokeWidth: 2),
-                  '连接视频源…'),
+              _overlay(
+                  const CircularProgressIndicator(strokeWidth: 2), '连接视频源…'),
             if (widget.showLabel && widget.label.isNotEmpty)
               Positioned(
                 left: 10,
@@ -237,18 +259,32 @@ class _CameraTileState extends State<CameraTile> {
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(widget.label,
-                      style: const TextStyle(
-                          color: Colors.white, fontSize: 12)),
+                      style:
+                          const TextStyle(color: Colors.white, fontSize: 12)),
                 ),
               ),
-            if (showQuality)
+            if (_error == null)
               Positioned(
                 right: 10,
                 top: 10,
-                child: QualityToggle(
-                  isSub: rtspQualityOfUrl(url) == RtspQuality.sub,
-                  onToggle: widget.onToggleQuality!,
-                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  if (showQuality) ...[
+                    QualityToggle(
+                      isSub: rtspQualityOfUrl(url) == RtspQuality.sub,
+                      onToggle: widget.onToggleQuality!,
+                    ),
+                    const SizedBox(width: 6),
+                  ],
+                  // RTSP streams may carry audio; built-in MJPEG has none.
+                  MuteToggle(
+                    muted: ref
+                            .watch(appSettingsProvider)
+                            .valueOrNull
+                            ?.cameraMuted ??
+                        false,
+                    onToggle: _toggleMute,
+                  ),
+                ]),
               ),
             if (_error == null)
               Positioned(
@@ -286,11 +322,9 @@ class _CameraTileState extends State<CameraTile> {
     if (_ptz == null) {
       final sep = u.userInfo.indexOf(':');
       final user = sep < 0 ? u.userInfo : u.userInfo.substring(0, sep);
-      final pass = sep < 0
-          ? ''
-          : Uri.decodeComponent(u.userInfo.substring(sep + 1));
-      _ptz = OnvifPtz(
-          host: u.host, port: 8899, username: user, password: pass);
+      final pass =
+          sep < 0 ? '' : Uri.decodeComponent(u.userInfo.substring(sep + 1));
+      _ptz = OnvifPtz(host: u.host, port: 8899, username: user, password: pass);
     }
     return PtzPad(client: _ptz!);
   }
@@ -312,7 +346,7 @@ class _CameraTileState extends State<CameraTile> {
       );
 
   /// `rtsp://user:secret@host` → `rtsp://user:***@host`.
-  static String _maskCredentials(String url) =>
-      url.replaceAllMapped(RegExp(r'(://[^:@/]+:)[^@/]+(@)'),
-          (m) => '${m.group(1)}***${m.group(2)}');
+  static String _maskCredentials(String url) => url.replaceAllMapped(
+      RegExp(r'(://[^:@/]+:)[^@/]+(@)'),
+      (m) => '${m.group(1)}***${m.group(2)}');
 }

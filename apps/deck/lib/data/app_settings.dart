@@ -18,8 +18,7 @@ enum KioskMode {
   const KioskMode(this.label);
   final String label;
 
-  KioskMode get next => KioskMode
-      .values[(index + 1) % KioskMode.values.length];
+  KioskMode get next => KioskMode.values[(index + 1) % KioskMode.values.length];
 }
 
 /// User preferences (PRD FR-10). JSON blob in the same OS secure store as
@@ -31,6 +30,7 @@ class AppSettings {
     this.kioskMode = KioskMode.off,
     this.kioskRotateSec = 15,
     this.builtinCamDefault = true,
+    this.cameraMuted = false,
   });
 
   final bool notifyOnFinish;
@@ -42,12 +42,17 @@ class AppSettings {
   /// is `follow` (the default tri-state) inherit this.
   final bool builtinCamDefault;
 
+  /// Mute state for RTSP camera audio; the tile speaker toggle writes the
+  /// same field, so the choice survives restarts (反馈 2026-10-20).
+  final bool cameraMuted;
+
   AppSettings copyWith({
     bool? notifyOnFinish,
     bool? notifyOnError,
     KioskMode? kioskMode,
     int? kioskRotateSec,
     bool? builtinCamDefault,
+    bool? cameraMuted,
   }) =>
       AppSettings(
         notifyOnFinish: notifyOnFinish ?? this.notifyOnFinish,
@@ -55,6 +60,7 @@ class AppSettings {
         kioskMode: kioskMode ?? this.kioskMode,
         kioskRotateSec: kioskRotateSec ?? this.kioskRotateSec,
         builtinCamDefault: builtinCamDefault ?? this.builtinCamDefault,
+        cameraMuted: cameraMuted ?? this.cameraMuted,
       );
 
   Map<String, dynamic> toJson() => {
@@ -63,16 +69,17 @@ class AppSettings {
         'kioskMode': kioskMode.name,
         'kioskRotateSec': kioskRotateSec,
         'builtinCamDefault': builtinCamDefault,
+        'cameraMuted': cameraMuted,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
         notifyOnFinish: j['notifyOnFinish'] as bool? ?? true,
         notifyOnError: j['notifyOnError'] as bool? ?? true,
-        kioskMode: KioskMode.values.firstWhere(
-            (m) => m.name == j['kioskMode'],
+        kioskMode: KioskMode.values.firstWhere((m) => m.name == j['kioskMode'],
             orElse: () => KioskMode.off),
         kioskRotateSec: j['kioskRotateSec'] as int? ?? 15,
         builtinCamDefault: j['builtinCamDefault'] as bool? ?? true,
+        cameraMuted: j['cameraMuted'] as bool? ?? false,
       );
 }
 
@@ -94,8 +101,7 @@ class SecureSettingsStore implements SettingsStore {
     final raw = await storage.read(_key);
     if (raw == null || raw.isEmpty) return const AppSettings();
     try {
-      return AppSettings.fromJson(
-          jsonDecode(raw) as Map<String, dynamic>);
+      return AppSettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
     } on FormatException {
       return const AppSettings();
     }

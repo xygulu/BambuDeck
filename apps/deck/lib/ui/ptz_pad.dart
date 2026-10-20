@@ -78,38 +78,71 @@ class _PtzPadState extends State<PtzPad> {
 
   @override
   Widget build(BuildContext context) {
-    if (_probing) return const SizedBox.shrink();
-    if (!_available) return const SizedBox.shrink();
-    Widget btn(IconData icon, double pan, double tilt, String tip) =>
-        Listener(
-          onPointerDown: (_) => _start(pan, tilt),
-          onPointerUp: (_) => _end(),
-          onPointerCancel: (_) => _end(),
-          child: IconButton.filledTonal(
-            icon: Icon(icon, size: 18, color: Colors.white),
-            tooltip: tip,
-            onPressed: () {}, // press-and-hold handled by the Listener
-            style: IconButton.styleFrom(
-              backgroundColor: Colors.black.withValues(alpha: 0.45),
-            ),
+    // Always visible so the feature is discoverable; dimmed with an
+    // explanatory tooltip while the camera has no reachable ONVIF service
+    // (用户反馈 2026-10-20: 隐藏了就没人知道有云台).
+    final hint = _available
+        ? '云台 · 长按方向键转动,松开停止'
+        : '云台不可用 - 需在摄像头 App 里开启 ONVIF(萤石:设备设置 → 本地服务)';
+    return Tooltip(
+      message: hint,
+      child: AnimatedOpacity(
+        opacity: _available ? 1.0 : 0.45,
+        duration: const Duration(milliseconds: 150),
+        child: Container(
+          width: 104,
+          height: 104,
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.4),
+            shape: BoxShape.circle,
           ),
-        );
-
-    return Container(
-      padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.35),
-        borderRadius: BorderRadius.circular(12),
+          child: Stack(children: [
+            if (_probing)
+              const Center(
+                  child: SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2)))
+            else
+              const Center(
+                  child: Icon(Icons.videocam_rounded,
+                      size: 20, color: Colors.white70)),
+            _btn(Icons.keyboard_arrow_up_rounded, 0, _speed, '上转', top: 2),
+            _btn(Icons.keyboard_arrow_down_rounded, 0, -_speed, '下转',
+                bottom: 2),
+            _btn(Icons.keyboard_arrow_left_rounded, -_speed, 0, '左转', left: 2),
+            _btn(Icons.keyboard_arrow_right_rounded, _speed, 0, '右转', right: 2),
+          ]),
+        ),
       ),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        btn(Icons.keyboard_arrow_up_rounded, 0, _speed, '上转'),
-        Row(mainAxisSize: MainAxisSize.min, children: [
-          btn(Icons.keyboard_arrow_left_rounded, -_speed, 0, '左转'),
-          const SizedBox(width: 2),
-          btn(Icons.keyboard_arrow_right_rounded, _speed, 0, '右转'),
-        ]),
-        btn(Icons.keyboard_arrow_down_rounded, 0, -_speed, '下转'),
-      ]),
+    );
+  }
+
+  /// One directional key pinned to an edge of the circular pad; press and
+  /// hold is handled by the Listener (repeating ContinuousMove).
+  Widget _btn(IconData icon, double pan, double tilt, String tip,
+      {double? top, double? bottom, double? left, double? right}) {
+    final btn = Listener(
+      onPointerDown: (_) => _start(pan, tilt),
+      onPointerUp: (_) => _end(),
+      onPointerCancel: (_) => _end(),
+      child: IconButton(
+        icon: Icon(icon, size: 18, color: Colors.white),
+        tooltip: tip,
+        onPressed: () {}, // press-and-hold handled by the Listener
+        style: IconButton.styleFrom(
+          backgroundColor: Colors.black.withValues(alpha: 0.35),
+          minimumSize: const Size(32, 32),
+        ),
+        visualDensity: VisualDensity.compact,
+      ),
+    );
+    return Positioned(
+      top: top,
+      bottom: bottom,
+      left: left,
+      right: right,
+      child: btn,
     );
   }
 }
@@ -143,6 +176,35 @@ class QualityToggle extends StatelessWidget {
             Text(isSub ? '子码流' : '主码流',
                 style: const TextStyle(fontSize: 11, color: Colors.white)),
           ]),
+        ),
+      );
+}
+
+/// Speaker chip mirroring the global camera mute (persisted in settings,
+/// so the last choice survives restarts - 反馈 2026-10-20).
+class MuteToggle extends StatelessWidget {
+  const MuteToggle({super.key, required this.muted, required this.onToggle});
+
+  final bool muted;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) => Tooltip(
+        message: muted ? '开启声音' : '静音',
+        child: InkWell(
+          onTap: onToggle,
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            padding: const EdgeInsets.all(5),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(
+                muted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
+                size: 14,
+                color: Colors.white),
+          ),
         ),
       );
 }

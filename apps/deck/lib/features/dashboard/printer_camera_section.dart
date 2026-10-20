@@ -15,14 +15,14 @@ import '../cameras/cameras_page.dart';
 /// one printer: the persisted per-printer tri-state. The card switch, the
 /// 打开机内摄像头 button and the binding dialog all read/write this, so
 /// they can never drift apart (反馈 2026-10-20).
-Future<void> setBuiltinCam(WidgetRef ref, PrinterProfile profile, bool on) async {
+Future<void> setBuiltinCam(
+    WidgetRef ref, PrinterProfile profile, bool on) async {
   final printers = ref.read(printersProvider).valueOrNull ?? const [];
   await ref.read(printersProvider.notifier).replaceAll([
     for (final p in printers)
       p.id == profile.id
           ? p.copyWith(
-              builtinCam:
-                  on ? BuiltinCamSetting.on : BuiltinCamSetting.off)
+              builtinCam: on ? BuiltinCamSetting.on : BuiltinCamSetting.off)
           : p,
   ]);
 }
@@ -102,9 +102,8 @@ Widget cameraSectionHeader(
           style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
       const Spacer(),
       TextButton.icon(
-        onPressed: () =>
-            PrinterCameraSection.editBindings(context, ref, profile,
-                settings.builtinCamDefault),
+        onPressed: () => PrinterCameraSection.editBindings(
+            context, ref, profile, settings.builtinCamDefault),
         icon: const Icon(Icons.tune, size: 16),
         label: const Text('绑定摄像头', style: TextStyle(fontSize: 12)),
       ),
@@ -132,8 +131,8 @@ class PrinterCameraSection extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final profile = ref.watch(printersProvider.notifier).byId(profileId);
     if (profile == null) return const SizedBox.shrink();
-    final settings = ref.watch(appSettingsProvider).valueOrNull ??
-        const AppSettings();
+    final settings =
+        ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
     final specs = buildCameraSpecs(ref, profile);
     final builtinOfferable = profile.mode == PrinterMode.lan &&
         !profile.builtinCamDefaultOn(settings.builtinCamDefault);
@@ -243,15 +242,16 @@ class PrinterCameraSection extends ConsumerWidget {
                   Text('还没有 RTSP 摄像头 - 关闭此对话框后点右上角添加',
                       style: TextStyle(
                           fontSize: 12,
-                          color: DeckColors.textSecondary.withValues(alpha: 0.9))),
+                          color:
+                              DeckColors.textSecondary.withValues(alpha: 0.9))),
                 ] else
                   for (final c in cameras)
                     if (c.sourceType == CameraSourceType.rtsp)
                       CheckboxListTile(
                         dense: true,
                         value: selected.contains(c.id),
-                        title: Text(c.name,
-                            style: const TextStyle(fontSize: 13)),
+                        title:
+                            Text(c.name, style: const TextStyle(fontSize: 13)),
                         onChanged: (v) => setState(() {
                           v == true
                               ? selected.add(c.id)
@@ -281,8 +281,8 @@ class PrinterCameraSection extends ConsumerWidget {
       for (final p in printers)
         p.id == profile.id ? p.copyWith(builtinCam: tri) : p,
     ]);
-    for (final c in cameras.where((c) => c.sourceType ==
-        CameraSourceType.rtsp)) {
+    for (final c
+        in cameras.where((c) => c.sourceType == CameraSourceType.rtsp)) {
       final bound = c.printerIds.contains(profile.id);
       final want = selected.contains(c.id);
       if (bound == want) continue;
@@ -449,9 +449,7 @@ class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
           Expanded(
             child: Row(
               children: [
-                for (var i = r * bestCols;
-                    i < (r + 1) * bestCols && i < n;
-                    i++)
+                for (var i = r * bestCols; i < (r + 1) * bestCols && i < n; i++)
                   Expanded(
                     child: Padding(
                       padding: const EdgeInsets.all(4),
@@ -488,7 +486,8 @@ class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
             ),
           ),
           Positioned(
-            right: 8,
+            // Bottom-left: bottom-right is the PTZ pad's spot.
+            left: 8,
             bottom: 8,
             child: Icon(Icons.open_in_full,
                 size: 13, color: Colors.white.withValues(alpha: 0.75)),
@@ -514,8 +513,10 @@ class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
           ),
         ),
         Positioned(
-          top: 10,
-          right: 10,
+          // Bottom-left: top-right is the quality chip, bottom-right the
+          // PTZ pad.
+          left: 10,
+          bottom: 10,
           child: IconButton.filledTonal(
             icon: const Icon(Icons.close_fullscreen, size: 18),
             tooltip: '缩小',
