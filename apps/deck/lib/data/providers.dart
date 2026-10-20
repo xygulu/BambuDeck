@@ -7,6 +7,7 @@ import 'cloud_api.dart';
 import 'log_buffer.dart';
 import 'print_events.dart';
 import 'printer_profile.dart';
+import 'vision_guard.dart';
 
 /// Composition root bindings - overridden in main.dart (secure storage) and
 /// tests (in-memory stores, fake links).
@@ -239,6 +240,7 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
       _current = _current.copyWith(state: s, lastError: null);
       state = _current;
       printEvents.observe(profile, prev, s);
+      visionGuard.observeState(profile, s);
     });
     await link.connect();
   }

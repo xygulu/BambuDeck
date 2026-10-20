@@ -33,6 +33,12 @@ class AppSettings {
     this.cameraMuted = false,
     this.ezvizAppKey = '',
     this.ezvizAppSecret = '',
+    this.visionEnabled = false,
+    this.visionBaseUrl = 'https://open.bigmodel.cn/api/paas/v4',
+    this.visionApiKey = '',
+    this.visionModel = 'glm-4v-flash',
+    this.visionIntervalSec = 60,
+    this.visionAutoPause = false,
   });
 
   final bool notifyOnFinish;
@@ -55,6 +61,19 @@ class AppSettings {
   final String ezvizAppKey;
   final String ezvizAppSecret;
 
+  /// Vision guard (大模型识别监控画面 2026-10-20): any OpenAI-compatible
+  /// vision endpoint. glm-4v-flash (智谱) is the default - it is free and
+  /// reads Chinese prompts well. The guard only runs while this is enabled
+  /// AND a key is present.
+  final bool visionEnabled;
+  final String visionBaseUrl;
+  final String visionApiKey;
+  final String visionModel;
+  final int visionIntervalSec;
+
+  /// Auto-pause a print the model flagged as abnormal (suspected 炒面/空打).
+  final bool visionAutoPause;
+
   AppSettings copyWith({
     bool? notifyOnFinish,
     bool? notifyOnError,
@@ -64,6 +83,12 @@ class AppSettings {
     bool? cameraMuted,
     String? ezvizAppKey,
     String? ezvizAppSecret,
+    bool? visionEnabled,
+    String? visionBaseUrl,
+    String? visionApiKey,
+    String? visionModel,
+    int? visionIntervalSec,
+    bool? visionAutoPause,
   }) =>
       AppSettings(
         notifyOnFinish: notifyOnFinish ?? this.notifyOnFinish,
@@ -74,6 +99,12 @@ class AppSettings {
         cameraMuted: cameraMuted ?? this.cameraMuted,
         ezvizAppKey: ezvizAppKey ?? this.ezvizAppKey,
         ezvizAppSecret: ezvizAppSecret ?? this.ezvizAppSecret,
+        visionEnabled: visionEnabled ?? this.visionEnabled,
+        visionBaseUrl: visionBaseUrl ?? this.visionBaseUrl,
+        visionApiKey: visionApiKey ?? this.visionApiKey,
+        visionModel: visionModel ?? this.visionModel,
+        visionIntervalSec: visionIntervalSec ?? this.visionIntervalSec,
+        visionAutoPause: visionAutoPause ?? this.visionAutoPause,
       );
 
   Map<String, dynamic> toJson() => {
@@ -85,6 +116,12 @@ class AppSettings {
         'cameraMuted': cameraMuted,
         'ezvizAppKey': ezvizAppKey,
         'ezvizAppSecret': ezvizAppSecret,
+        'visionEnabled': visionEnabled,
+        'visionBaseUrl': visionBaseUrl,
+        'visionApiKey': visionApiKey,
+        'visionModel': visionModel,
+        'visionIntervalSec': visionIntervalSec,
+        'visionAutoPause': visionAutoPause,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -97,6 +134,13 @@ class AppSettings {
         cameraMuted: j['cameraMuted'] as bool? ?? false,
         ezvizAppKey: j['ezvizAppKey'] as String? ?? '',
         ezvizAppSecret: j['ezvizAppSecret'] as String? ?? '',
+        visionEnabled: j['visionEnabled'] as bool? ?? false,
+        visionBaseUrl: j['visionBaseUrl'] as String? ??
+            'https://open.bigmodel.cn/api/paas/v4',
+        visionApiKey: j['visionApiKey'] as String? ?? '',
+        visionModel: j['visionModel'] as String? ?? 'glm-4v-flash',
+        visionIntervalSec: j['visionIntervalSec'] as int? ?? 60,
+        visionAutoPause: j['visionAutoPause'] as bool? ?? false,
       );
 }
 

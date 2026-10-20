@@ -15,6 +15,7 @@ import '../data/log_buffer.dart';
 import '../data/onvif_ptz.dart';
 import '../data/ptz_client.dart';
 import '../data/rtsp_quality.dart';
+import '../data/vision_guard.dart';
 import 'mjpeg_tile.dart';
 import 'ptz_pad.dart';
 
@@ -66,6 +67,8 @@ class CameraTile extends ConsumerStatefulWidget {
     this.rotationDeg = 0,
     this.onToggleFlip,
     this.onSetRotation,
+    this.cameraId,
+    this.frameSlot = 'main',
   });
 
   final String streamUrl;
@@ -93,6 +96,16 @@ class CameraTile extends ConsumerStatefulWidget {
 
   /// Sets [rotationDeg] to a specific angle; null hides the orientation menu.
   final ValueChanged<int>? onSetRotation;
+
+  /// Owning camera id: when set, the rendered picture is wrapped in a
+  /// RepaintBoundary registered under (cameraId, frameSlot) so the vision
+  /// guard can snapshot the frame without touching the decoder. Each live
+  /// mount of the same camera must use a distinct [frameSlot] - a GlobalKey
+  /// may sit in only one place (视觉抓帧 2026-10-20).
+  final String? cameraId;
+
+  /// Mount-site discriminator for the frame boundary registry.
+  final String frameSlot;
 
   /// Whether the orientation menu is shown (either callback present).
   bool get _showOrientation => onToggleFlip != null || onSetRotation != null;
@@ -234,13 +247,13 @@ class _CameraTileState extends ConsumerState<CameraTile> {
       if (parsed != null) {
         return ClipRRect(
           borderRadius: BorderRadius.circular(14),
-          child: _box(_orient(MjpegTile(
+          child: _box(_orient(_frameBoundary(MjpegTile(
             host: parsed.host,
             port: parsed.port,
             username: parsed.username,
             password: parsed.password,
             label: widget.showLabel ? widget.label : null,
-          ))),
+          )))),
         );
       }
       // Malformed built-in URL: never let it fall through to mpv (it would
@@ -268,12 +281,12 @@ class _CameraTileState extends ConsumerState<CameraTile> {
         child: _box(
           Stack(fit: StackFit.expand, children: [
             if (controller != null && _error == null)
-              _orient(Video(
+              _orient(_frameBoundary(Video(
                   controller: controller,
                   fit: BoxFit.contain,
                   // No built-in overlay controls: monitoring tiles manage
                   // their own chips (quality/PTP/retry).
-                  controls: NoVideoControls))
+                  controls: NoVideoControls)))
             else if (_error != null)
               _overlay(
                   const Icon(Icons.videocam_off_outlined,
@@ -375,6 +388,14 @@ class _CameraTileState extends ConsumerState<CameraTile> {
       flipH: widget.flipH,
       rotationDeg: widget.rotationDeg,
     );
+  }
+
+  /// Registers the video picture for the vision guard's snapshots when a
+  /// [CameraTile.cameraId] was supplied; a plain passthrough otherwise.
+  Widget _frameBoundary(Widget child) {
+    final id = widget.cameraId;
+    if (id == null) return child;
+    return RepaintBoundary(key: frameRegistry.keyFor(id, widget.frameSlot), child: child);
   }
 
   /// Applies the persisted flip/rotation to the video frame only (the

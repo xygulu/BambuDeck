@@ -9,6 +9,7 @@ import 'data/app_settings.dart';
 import 'data/camera_profile.dart';
 import 'data/print_events.dart';
 import 'data/printer_profile.dart';
+import 'data/vision_guard.dart';
 import 'data/providers.dart';
 import 'features/home/home_page.dart';
 
@@ -102,9 +103,18 @@ class _DeckAppState extends ConsumerState<DeckApp> {
   void initState() {
     super.initState();
     // Keep the notification watcher's switches in step with settings.
+    visionGuard.pauseCommand = (printerId) async =>
+        await ref.read(connectionProvider(printerId).notifier).pause();
     ref.listenManual(appSettingsProvider, (_, next) {
       final s = next.valueOrNull;
-      if (s != null) printEvents.settings = s;
+      if (s != null) {
+        printEvents.settings = s;
+        visionGuard.settings = s;
+      }
+    });
+    ref.listenManual(camerasProvider, (_, next) {
+      final list = next.valueOrNull;
+      if (list != null) visionGuard.cameras = list;
     });
   }
 

@@ -5,6 +5,7 @@ import 'package:deck/core/theme.dart';
 import 'package:deck/data/printer_profile.dart';
 import 'package:deck/main.dart';
 import 'package:deck/data/providers.dart';
+import 'package:deck/data/vision_guard.dart';
 import 'package:deck/features/home/home_page.dart';
 import 'package:deck/ui/widgets.dart';
 import 'package:flutter/material.dart';
@@ -118,6 +119,9 @@ void main() {
   });
 
   testWidgets('home renders one configured printer card', (tester) async {
+    // The printer card's live state feeds the vision guard, whose periodic
+    // tick must not outlive the test's widget tree.
+    addTearDown(visionGuard.dispose);
     final running = parseReport(jsonDecode(_cardReport))!;
     await tester.pumpWidget(_wrap(printers: [
       PrinterProfile(

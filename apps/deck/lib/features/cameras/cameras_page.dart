@@ -121,7 +121,8 @@ class _CameraCardState extends ConsumerState<_CameraCard> {
           Expanded(
             child: url != null && camera.enabled && _visible
                 ? CameraTile(streamUrl: url, label: camera.name,
-                    onToggleQuality: qualityToggler(ref, camera))
+                    onToggleQuality: qualityToggler(ref, camera),
+                    cameraId: camera.id, frameSlot: 'cameras-grid')
                 : Container(
                     color: Colors.black,
                     alignment: Alignment.center,

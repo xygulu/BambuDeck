@@ -306,6 +306,8 @@ class _CameraPane extends ConsumerWidget {
                       child: CameraTile(
                         streamUrl: url,
                         showLabel: false,
+                        cameraId: c.id,
+                        frameSlot: 'monitor-pane',
                         onToggleQuality: qualityToggler(ref, c),
                         flipH: c.flipH,
                         rotationDeg: c.rotationDeg,
@@ -481,6 +483,8 @@ class _CameraGridCard extends ConsumerWidget {
                     child: CameraTile(
                       streamUrl: url,
                       showLabel: true,
+                      cameraId: c.id,
+                      frameSlot: 'monitor-grid',
                       onToggleQuality: qualityToggler(ref, c),
                       flipH: c.flipH,
                       rotationDeg: c.rotationDeg,
