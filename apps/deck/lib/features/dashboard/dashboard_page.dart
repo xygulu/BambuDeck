@@ -161,7 +161,12 @@ class DashboardBody extends ConsumerWidget {
                     const SizedBox(width: 8),
                     // AMS gets the widest slot: several units must line up
                     // horizontally, plus the active-feed channel readout.
-                    Expanded(flex: 6, child: AmsCard(s: s)),
+                    // Extra share when the pane is wide - the status card's
+                    // single control line still fits (反馈 2026-10-20).
+                    Expanded(
+                      flex: box.maxWidth >= 1200 ? 7 : 6,
+                      child: AmsCard(s: s),
+                    ),
                   ],
                 ),
               );

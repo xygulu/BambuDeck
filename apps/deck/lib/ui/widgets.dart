@@ -206,10 +206,13 @@ class AmsStrip extends StatelessWidget {
       return const Text('AMS 未连接',
           style: TextStyle(color: DeckColors.textSecondary, fontSize: 13));
     }
-    return Wrap(
-      spacing: 10,
-      runSpacing: 10,
-      children: children,
+    // 单行并排 (反馈 2026-10-20: 多个 AMS 不换行、不下拉): 整条按自然
+    // 尺寸排成一行, 放不下时等比整体缩小, 单元永远并排可见。
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      alignment: Alignment.centerLeft,
+      child:
+          Row(spacing: 10, mainAxisSize: MainAxisSize.min, children: children),
     );
   }
 }
@@ -347,17 +350,41 @@ class _TraySwatch extends StatelessWidget {
         ? DeckColors.border
         : Color(0xFF000000 | tray.colorRrggbb!);
     return Column(children: [
-      Container(
-        width: 34,
-        height: 34,
-        decoration: BoxDecoration(
-          color: color,
-          shape: BoxShape.circle,
-          border: Border.all(
-            color: active ? DeckColors.textPrimary : Colors.transparent,
-            width: active ? 2.5 : 0,
+      // 只有正在进料的通道带状态 (反馈 2026-10-20): 绿环 + 右下角播放
+      // 角标; 其余通道就是素色圆 + 类型。
+      SizedBox(
+        width: 40,
+        height: 38,
+        child: Stack(clipBehavior: Clip.none, children: [
+          Center(
+            child: Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                color: color,
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: active ? DeckColors.running : Colors.transparent,
+                  width: active ? 2.5 : 0,
+                ),
+              ),
+            ),
           ),
-        ),
+          if (active)
+            Positioned(
+              right: -2,
+              bottom: -2,
+              child: Container(
+                width: 14,
+                height: 14,
+                alignment: Alignment.center,
+                decoration: const BoxDecoration(
+                    color: DeckColors.running, shape: BoxShape.circle),
+                child: const Icon(Icons.play_arrow,
+                    size: 11, color: Colors.white),
+              ),
+            ),
+        ]),
       ),
       const SizedBox(height: 3),
       SizedBox(
