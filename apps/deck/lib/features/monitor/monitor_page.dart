@@ -186,6 +186,11 @@ class _PrinterPane extends ConsumerWidget {
                 style: const TextStyle(
                     fontSize: 16, fontWeight: FontWeight.w700)),
             const Spacer(),
+            // 网络信息右对齐跟在名称行, 不再单独占监控信息区 (反馈 2026-10-20).
+            if (conn.state != null) ...[
+              NetworkInfoText(s: conn.state!),
+              const SizedBox(width: 10),
+            ],
             IconButton(
               icon: const Icon(Icons.delete_outline, size: 20),
               tooltip: '删除打印机',

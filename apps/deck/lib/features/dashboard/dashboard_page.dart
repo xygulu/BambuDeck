@@ -31,6 +31,12 @@ class DashboardPage extends ConsumerWidget {
         backgroundColor: DeckColors.bg,
         title: Text(profile.name),
         actions: [
+          // 网络信息跟在名称行的右侧 (反馈 2026-10-20: 不再单独占设备卡).
+          if (state != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Center(child: NetworkInfoText(s: state)),
+            ),
           IconButton(
             icon: const Icon(Icons.delete_outline),
             tooltip: '删除打印机',
@@ -132,9 +138,13 @@ class DashboardBody extends ConsumerWidget {
             // one control line keeps the row slim; below ~1080 the status
             // card's controls wrap and need the taller box.
             child: LayoutBuilder(builder: (context, box) {
-              // While HMS reports an error a 4th card joins the row and
-              // squeezes everyone - give the row the taller box then.
-              final h = box.maxWidth >= 1080 && !s.hasError ? 150.0 : 196.0;
+              // Errors no longer take a row slot - they surface as a chip
+              // in the status card opening a dialog (反馈 2026-10-20), so
+              // the height only depends on the control line wrapping.
+              // Network facts moved to the printer-name row and the speed/
+              // light text dropped (duplicated the controls) - the row is
+              // just status + AMS now, AMS the wider of the two.
+              final h = box.maxWidth >= 1080 ? 150.0 : 196.0;
               return SizedBox(
                 height: h,
                 child: Row(
@@ -149,14 +159,9 @@ class DashboardBody extends ConsumerWidget {
                           live: conn.live),
                     ),
                     const SizedBox(width: 8),
-                    Expanded(flex: 4, child: AmsCard(s: s)),
-                    const SizedBox(width: 8),
-                    Expanded(flex: 4, child: DeviceCard(s: s)),
-                    if (s.hasError) ...[
-                      const SizedBox(width: 8),
-                      Expanded(
-                          flex: 4, child: HmsCard(state: s, maxEntries: 2)),
-                    ],
+                    // AMS gets the widest slot: several units must line up
+                    // horizontally, plus the active-feed channel readout.
+                    Expanded(flex: 6, child: AmsCard(s: s)),
                   ],
                 ),
               );
@@ -188,8 +193,6 @@ class DashboardBody extends ConsumerWidget {
         AmsCard(s: s),
         const SizedBox(height: 14),
         HmsCard(state: s),
-        const SizedBox(height: 14),
-        DeviceCard(s: s),
       ],
     );
 
@@ -361,8 +364,13 @@ class AmsCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('AMS 耗材',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            Row(children: [
+              const Text('AMS 耗材',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+              const Spacer(),
+              // 当前进料通道状态 (反馈 2026-10-20).
+              if (s.ams != null) _FeedChip(ams: s.ams!),
+            ]),
             const SizedBox(height: 10),
             // Scroll instead of overflowing when the compact top row's
             // fixed height is shorter than the strip needs (narrow panes
@@ -384,52 +392,107 @@ class AmsCard extends StatelessWidget {
   }
 }
 
-/// Device facts strip (WiFi / IP / speed / chamber light).
-class DeviceCard extends StatelessWidget {
-  const DeviceCard({super.key, required this.s});
+/// The feeding channel right in the AMS header: color swatch of the
+/// active tray + which unit/slot it feeds from (反馈 2026-10-20).
+class _FeedChip extends StatelessWidget {
+  const _FeedChip({required this.ams});
+
+  final AmsState ams;
+
+  @override
+  Widget build(BuildContext context) {
+    final tray = ams.activeTray;
+    if (tray == null) {
+      return const Text('进料 -',
+          style: TextStyle(fontSize: 12, color: DeckColors.textSecondary));
+    }
+    // Mirror AmsStrip's unit naming (widgets.dart).
+    String source;
+    if (ams.activeTrayId == 254) {
+      source = '虚拟通道';
+    } else {
+      AmsUnit? unit;
+      for (final u in ams.units) {
+        if (u.id == ams.activeTrayId) unit = u;
+      }
+      source = unit == null
+          ? '通道 ${(ams.activeTrayIndex ?? 0) + 1}'
+          : '${unit.id >= 128 ? 'AMS HT ${unit.id - 127}' : 'AMS ${unit.id + 1}'}'
+              ' · 通道 ${(ams.activeTrayIndex ?? 0) + 1}';
+    }
+    final color = tray.colorRrggbb == null
+        ? const Color(0xFF9E9E9E)
+        : Color(0xFF000000 | tray.colorRrggbb!);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: DeckColors.textSecondary.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            border: Border.all(
+                color: DeckColors.textPrimary.withValues(alpha: 0.25)),
+          ),
+        ),
+        const SizedBox(width: 6),
+        Text('进料 $source${tray.type.isEmpty ? '' : ' · ${tray.type}'}',
+            style: const TextStyle(
+                fontSize: 12, color: DeckColors.textPrimary)),
+      ]),
+    );
+  }
+}
+
+/// Network facts (WiFi signal + IP) for the printer-name row, right
+/// aligned (反馈 2026-10-20: 网络信息不再单独占设备卡). Hides itself when
+/// the state has neither.
+class NetworkInfoText extends StatelessWidget {
+  const NetworkInfoText({super.key, required this.s});
+
   final BambuState s;
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Wrap(
-          spacing: 18,
-          runSpacing: 8,
-          children: [
-            _kv('WiFi', s.wifiSignal != null ? '${s.wifiSignal} dBm' : '-'),
-            _kv('IP', s.localIp.isEmpty ? '-' : s.localIp),
-            _kv('速度', s.speedLevel > 0 ? _speedLabel(s.speedLevel) : '-'),
-            _kv('腔灯', s.lightState < 0 ? '-' : (s.lightState == 1 ? '开' : '关')),
-          ],
+    final parts = <String>[
+      if (s.wifiSignal != null) 'WiFi ${s.wifiSignal} dBm',
+      if (s.localIp.isNotEmpty) s.localIp,
+    ];
+    if (parts.isEmpty) return const SizedBox.shrink();
+    return Text(parts.join(' · '),
+        style: const TextStyle(
+            fontSize: 12, color: DeckColors.textSecondary));
+  }
+}
+
+/// HMS 报错弹窗 (反馈 2026-10-20): 报错不再常驻信息行, 由状态卡的报错
+/// 芯片打开, 完整列出条目。
+void showHmsDialog(BuildContext context, BambuState s) {
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: DeckColors.surface,
+      title: Text(s.hms.length > 1 ? '打印机报错 · ${s.hms.length} 条' : '打印机报错'),
+      content: SizedBox(
+        width: 460,
+        child: SingleChildScrollView(
+          child: HmsCard(
+              state: s, maxEntries: s.hms.isEmpty ? 1 : s.hms.length),
         ),
       ),
-    );
-  }
-
-  String _speedLabel(int l) => switch (l) {
-        1 => '静音',
-        2 => '标准',
-        3 => '运动',
-        4 => '疯狂',
-        _ => '$l',
-      };
-
-  Widget _kv(String k, String v) => RichText(
-        text: TextSpan(children: [
-          TextSpan(
-              text: '$k  ',
-              style: const TextStyle(
-                  fontSize: 12, color: DeckColors.textSecondary)),
-          TextSpan(
-              text: v,
-              style: const TextStyle(
-                  fontSize: 13,
-                  color: DeckColors.textPrimary,
-                  fontWeight: FontWeight.w500)),
-        ]),
-      );
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: const Text('关闭'),
+        ),
+      ],
+    ),
+  );
 }
 
 class _ControlBar extends ConsumerWidget {
@@ -603,6 +666,34 @@ class _StatusCard extends ConsumerWidget {
                 const SizedBox(width: 8),
                 const _DoorChip(),
               ],
+              if (s.hasError) ...[
+                const SizedBox(width: 8),
+                // Errors live in a dialog now, not a dedicated card
+                // (反馈 2026-10-20) - the chip is the entry point.
+                InkWell(
+                  onTap: () => showHmsDialog(context, s),
+                  borderRadius: BorderRadius.circular(999),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: DeckColors.error.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                          color: DeckColors.error.withValues(alpha: 0.5)),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.error_outline,
+                          size: 13, color: DeckColors.error),
+                      const SizedBox(width: 4),
+                      Text(
+                          s.hms.length > 1 ? '报错 ${s.hms.length}' : '报错',
+                          style: const TextStyle(
+                              color: DeckColors.error, fontSize: 12)),
+                    ]),
+                  ),
+                ),
+              ],
               const SizedBox(width: 8),
               Text('${s.progress}%',
                   style: TextStyle(
@@ -695,8 +786,17 @@ class _StatusCard extends ConsumerWidget {
                             WidgetStatePropertyAll(TextStyle(fontSize: 11)),
                       ),
                     ),
-                    const Icon(Icons.lightbulb_outline,
-                        size: 14, color: DeckColors.textSecondary),
+                    // 腔灯图标随开关点亮 (反馈 2026-10-20): 亮 = 实心黄色
+                    // 并稍大, 灭 = 常规描边灰。
+                    Icon(
+                      s.lightState == 1
+                          ? Icons.lightbulb
+                          : Icons.lightbulb_outline,
+                      size: s.lightState == 1 ? 18 : 16,
+                      color: s.lightState == 1
+                          ? const Color(0xFFFFC107)
+                          : DeckColors.textSecondary,
+                    ),
                     Transform.scale(
                       scale: 0.8,
                       child: Switch(
