@@ -106,7 +106,7 @@ class _CameraTileState extends State<CameraTile> {
       // Live view: keep the buffer small so the picture stays close to now.
       bufferSize: 4 * 1024 * 1024,
     ));
-    final controller = await VideoController.create(player.handle);
+    final controller = VideoController(player);
     try {
       // RTSP over TCP avoids UDP artifact storms on lossy Wi-Fi; low-latency
       // profile trades robustness for freshness, which is what monitoring
@@ -150,7 +150,15 @@ class _CameraTileState extends State<CameraTile> {
     _controller = null;
     _ptz?.dispose();
     _ptz = null;
-    await p?.dispose();
+    if (p != null) {
+      // Halt playback before terminate: destroying a player whose RTSP
+      // demuxer is still live aborts inside mpv (mp_clients_destroy,
+      // crash 2026-10-20 主/子码流切换).
+      try {
+        await p.stop();
+      } catch (_) {}
+      await p.dispose();
+    }
   }
 
   @override
@@ -205,7 +213,12 @@ class _CameraTileState extends State<CameraTile> {
         color: Colors.black,
         child: _box(Stack(fit: StackFit.expand, children: [
             if (controller != null && _error == null)
-              Video(controller: controller, fit: BoxFit.contain)
+              Video(
+                  controller: controller,
+                  fit: BoxFit.contain,
+                  // No built-in overlay controls: monitoring tiles manage
+                  // their own chips (quality/PTP/retry).
+                  controls: NoVideoControls)
             else if (_error != null)
               _overlay(const Icon(Icons.videocam_off_outlined,
                   size: 34, color: DeckColors.error), _error!)
