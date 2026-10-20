@@ -38,6 +38,15 @@ class _FakeLink implements PrinterLink {
 
   @override
   Future<bool> refresh() async => true;
+
+  @override
+  Future<bool> printProjectFile({
+    required String url,
+    String param = 'Metadata/plate_1.gcode',
+    String md5 = '',
+    String name = 'BambuDeck',
+  }) async =>
+      true;
 }
 
 class _Store implements PrinterStore {

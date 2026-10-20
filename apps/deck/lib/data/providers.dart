@@ -35,6 +35,14 @@ abstract class PrinterLink {
   Future<bool> setSpeed(int level);
   Future<bool> setLight(bool on);
   Future<bool> refresh();
+
+  /// Prints a 3mf already on the printer (一键换盘 uploads it first).
+  Future<bool> printProjectFile({
+    required String url,
+    String param,
+    String md5,
+    String name,
+  });
 }
 
 class MqttPrinterLink implements PrinterLink {
@@ -75,6 +83,16 @@ class MqttPrinterLink implements PrinterLink {
 
   @override
   Future<bool> refresh() => _client.requestPushall(reason: 'manual');
+
+  @override
+  Future<bool> printProjectFile({
+    required String url,
+    String param = 'Metadata/plate_1.gcode',
+    String md5 = '',
+    String name = 'BambuDeck',
+  }) =>
+      _client.printProjectFile(
+          url: url, param: param, md5: md5, name: name);
 }
 
 /// The configured printer list (profiles only - live state lives in
@@ -244,6 +262,15 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
   Future<bool> setLight(bool on) =>
       _link?.setLight(on) ?? Future.value(false);
   Future<bool> refresh() => _link?.refresh() ?? Future.value(false);
+  Future<bool> printProjectFile({
+    required String url,
+    String param = 'Metadata/plate_1.gcode',
+    String md5 = '',
+    String name = 'BambuDeck',
+  }) =>
+      _link?.printProjectFile(
+          url: url, param: param, md5: md5, name: name) ??
+      Future.value(false);
 }
 
 final connectionProvider = NotifierProvider.family<ConnectionNotifier,

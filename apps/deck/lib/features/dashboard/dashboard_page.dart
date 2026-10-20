@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/format.dart';
 import '../../core/theme.dart';
+import '../../data/plate_swap.dart';
+import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 import '../../ui/widgets.dart';
 import '../printers/edit_printer_dialog.dart';
@@ -520,6 +522,12 @@ class _ControlBar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final notifier = ref.read(connectionProvider(profileId).notifier);
+    final profile = ref.watch(printersProvider
+        .select((l) => printerByIdOf(l.valueOrNull, profileId)));
+    final canSwap = enabled &&
+        profile != null &&
+        profile.autoPlateSwap &&
+        profile.mode == PrinterMode.lan;
 
     return Card(
       child: Padding(
@@ -567,6 +575,15 @@ class _ControlBar extends ConsumerWidget {
                 ),
               ),
             ]),
+            if (canSwap) ...[
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: () =>
+                    confirmPlateSwap(context, ref, profile, notifier),
+                icon: const Icon(Icons.auto_awesome_motion_outlined),
+                label: const Text('一键换盘'),
+              ),
+            ],
             const SizedBox(height: 10),
             Row(children: [
               const Text('速度',
@@ -632,6 +649,44 @@ void confirmStopPrint(BuildContext context, ConnectionNotifier notifier) {
       ],
     ),
   );
+}
+
+/// 一键换盘 confirmation + execution (换盘 2026-10-20): uploads the bundled
+/// swap model over FTPS and prints it; the model's tail gcode shakes the
+/// finished print off and ejects the plate. Result lands in a snackbar and
+/// the run log either way.
+Future<void> confirmPlateSwap(BuildContext context, WidgetRef ref,
+    PrinterProfile profile, ConnectionNotifier notifier) async {
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: DeckColors.surface,
+      title: const Text('一键换盘?'),
+      content: Text(
+          '将向「${profile.name}」上传内置换盘模型并开始打印(约 5 分钟)。\n\n'
+          '热床会快速震动甩下成品并把打印板送到最前端,请确保打印机前方留空。\n'
+          '不会暂停正在进行的任务 - 请在打印机空闲时执行。'),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消')),
+        FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('开始换盘')),
+      ],
+    ),
+  );
+  if (ok != true || !context.mounted) return;
+  final messenger = ScaffoldMessenger.of(context);
+  try {
+    await startPlateSwap(profile, sendPrint: notifier.printProjectFile);
+    messenger.showSnackBar(
+        const SnackBar(content: Text('换盘任务已发送,打印机会自动执行换盘流程')));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(
+        backgroundColor: DeckColors.error,
+        content: Text('换盘失败: $e')));
+  }
 }
 
 /// Status + control card for the compact pane's top info row: dense task,

@@ -22,6 +22,7 @@ class PrinterProfile {
     this.userId = '',
     this.model = '',
     this.builtinCam = BuiltinCamSetting.follow,
+    this.autoPlateSwap = false,
   });
 
   final String id;
@@ -46,6 +47,11 @@ class PrinterProfile {
 
   /// Built-in camera default-load policy for this printer.
   final BuiltinCamSetting builtinCam;
+
+  /// Whether the printer is set up for automatic plate swapping (是否具备
+  /// 自动换盘): shows the 一键换盘 button that prints the bundled swap model
+  /// (its tail gcode shakes the print off and ejects the plate).
+  final bool autoPlateSwap;
 
   String get modeLabel => mode == PrinterMode.lan ? '局域网' : '云端';
 
@@ -76,6 +82,7 @@ class PrinterProfile {
         'userId': userId,
         'model': model,
         'builtinCam': builtinCam.name,
+        'autoPlateSwap': autoPlateSwap,
       };
 
   factory PrinterProfile.fromJson(Map<String, dynamic> j) => PrinterProfile(
@@ -95,6 +102,7 @@ class PrinterProfile {
                 (v) => v.name == j['builtinCam'],
                 orElse: () => BuiltinCamSetting.follow)
             : BuiltinCamSetting.follow,
+        autoPlateSwap: j['autoPlateSwap'] as bool? ?? false,
       );
 
   BambuMqttConfig toMqttConfig() => mode == PrinterMode.lan
@@ -111,6 +119,7 @@ class PrinterProfile {
     String? userId,
     String? model,
     BuiltinCamSetting? builtinCam,
+    bool? autoPlateSwap,
   }) =>
       PrinterProfile(
         id: id,
@@ -124,6 +133,7 @@ class PrinterProfile {
         userId: userId ?? this.userId,
         model: model ?? this.model,
         builtinCam: builtinCam ?? this.builtinCam,
+        autoPlateSwap: autoPlateSwap ?? this.autoPlateSwap,
       );
 }
 

@@ -325,6 +325,26 @@ class BambuMqttClient {
   Future<bool> resumePrint() => _publish(jsonEncode(_node('resume', {})));
   Future<bool> stopPrint() => _publish(jsonEncode(_node('stop', {})));
 
+  /// Prints a 3mf already on the printer's local storage (uploaded over FTPS
+  /// first — see BambuDeck's FtpsClient). [url] is the printer-local path in
+  /// the documented `ftp:///cache/<file>` spelling; [param] points at the
+  /// plate gcode inside the 3mf. Newer firmware may reject unsigned
+  /// project_file with print_error 84033543 — that surfaces in the report
+  /// stream and the log for diagnosis.
+  Future<bool> printProjectFile({
+    required String url,
+    String param = 'Metadata/plate_1.gcode',
+    String md5 = '',
+    String name = 'BambuDeck',
+  }) =>
+      _publish(jsonEncode(buildProjectFilePayload(
+        sequenceId: (_pushallSeq++).toString(),
+        url: url,
+        param: param,
+        md5: md5,
+        name: name,
+      )));
+
   /// 1 silent, 2 standard, 3 sport, 4 ludicrous.
   Future<bool> setSpeedLevel(int level) =>
       _publish(jsonEncode(_node('print_speed', {'param': level.toString()})));
@@ -341,3 +361,36 @@ class BambuMqttClient {
     })));
   }
 }
+
+/// Payload for the `print.project_file` command (local print). Extracted as
+/// a pure function so tests can pin the wire shape the A1 accepts.
+Map<String, dynamic> buildProjectFilePayload({
+  required String sequenceId,
+  required String url,
+  String param = 'Metadata/plate_1.gcode',
+  String md5 = '',
+  String name = 'BambuDeck',
+}) =>
+    {
+      'print': {
+        'sequence_id': sequenceId,
+        'command': 'project_file',
+        'param': param,
+        if (md5.isNotEmpty) 'md5': md5,
+        'project_id': '0',
+        'profile_id': '0',
+        'task_id': '0',
+        'subtask_id': '0',
+        'subtask_name': name,
+        'url': url,
+        // A1 has no AMS: a local file must never try the AMS path. Bed
+        // leveling on (A1 levels before every print); the cali flags match
+        // what Bambu Studio sends for a plain local print.
+        'use_ams': false,
+        'bed_leveling': true,
+        'flow_cali': false,
+        'vibration_cali': false,
+        'layer_inspect': false,
+        'timelapse': false,
+      }
+    };

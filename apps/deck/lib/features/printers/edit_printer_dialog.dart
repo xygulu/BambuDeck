@@ -17,6 +17,7 @@ Future<void> showEditPrinterDialog(
   final ipCtrl = TextEditingController(text: profile.ip);
   final codeCtrl = TextEditingController(text: profile.accessCode);
   final serialCtrl = TextEditingController(text: profile.serial);
+  var autoPlateSwap = profile.autoPlateSwap;
 
   final ok = await showDialog<bool>(
     context: context,
@@ -59,6 +60,22 @@ Future<void> showEditPrinterDialog(
                     color: DeckColors.textSecondary.withValues(alpha: 0.9)),
               ),
             ],
+            const SizedBox(height: 4),
+            StatefulBuilder(builder: (ctx, setDialogState) {
+              return CheckboxListTile(
+                value: autoPlateSwap,
+                controlAffinity: ListTileControlAffinity.leading,
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text('支持自动换盘',
+                    style: TextStyle(fontSize: 13)),
+                subtitle: const Text(
+                    '显示「一键换盘」按钮:打印内置换盘模型,热床震动甩下成品并送出打印板(换盘 2026-10-20)',
+                    style: TextStyle(fontSize: 11)),
+                onChanged: (v) =>
+                    setDialogState(() => autoPlateSwap = v ?? false),
+              );
+            }),
           ]),
         ),
       ),
@@ -90,6 +107,7 @@ Future<void> showEditPrinterDialog(
           userId: p.userId,
           model: p.model,
           builtinCam: p.builtinCam,
+          autoPlateSwap: autoPlateSwap,
         )
       else
         p,

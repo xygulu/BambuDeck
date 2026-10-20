@@ -30,3 +30,7 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    # Bundled plate-swap model (单盘换盘): its tail gcode shakes the finished
+    # print off and ejects the plate - "printing" it IS the plate swap.
+    - assets/plate_swap/auto_plate_swap.3mf
