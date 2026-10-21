@@ -175,9 +175,22 @@ class BambuMqttClient {
     };
 
     client.subscribe(_reportTopic, MqttQos.atLeastOnce);
+    // Echo subscription: the request topic is the printer's own command
+    // inbox. Receiving our own publish back proves the printer's broker
+    // ACCEPTED and ROUTED the command, separating "broker dropped it" from
+    // "firmware ignored it" (换盘 无响应 2026-10-21).
+    client.subscribe(_requestTopic, MqttQos.atLeastOnce);
 
     client.updates!.listen((messages) {
       for (final rec in messages) {
+        if (rec.topic == _requestTopic) {
+          final recMess = rec.payload as MqttPublishMessage;
+          final text =
+              MqttPublishPayload.bytesToStringAsString(recMess.payload.message);
+          _logLine('request echo: '
+              '${text.length > 220 ? "${text.substring(0, 220)}…" : text}');
+          continue;
+        }
         if (rec.topic != _reportTopic) continue;
         // updates yields MqttReceivedMessage<MqttMessage?>: the payload's
         // runtime type is MqttPublishMessage (declared as the MqttMessage
