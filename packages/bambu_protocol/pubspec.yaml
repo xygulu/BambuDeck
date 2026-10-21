@@ -8,6 +8,7 @@ environment:
 
 dependencies:
   mqtt_client: ^10.6.0
+  pointycastle: ^3.9.1
   typed_data: ^1.4.0
 
 dev_dependencies:

@@ -8,11 +8,13 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'package:typed_data/typed_data.dart';
 
+import 'bambu_signing.dart';
 import 'models.dart';
 import 'report_parser.dart';
 
@@ -71,14 +73,21 @@ class BambuMqttClient {
     required this.config,
     this.log,
     String? clientId,
-  }) : clientId = clientId ??
-            'bambudeck_${DateTime.now().millisecondsSinceEpoch % 0xFFFFF}';
+    String? signingKeyPem,
+  })  : clientId = clientId ??
+            'bambudeck_${DateTime.now().millisecondsSinceEpoch % 0xFFFFF}',
+        _signer =
+            signingKeyPem == null ? null : BambuCommandSigner.fromPem(signingKeyPem);
 
   final BambuMqttConfig config;
   final String clientId;
 
   /// Optional sink for diagnostics.
   final void Function(String line)? log;
+
+  /// Signs `print` commands (bambu_signing.dart). Null = unsigned frames,
+  /// which post-2025-01 firmware rejects with 84033543.
+  final BambuCommandSigner? _signer;
 
   MqttServerClient? _client;
   Timer? _staleTimer;
@@ -89,7 +98,11 @@ class BambuMqttClient {
   // Last parsed state, fed back as `previous` so partial frames (only a few
   // fields) never blank out job identity on the dashboard.
   BambuState? _lastState;
-  int _pushallSeq = 1;
+
+  /// Signed frames are rejected below sequence_id 2000 (84033545); Studio
+  /// lives in 20000-29999. Start at a random point above the floor and count
+  /// monotonically - reusing ids across app restarts has also been rejected.
+  int _sequence = 20000 + Random().nextInt(1 << 24);
 
   static const _stalePushallAfter = Duration(seconds: 30);
   static const _staleReconnectAfter = Duration(seconds: 90);
@@ -291,32 +304,41 @@ class BambuMqttClient {
     return buf;
   }
 
-  Map<String, dynamic> _node(String command, Map<String, dynamic> extra) => {
-        'print': {
-          'sequence_id': (_pushallSeq++).toString(),
-          'command': command,
-          ...extra,
-        }
-      };
+  /// Inner `print` command node; wrap with [_publishSigned]. Unsigned print
+  /// frames are silently dropped by post-2025-01 firmware (84033543) - the
+  /// 暂停/停止/换盘 dead-air symptom (2026-10-21).
+  Map<String, dynamic> _printNode(String command, Map<String, dynamic> extra) =>
+      {'sequence_id': _nextSequence(), 'command': command, ...extra};
+
+  String _nextSequence() => (_sequence++).toString();
+
+  Future<bool> _publishSigned(Map<String, dynamic> printNode) {
+    final signer = _signer;
+    return _publish(signer == null
+        ? jsonEncode({'print': printNode})
+        : signer.wrapSigned(printNode));
+  }
 
   /// System-envelope command. ledctrl rides `system`, not `print`, and the
   /// A1/P1 silently DROP it unless the timing fields are present - payload
   /// mirrors BambuHelper sendLightCtrlNode (field-proven on LAN + cloud).
+  /// `system` frames are never signed.
   Map<String, dynamic> _systemNode(String command, Map<String, dynamic> extra) =>
       {
         'system': {
-          'sequence_id': (_pushallSeq++).toString(),
+          'sequence_id': _nextSequence(),
           'command': command,
           ...extra,
         }
       };
 
   /// Force a full state snapshot. Reasons mirror BambuHelper PushallReason.
+  /// `pushing` frames are never signed.
   Future<bool> requestPushall({String reason = 'manual'}) {
     _logLine('pushall ($reason)');
     return _publish(jsonEncode({
       'pushing': {
-        'sequence_id': (_pushallSeq++).toString(),
+        'sequence_id': _nextSequence(),
         'command': 'pushall',
         'push_target': 1,
       }
@@ -326,33 +348,36 @@ class BambuMqttClient {
   // Bambu's control commands are `pause`/`resume`/`stop` (no `_print`
   // suffix — that suffix only appears in `print_speed`). Sending `stop_print`
   // is silently ignored by the printer (停止按钮不起作用 2026-10-20).
-  Future<bool> pausePrint() => _publish(jsonEncode(_node('pause', {})));
-  Future<bool> resumePrint() => _publish(jsonEncode(_node('resume', {})));
-  Future<bool> stopPrint() => _publish(jsonEncode(_node('stop', {})));
+  Future<bool> pausePrint() => _publishSigned(_printNode('pause', {}));
+  Future<bool> resumePrint() => _publishSigned(_printNode('resume', {}));
+  Future<bool> stopPrint() => _publishSigned(_printNode('stop', {}));
 
   /// Prints a 3mf already on the printer's local storage (uploaded over FTPS
   /// first — see BambuDeck's FtpsClient). [url] is the printer-local path in
   /// the documented `ftp:///cache/<file>` spelling; [param] points at the
-  /// plate gcode inside the 3mf. Newer firmware may reject unsigned
-  /// project_file with print_error 84033543 — that surfaces in the report
-  /// stream and the log for diagnosis.
+  /// plate gcode inside the 3mf. [amsSlot] routes the print through the
+  /// printer's AMS (A1 + AMS lite: a single unit, [amsId] defaults 0).
   Future<bool> printProjectFile({
     required String url,
     String param = 'Metadata/plate_1.gcode',
     String md5 = '',
     String name = 'BambuDeck',
+    int? amsSlot,
+    int amsId = 0,
   }) =>
-      _publish(jsonEncode(buildProjectFilePayload(
-        sequenceId: (_pushallSeq++).toString(),
+      _publishSigned(buildProjectFilePayload(
+        sequenceId: _nextSequence(),
         url: url,
         param: param,
         md5: md5,
         name: name,
-      )));
+        amsSlot: amsSlot,
+        amsId: amsId,
+      ));
 
   /// 1 silent, 2 standard, 3 sport, 4 ludicrous.
   Future<bool> setSpeedLevel(int level) =>
-      _publish(jsonEncode(_node('print_speed', {'param': level.toString()})));
+      _publishSigned(_printNode('print_speed', {'param': level.toString()}));
 
   Future<bool> setChamberLight(bool on) {
     _logLine('ledctrl ${on ? 'on' : 'off'}');
@@ -375,6 +400,8 @@ Map<String, dynamic> buildProjectFilePayload({
   String param = 'Metadata/plate_1.gcode',
   String md5 = '',
   String name = 'BambuDeck',
+  int? amsSlot,
+  int amsId = 0,
 }) =>
     {
       'print': {
@@ -388,10 +415,20 @@ Map<String, dynamic> buildProjectFilePayload({
         'subtask_id': '0',
         'subtask_name': name,
         'url': url,
-        // A1 has no AMS: a local file must never try the AMS path. Bed
-        // leveling on (A1 levels before every print); the cali flags match
-        // what Bambu Studio sends for a plain local print.
-        'use_ams': false,
+        // A1 + AMS lite: the swap model is sliced for a single PLA filament,
+        // so the caller picks a live AMS slot of matching type on every
+        // start (颜色不限 - 用户 2026-10-21). ams_id 0 = the A1's single AMS
+        // lite unit; both mapping shapes go out (firmware that knows
+        // ams_mapping2 prefers it, legacy firmware reads ams_mapping).
+        if (amsSlot != null) ...{
+          'use_ams': true,
+          'ams_mapping': [amsSlot],
+          'ams_mapping2': [
+            {'ams_id': amsId, 'slot_id': amsSlot}
+          ],
+        } else
+          // No AMS match: print from the external spool instead.
+          'use_ams': false,
         'bed_leveling': true,
         'flow_cali': false,
         'vibration_cali': false,

@@ -20,8 +20,13 @@ final cloudApiProvider = Provider<CloudApi>((ref) => HttpCloudApi());
 /// Connection factory seam: the app binds MQTT; tests bind fakes.
 typedef PrinterLinkFactory = PrinterLink Function(PrinterProfile profile);
 
-final printerLinkFactoryProvider =
-    Provider<PrinterLinkFactory>((ref) => MqttPrinterLink.new);
+/// MQTT 命令签名私钥(打印类命令必须签名,见 bambu_signing.dart)。仓库外
+/// 文件 ~/.bambudeck/signing_key.pem,由 main() 启动时装载;缺失 = 未签名
+/// 路径(新固件拒收 84033543)。
+String? bambuSigningKeyPem;
+
+final printerLinkFactoryProvider = Provider<PrinterLinkFactory>((ref) =>
+    (profile) => MqttPrinterLink(profile, signingKeyPem: bambuSigningKeyPem));
 
 /// One live printer connection, abstracted so the hub relay / a test fake
 /// can substitute for the MQTT transport later (PRD FR-9).
@@ -39,18 +44,20 @@ abstract class PrinterLink {
   Future<bool> refresh();
 
   /// Prints a 3mf already on the printer (一键换盘 uploads it first).
+  /// [ams] routes the print through a live AMS slot (换盘 PLA 匹配).
   Future<bool> printProjectFile({
     required String url,
     String param,
     String md5,
     String name,
+    ({int amsId, int slot})? ams,
   });
 }
 
 class MqttPrinterLink implements PrinterLink {
-  MqttPrinterLink(this.profile) {
+  MqttPrinterLink(this.profile, {String? signingKeyPem}) {
     _client = BambuMqttClient(config: profile.toMqttConfig(),
-        log: LogBuffer.instance.add);
+        log: LogBuffer.instance.add, signingKeyPem: signingKeyPem);
   }
 
   final PrinterProfile profile;
@@ -92,9 +99,15 @@ class MqttPrinterLink implements PrinterLink {
     String param = 'Metadata/plate_1.gcode',
     String md5 = '',
     String name = 'BambuDeck',
+    ({int amsId, int slot})? ams,
   }) =>
       _client.printProjectFile(
-          url: url, param: param, md5: md5, name: name);
+          url: url,
+          param: param,
+          md5: md5,
+          name: name,
+          amsSlot: ams?.slot,
+          amsId: ams?.amsId ?? 0);
 }
 
 /// The configured printer list (profiles only - live state lives in
@@ -271,9 +284,14 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
     String param = 'Metadata/plate_1.gcode',
     String md5 = '',
     String name = 'BambuDeck',
+    ({int amsId, int slot})? ams,
   }) =>
       _link?.printProjectFile(
-          url: url, param: param, md5: md5, name: name) ??
+          url: url,
+          param: param,
+          md5: md5,
+          name: name,
+          ams: ams) ??
       Future.value(false);
 }
 

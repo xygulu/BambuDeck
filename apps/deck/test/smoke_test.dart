@@ -77,6 +77,7 @@ class _FakeLink implements PrinterLink {
     String param = 'Metadata/plate_1.gcode',
     String md5 = '',
     String name = 'BambuDeck',
+    ({int amsId, int slot})? ams,
   }) async =>
       true;
 }

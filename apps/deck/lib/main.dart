@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +10,7 @@ import 'core/theme.dart';
 import 'data/app_settings.dart';
 import 'data/camera_profile.dart';
 import 'data/hub_server.dart';
+import 'data/log_buffer.dart';
 import 'data/print_events.dart';
 import 'data/printer_profile.dart';
 import 'data/vision_guard.dart';
@@ -55,6 +58,23 @@ class LocalDeckNotifier implements DeckNotifier {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized(); // libmpv for camera streams (FR-3)
+
+  // MQTT 命令签名私钥(打印类命令不签名会被新固件拒收 84033543)。文件在
+  // 仓库外 ~/.bambudeck/,见 bambu_protocol/src/bambu_signing.dart -
+  // 缺失只降级(未签名路径),绝不阻塞启动。
+  try {
+    final home = Platform.environment['HOME'];
+    final keyFile = home == null ? null : File('$home/.bambudeck/signing_key.pem');
+    if (keyFile != null && keyFile.existsSync()) {
+      bambuSigningKeyPem = keyFile.readAsStringSync();
+      LogBuffer.instance.add('[签名] 已装载命令签名私钥 (~/.bambudeck)');
+    } else {
+      LogBuffer.instance.add('[签名] 未找到 ~/.bambudeck/signing_key.pem,'
+          '打印命令将不带签名(会被固件拒收)');
+    }
+  } catch (_) {
+    // Best-effort - never block startup on key loading.
+  }
 
   // Desktop notifications: init asks macOS for permission on first run.
   try {

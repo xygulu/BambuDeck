@@ -696,7 +696,11 @@ Future<void> confirmPlateSwap(BuildContext context, WidgetRef ref,
     })) {
       throw Exception('打印机当前未连接(可能在重连),请确认打印机在线后重试');
     }
-    await startPlateSwap(profile, sendPrint: notifier.printProjectFile);
+    // 换盘模型按 PLA 切片 - 每次点击都实时读当前 AMS 状态选 PLA 槽位
+    // (颜色不限,用户 2026-10-21);AMS 没有 PLA 就退回外置料并记录。
+    final amsChoice = _pickSwapAmsSafely(ref, profile.id);
+    await startPlateSwap(profile,
+        sendPrint: notifier.printProjectFile, ams: amsChoice);
     messenger.showSnackBar(
         const SnackBar(content: Text('已发送,正在等待打印机响应…')));
     // The MQTT layer accepts the publish even when firmware refuses the
@@ -714,8 +718,9 @@ Future<void> confirmPlateSwap(BuildContext context, WidgetRef ref,
     } else if (err == 84033543) {
       messenger.showSnackBar(const SnackBar(
           backgroundColor: DeckColors.error,
-          content: Text('打印机拒收了换盘命令(84033543 = 未签名命令)。'
-              '请在打印机屏幕的 局域网/网络 设置里开启「开发者模式」后重试')));
+          content: Text('打印机拒收了换盘命令(84033543 = 签名校验未通过)。'
+              '请确认 ~/.bambudeck/signing_key.pem 在位并重启 app;'
+              '若固件不信任该签名证书,只能在打印机上开「开发者模式」绕过')));
     } else if (err != 0) {
       final text = printErrorDescription(err);
       messenger.showSnackBar(SnackBar(
@@ -731,6 +736,21 @@ Future<void> confirmPlateSwap(BuildContext context, WidgetRef ref,
     messenger.showSnackBar(SnackBar(
         backgroundColor: DeckColors.error,
         content: Text('换盘失败: $e')));
+  }
+}
+
+/// Live AMS slot pick for one swap attempt. The printer may be reconnecting
+/// or the widget unmounted - any ref trouble means "no AMS info", not a
+/// crash (换盘 2026-10-21).
+({int amsId, int slot})? _pickSwapAmsSafely(WidgetRef ref, String profileId) {
+  try {
+    final choice = pickSwapAmsSlot(
+        ref.read(connectionProvider(profileId)).state?.ams);
+    LogBuffer.instance.add('[换盘] AMS 选料: '
+        '${choice == null ? "未找到 PLA,改用外置料" : "单元${choice.amsId} 槽${choice.slot + 1}"}');
+    return choice;
+  } catch (_) {
+    return null;
   }
 }
 
