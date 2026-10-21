@@ -55,10 +55,10 @@ APP = "Bambu Connect"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DEVICE = "03900D642905133"
 
-# BAMBU_SILENT=1：打印/换盘不把 Connect 置前（deep link 用 open -g 后台打开、跳过
-# activate）。控制路径（bconnect_drive）本就不置前；打印多页导航在后台更脆弱（AX 树
-# 切页重建可能空读），默认关，可自行 A/B 测试是否够稳。
-SILENT = os.environ.get("BAMBU_SILENT", "").strip().lower() in ("1", "true", "yes", "on")
+# 默认静默：打印/换盘不把 Connect 置前（deep link 用 open -g 后台打开、跳过 activate）。
+# 控制路径（bconnect_drive）本就不置前；打印多页导航在后台更脆弱（AX 树切页重建可能
+# 空读），要回到旧前台行为设 BAMBU_SILENT=0。
+SILENT = os.environ.get("BAMBU_SILENT", "1").strip().lower() not in ("0", "false", "no", "off")
 
 sys.path.insert(0, HERE)
 import bconnect_ax as ax  # noqa: E402

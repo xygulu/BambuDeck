@@ -25,7 +25,7 @@
 | 里程碑 | 状态 |
 |---|---|
 | M0 协议层(`packages/bambu_protocol`) | ✅ 完成 — 纯 Dart,MQTT/TLS 双模式(LAN `bblp`+访问码 / 云端 `u_{uid}`+Token)、report 全字段解析(AMS/HMS/双喷嘴/风扇/舱门/校准任务识别)、断线指数退避重连、30s 静默 pushall / 90s 强制重连。20/20 测试通过 |
-| M1 独立客户端 MVP(`apps/deck`) | ✅ 功能完成 — 打印机网格首页、单机仪表盘(进度环/温度/风扇/AMS/HMS/舱门)、暂停/恢复/停止/速度/腔灯控制、LAN + 云端添加打印机(支持**账号登录**:手机号/邮箱+密码或邮箱验证码,Token 自动填入)、HMS/print_error 错误码句表(拓竹官方错误库,2014+490 条)、安全存储凭据(flutter_secure_storage)。32/32 协议测试 + 6/6 widget 测试通过;**macOS 实机验证 ✅**(2026-10-19,三台 A1 局域网直连,任务/进度/温度实时稳定) |
+| M1 独立客户端 MVP(`apps/deck`) | ✅ 功能完成 — 打印机网格首页、单机仪表盘(进度环/温度/风扇/AMS/HMS/舱门)、暂停/恢复/停止/速度/腔灯控制、**一键换盘(内置换盘模型)+ 云端打印/控制 Connect 自动化**(详见下节)、LAN + 云端添加打印机(支持**账号登录**:手机号/邮箱+密码或邮箱验证码,Token 自动填入)、HMS/print_error 错误码句表(拓竹官方错误库,2014+490 条)、安全存储凭据(flutter_secure_storage)。32/32 协议测试 + 6/6 widget 测试通过;**macOS 实机验证 ✅**(2026-10-19,三台 A1 局域网直连,任务/进度/温度实时稳定) |
 | M2 摄像头 + 组合布局 | 🔨 核心可用 — media_kit(libmpv)RTSP 实时画面:外部 RTSP/ONVIF 摄像头 + **打印机自带摄像头(全机型)**:A1/A1 mini/P1/P1P 走内置 MJPEG over TLS:6000(纯 Dart 实现,已对 A1 实机验证),X1/P1S/P2S/H2 走 RTSPS:322,按机型自动路由;**单屏监控,双视角自由切换**:打印机视角(左卡片列表内联 暂停/恢复 + 机内画面开关,右侧 = 顶部并排信息行(状态/AMS/设备/报错)+ **相机墙**(按画面数量自动最佳网格铺满一屏,点击单画面放大/缩小))+ 摄像头视角(左摄像头列表含未绑定,右画面+绑定打印机状态卡),窄窗口回退网格+详情页;卡片开关/打开机内摄像头/绑定对话框读写同一份持久化三态,不会不同步;摄像头与打印机**多对多绑定**(机内 1:1);机内摄像头默认加载策略(全局开关 + 单机 跟随全局/开启/关闭 + 会话内手动打开);RTSP 主/子码流一键切换(萤石/海康/大华/TP-Link/Reolink 路径风格);ONVIF 云台(长按 ContinuousMove,需摄像头开启 ONVIF);断流显示错误并支持手动重连;视口外自动停拉(NFR-3);**RTSP 网段自动扫描**(TCP 554/8554/10554 扫段 + DESCRIBE 常见路径探测,海康/大华/萤石等厂商识别,401 也算命中,开放端口诊断);RTSP 强制软解(media_kit_video 0.0.4 在 macOS 丢 VideoToolbox 硬解帧 → 黑屏有声)。注:A1 固件忽略所有摄像头参数 MQTT 写入(实测),码流/云台控制仅面向第三方摄像头。M2 剩余:ONVIF 深度发现、萤石/小米云 API |
 | M1 剩余 | Windows/Android 构建验证(Android SDK 未装;Windows 需 VS2022 C++ 工作负载) |
 | 已完成跨里程碑项 | 设置中心通知开关/运行日志/配置剪贴板导出导入(FR-10 切片)、打印完成/失败/报错本地通知(FR-7 切片,错误通知带句表句子)、Kiosk 轮播:循环/优先打印中(FR-6 切片)、云端账号登录支持**手机号短信验证码**(sendsmscode)与邮箱验证码双通道 |
@@ -44,7 +44,7 @@
 
 - **一键换盘**: 内置换盘模型(尾段 gcode 把成品震落并送盘)。局域网直连走 FTPS 上传(`FtpsClient`) + `print.project_file`;云端由 Bambu Connect 以拓竹合法客户端身份派单,成功判定 = 点下「发送」(派单成功),不等待打印执行。固件校验的是 3mf 内嵌 `Metadata/plate_1.gcode` 的 md5(常量 `kPlateSwapGcodeMd5`)。
 - **开发者模式**: 2025-01 后固件对未签名 `print` 帧回 `84033543`。局域网直发打印/换盘需打印机开「开发者模式」(设置 → 网络 → 仅局域网模式 → 开发者模式 → 启用 → 重启);暂停/恢复/停止不受影响。App 走未签名直发、不加载签名私钥(签名信封在开发者模式关时仍需字段加密 + 装应用证书,是死路)。
-- **Bambu Connect 自动化**: 云模式 / dev-OFF 的打印、换盘、暂停/恢复/停止由本机 helper [`apps/deck/tool/connect_helper/`](apps/deck/tool/connect_helper/)(`bconnect_service.py`,127.0.0.1:8799)驱动 Connect 界面完成 导入 → 打印 → 发送;需在 macOS 系统设置 → 隐私与安全性 → 辅助功能 允许 helper 的 python。安装/运行见该目录 [README](apps/deck/tool/connect_helper/README.md)(venv + paho-mqtt + 云端登录态 `creds/cloud_session.json`)。
+- **Bambu Connect 自动化**: 云模式 / dev-OFF 的打印、换盘、暂停/恢复/停止由本机 helper [`apps/deck/tool/connect_helper/`](apps/deck/tool/connect_helper/)(`bconnect_service.py`,127.0.0.1:8799)驱动 Connect 界面完成 导入 → 打印 → 发送,**默认静默**(不把 Connect 置前,结束后还原焦点);需在 macOS 系统设置 → 隐私与安全性 → 辅助功能 允许 helper 的 python。安装/运行见该目录 [README](apps/deck/tool/connect_helper/README.md)(venv + paho-mqtt + 云端登录态 `creds/cloud_session.json`)。
 
 ## 快速上手(开发)
 
