@@ -75,6 +75,19 @@ void main() {
     expect(RegExp(r'^[0-9a-f]{32}CN=').hasMatch(kSigningCertId), isTrue);
   });
 
+  test('signed project_file wire carries exactly ONE print envelope', () {
+    // Regression: printProjectFile once shipped
+    // {"print":{"print":{...}}} - the firmware never saw a command name and
+    // dropped the frame silently (换盘 无响应 2026-10-21).
+    final envelope = buildProjectFilePayload(
+        sequenceId: '20006', url: 'ftp:///cache/x.3mf');
+    final wire = signer.wrapSigned(envelope['print'] as Map<String, dynamic>);
+    final parsed = json.decode(wire) as Map<String, dynamic>;
+    final print = parsed['print'] as Map<String, dynamic>;
+    expect(print['command'], 'project_file');
+    expect(print.containsKey('print'), isFalse);
+  });
+
   test('project_file payload carries AMS mapping when a slot is picked',
       () {
     final payload = buildProjectFilePayload(

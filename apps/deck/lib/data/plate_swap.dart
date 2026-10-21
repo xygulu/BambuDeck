@@ -84,6 +84,12 @@ Future<void> startPlateSwap(
     await ftp.connect();
     await ftp.upload(
         directory: 'cache', name: kPlateSwapRemoteName, bytes: bytes);
+    // STOR 226 只说明服务器收了流 - /cache 在 Studio 文件列表里看不见,
+    // 必须回读确认文件真的落盘(换盘 2026-10-21)。
+    await ftp.verifyUpload(
+        directory: 'cache',
+        name: kPlateSwapRemoteName,
+        expectedBytes: bytes.length);
   } finally {
     await ftp.close();
   }

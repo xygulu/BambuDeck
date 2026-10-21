@@ -364,16 +364,22 @@ class BambuMqttClient {
     String name = 'BambuDeck',
     int? amsSlot,
     int amsId = 0,
-  }) =>
-      _publishSigned(buildProjectFilePayload(
-        sequenceId: _nextSequence(),
-        url: url,
-        param: param,
-        md5: md5,
-        name: name,
-        amsSlot: amsSlot,
-        amsId: amsId,
-      ));
+  }) {
+    // buildProjectFilePayload returns the full {'print': ...} envelope for
+    // testability; the signer wants the inner node so it wraps exactly one
+    // print key. Double-wrapping shipped once and the firmware silently
+    // dropped the whole frame (print.print.command - 换盘 无响应 2026-10-21).
+    final envelope = buildProjectFilePayload(
+      sequenceId: _nextSequence(),
+      url: url,
+      param: param,
+      md5: md5,
+      name: name,
+      amsSlot: amsSlot,
+      amsId: amsId,
+    );
+    return _publishSigned(envelope['print'] as Map<String, dynamic>);
+  }
 
   /// 1 silent, 2 standard, 3 sport, 4 ludicrous.
   Future<bool> setSpeedLevel(int level) =>

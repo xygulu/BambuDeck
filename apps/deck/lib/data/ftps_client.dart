@@ -195,6 +195,94 @@ class FtpsClient {
     _logLine('uploaded ${bytes.length}B -> /$directory/$name');
   }
 
+  /// Readback check after STOR: confirms the file really landed with the
+  /// expected byte count. The A1's /cache is a system staging directory -
+  /// Bambu Studio's file list only shows /model - so this readback is the
+  /// only honest "did it land" signal, and the listing lands in the run log
+  /// either way (换盘 2026-10-21).
+  Future<int> verifyUpload(
+      {required String directory,
+      required String name,
+      required int expectedBytes}) async {
+    final path = '/$directory/$name';
+    var size = await _remoteSize(path);
+    if (size == null) {
+      // SIZE unsupported (or odd server) - fall back to LIST and show the
+      // raw directory content in the log.
+      final listing = await _listDirectory('/$directory');
+      _logLine('LIST /$directory: ${listing.isEmpty ? "(空)" : listing.join(" | ")}');
+      size = _sizeFromListing(listing, name);
+    }
+    if (size == null) {
+      throw FtpsException('上传后回读失败:打印机上找不到 $path');
+    }
+    if (size != expectedBytes) {
+      throw FtpsException('上传不完整:远端 $size B ≠ 本地 $expectedBytes B');
+    }
+    _logLine('verified $path = $size B');
+    return size;
+  }
+
+  /// RFC 3659 SIZE; null when the server refuses (unsupported/missing).
+  Future<int?> _remoteSize(String path) async {
+    final r = await _command('SIZE $path');
+    if (r.code == 213) {
+      final v = int.tryParse(r.text.trim().split(RegExp(r'\s+')).last);
+      if (v != null) return v;
+    }
+    return null;
+  }
+
+  /// LISTs [path] (dir or file) over a PASV data channel, returns raw lines.
+  Future<List<String>> _listDirectory(String path) async {
+    final pasv = await _command('PASV');
+    final m = RegExp(r'(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)')
+        .firstMatch(pasv.text);
+    if (m == null) {
+      throw FtpsException('PASV 应答无法解析: ${pasv.text}');
+    }
+    final dataPort =
+        int.parse(m.group(5)!) * 256 + int.parse(m.group(6)!);
+    final data = await SecureSocket.connect(host, dataPort,
+        onBadCertificate: (_) => true,
+        timeout: const Duration(seconds: 8));
+    await _expect('LIST $path', preliminary: true);
+    final chunks = <int>[];
+    await for (final c in data) {
+      chunks.addAll(c);
+    }
+    await data.close();
+    final done = await _waitForReply(timeout: const Duration(seconds: 10));
+    if (done.code != 226) {
+      throw FtpsException('LIST 未完成: ${done.code} ${done.text}');
+    }
+    return utf8
+        .decode(chunks, allowMalformed: true)
+        .split('\n')
+        .map((l) => l.replaceAll('\r', '').trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+  }
+
+  int? _sizeFromListing(List<String> lines, String name) {
+    for (final line in lines) {
+      if (!line.contains(name)) continue;
+      final tokens = line.split(RegExp(r'\s+'));
+      // ls -l column 5 is the byte size; unknown layouts: largest number.
+      if (tokens.length >= 5) {
+        final v = int.tryParse(tokens[4]);
+        if (v != null) return v;
+      }
+      int? best;
+      for (final t in tokens) {
+        final v = int.tryParse(t);
+        if (v != null && v > 0 && (best == null || v > best)) best = v;
+      }
+      return best;
+    }
+    return null;
+  }
+
   Future<void> close() async {
     try {
       if (_control != null) {
