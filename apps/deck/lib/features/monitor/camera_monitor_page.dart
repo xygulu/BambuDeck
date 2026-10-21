@@ -286,12 +286,8 @@ class _CameraPane extends ConsumerWidget {
             IconButton(
               icon: const Icon(Icons.edit_outlined, size: 19),
               tooltip: '编辑摄像头',
+              // 删除入口收进编辑对话框 (2026-10-21: 显眼位置易误触)。
               onPressed: () => showAddCameraDialog(context, ref, editing: c),
-            ),
-            IconButton(
-              icon: const Icon(Icons.delete_outline, size: 20),
-              tooltip: '删除摄像头',
-              onPressed: () => _confirmRemove(context, ref, c),
             ),
           ]),
         ),
@@ -370,31 +366,6 @@ class _CameraPane extends ConsumerWidget {
           ),
         ),
       );
-
-  void _confirmRemove(BuildContext context, WidgetRef ref, CameraProfile c) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: DeckColors.surface,
-        title: const Text('删除摄像头'),
-        content: Text('确定删除「${c.name}」吗?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: DeckColors.error),
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              ref.read(camerasProvider.notifier).remove(c.id);
-            },
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 /// Multi-select binding of printers to one camera (many-to-many, FR-4).
@@ -537,12 +508,6 @@ class _CameraGridCard extends ConsumerWidget {
                 icon: const Icon(Icons.edit_outlined, size: 18),
                 tooltip: '编辑摄像头',
                 onPressed: () => showAddCameraDialog(context, ref, editing: c),
-              ),
-              IconButton(
-                icon: const Icon(Icons.delete_outline, size: 18),
-                tooltip: '删除摄像头',
-                onPressed: () =>
-                    ref.read(camerasProvider.notifier).remove(c.id),
               ),
             ]),
           ),

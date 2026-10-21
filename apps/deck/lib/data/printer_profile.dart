@@ -137,6 +137,13 @@ class PrinterProfile {
       );
 }
 
+/// 控制路由判定（暂停/恢复/停止）：
+///   LAN 连接 + 开发者模式确认为开(`print.fun` bit29=0) → 局域网 MQTT 直发(秒回)
+///   其余(云模式 / dev-OFF / 固件未报 fun) → Bambu Connect 自动化(dev-OFF 的
+///   LAN MQTT 控制会被固件 84033543 拦)。[state] 为 null(尚未连上)时同样不直发。
+bool useLanControl(PrinterProfile profile, BambuState? state) =>
+    profile.mode == PrinterMode.lan && state?.developerModeOff == false;
+
 /// Persistence boundary for the printer list. Overridable in tests.
 abstract class PrinterStore {
   Future<List<PrinterProfile>> load();

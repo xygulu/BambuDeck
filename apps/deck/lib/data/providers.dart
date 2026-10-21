@@ -20,9 +20,9 @@ final cloudApiProvider = Provider<CloudApi>((ref) => HttpCloudApi());
 /// Connection factory seam: the app binds MQTT; tests bind fakes.
 typedef PrinterLinkFactory = PrinterLink Function(PrinterProfile profile);
 
-/// MQTT 命令签名私钥(打印类命令必须签名,见 bambu_signing.dart)。仓库外
-/// 文件 ~/.bambudeck/signing_key.pem,由 main() 启动时装载;缺失 = 未签名
-/// 路径(新固件拒收 84033543)。
+/// MQTT 命令签名私钥(见 bambu_signing.dart)。App 走未签名直发(依赖打印机
+/// 开发者模式,签名补不了 url_enc 加密 + app_cert_install,换盘 2026-10-21),
+/// 故保持 null;仅将来实现完整加密签名链路时才需要装载。
 String? bambuSigningKeyPem;
 
 final printerLinkFactoryProvider = Provider<PrinterLinkFactory>((ref) =>

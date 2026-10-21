@@ -1,9 +1,10 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:bambu_protocol/bambu_protocol.dart';
-import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart' show rootBundle;
 
+import 'cloud_print_helper.dart';
 import 'ftps_client.dart';
 import 'log_buffer.dart';
 import 'printer_profile.dart';
@@ -15,6 +16,14 @@ const kPlateSwapAsset = 'assets/plate_swap/auto_plate_swap.3mf';
 
 /// Remote name on the printer's FTP; ASCII-only so no FTP encoding surprises.
 const kPlateSwapRemoteName = 'bambudeck_plate_swap.3mf';
+
+/// md5 of the gcode INSIDE the swap 3mf (`Metadata/plate_1.gcode`), not the
+/// whole container. 2025+ firmware verifies this against the file it loads
+/// and rejects the job (84033544) on a mismatch — the whole-3mf md5 silently
+/// no-ops the swap (换盘无响应 2026-10-21, fixed by matching Studio's value).
+/// ⚠️ 换盘模型文件一旦更新,必须同步重算此值(`unzip -p auto_plate_swap.3mf
+/// Metadata/plate_1.gcode | md5 -q`)并更新这里,否则换盘会退回静默失败。
+const kPlateSwapGcodeMd5 = 'e4a7d057f1ad9863849edda40f551570';
 
 /// Bytes of the bundled swap model (injectable so tests run without the
 /// Flutter asset bundle).
@@ -71,7 +80,9 @@ Future<void> startPlateSwap(
   }
   log('[换盘] 读取内置换盘模型…');
   final bytes = await loadBytes();
-  final md5Hex = md5.convert(bytes).toString();
+  // 固件校验的是 3mf 内嵌 gcode 的 md5,不是整个容器(整个 3mf 的 md5 会
+  // 静默 no-op,换盘无响应 2026-10-21)。换盘模型是打包资产,gcode 恒定。
+  final md5Hex = kPlateSwapGcodeMd5;
 
   log('[换盘] FTPS 上传到 ${profile.ip}:990 /cache …');
   final ftp = FtpsClient(
@@ -106,4 +117,29 @@ Future<void> startPlateSwap(
     throw Exception('project_file 发送失败(打印机未连接)');
   }
   log('[换盘] 已发送,打印机会开始换盘流程');
+}
+
+/// Cloud-mode 换盘: 云端打印机没有可达的 FTP 端点, 把内置换盘模型交给
+/// Bambu Connect(持有拓竹合法客户端身份)经本机 helper 云端派单。无需开发者
+/// 模式、无需局域网。返回 helper 的派单结果, 由调用方决定怎么提示用户。
+Future<CloudPrintResult> startCloudPlateSwap(
+  PrinterProfile profile, {
+  PlateSwapBytesLoader loadBytes = loadBundledPlateSwap,
+}) async {
+  final log = LogBuffer.instance.add;
+  log('[换盘] 读取内置换盘模型…');
+  final bytes = await loadBytes();
+  final file = await _writeSwapModelToTemp(bytes);
+  log('[换盘] 通过 Bambu Connect 云端派单到 ${profile.name} '
+      '(serial=${profile.serial})…');
+  return CloudPrintHelper.instance.print(file.path, serial: profile.serial);
+}
+
+/// 把换盘模型字节写到稳定的临时路径, 供 Bambu Connect 的 deeplink 导入
+/// (Connect 按文件名匹配派单后的任务)。文件名与局域网路径复用同一个, 便于
+/// 日志/排查对齐。
+Future<File> _writeSwapModelToTemp(Uint8List bytes) async {
+  final file = File('${Directory.systemTemp.path}/$kPlateSwapRemoteName');
+  await file.writeAsBytes(bytes, flush: true);
+  return file;
 }

@@ -64,11 +64,7 @@ class CamerasPage extends ConsumerWidget {
             childAspectRatio: 16 / 12,
             children: [
               for (final c in list)
-                _CameraCard(
-                    camera: c,
-                    printers: printers,
-                    onDelete: () =>
-                        ref.read(camerasProvider.notifier).remove(c.id)),
+                _CameraCard(camera: c, printers: printers),
             ],
           );
         });
@@ -81,12 +77,10 @@ class _CameraCard extends ConsumerStatefulWidget {
   const _CameraCard({
     required this.camera,
     required this.printers,
-    required this.onDelete,
   });
 
   final CameraProfile camera;
   final List<PrinterProfile> printers;
-  final VoidCallback onDelete;
 
   @override
   ConsumerState<_CameraCard> createState() => _CameraCardState();
@@ -165,13 +159,9 @@ class _CameraCardState extends ConsumerState<_CameraCard> {
               IconButton(
                 icon: const Icon(Icons.edit_outlined, size: 19),
                 tooltip: '编辑摄像头',
+                // 删除入口收进编辑对话框 (2026-10-21: 显眼位置易误触)。
                 onPressed: () => showAddCameraDialog(context, ref,
                     editing: camera),
-              ),
-              IconButton(
-                icon: const Icon(Icons.delete_outline, size: 20),
-                tooltip: '删除摄像头',
-                onPressed: widget.onDelete,
               ),
             ]),
           ),
@@ -492,6 +482,37 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
           ),
         ),
         actions: [
+          // 编辑模式才有删除 (2026-10-21 从卡片/面板头迁入), 二次确认后执行。
+          if (editing != null)
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: DeckColors.error),
+              onPressed: () async {
+                final yes = await showDialog<bool>(
+                  context: ctx,
+                  builder: (dctx) => AlertDialog(
+                    backgroundColor: DeckColors.surface,
+                    title: const Text('删除摄像头'),
+                    content: Text('确定删除「${editing.name}」吗?'),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(dctx, false),
+                          child: const Text('取消')),
+                      FilledButton(
+                        style: FilledButton.styleFrom(
+                            backgroundColor: DeckColors.error),
+                        onPressed: () => Navigator.pop(dctx, true),
+                        child: const Text('删除'),
+                      ),
+                    ],
+                  ),
+                );
+                if (yes != true) return;
+                await ref.read(camerasProvider.notifier).remove(editing.id);
+                if (ctx.mounted) Navigator.pop(ctx);
+              },
+              child: const Text('删除摄像头'),
+            ),
+          const Spacer(),
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
               child: const Text('取消')),

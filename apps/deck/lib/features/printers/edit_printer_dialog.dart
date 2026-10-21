@@ -80,6 +80,36 @@ Future<void> showEditPrinterDialog(
         ),
       ),
       actions: [
+        // 删除收进编辑对话框 (2026-10-21: 显眼位置易误触), 二次确认后执行。
+        TextButton(
+          style: TextButton.styleFrom(foregroundColor: DeckColors.error),
+          onPressed: () async {
+            final yes = await showDialog<bool>(
+              context: ctx,
+              builder: (dctx) => AlertDialog(
+                backgroundColor: DeckColors.surface,
+                title: const Text('删除打印机'),
+                content: Text('确定删除「${profile.name}」吗?凭据将同时清除。'),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(dctx, false),
+                      child: const Text('取消')),
+                  FilledButton(
+                    style: FilledButton.styleFrom(
+                        backgroundColor: DeckColors.error),
+                    onPressed: () => Navigator.pop(dctx, true),
+                    child: const Text('删除'),
+                  ),
+                ],
+              ),
+            );
+            if (yes != true) return;
+            await ref.read(printersProvider.notifier).remove(profile.id);
+            if (ctx.mounted) Navigator.pop(ctx);
+          },
+          child: const Text('删除打印机'),
+        ),
+        const Spacer(),
         TextButton(
             onPressed: () => Navigator.pop(ctx, false),
             child: const Text('取消')),

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/format.dart';
 import '../../core/theme.dart';
+import '../../data/cloud_print_helper.dart';
 import '../../data/plate_swap.dart';
 import '../../data/log_buffer.dart';
 import '../../data/printer_profile.dart';
@@ -27,6 +28,13 @@ class DashboardPage extends ConsumerWidget {
     final state = conn.state;
 
     if (profile == null) {
+      // 在本页打开时打印机被删(删除入口已收进编辑对话框): 弹回首页,
+      // 别留一个没有 AppBar 的死端页 (2026-10-21)。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+      });
       return const Scaffold(body: Center(child: Text('打印机不存在')));
     }
 
@@ -45,42 +53,12 @@ class DashboardPage extends ConsumerWidget {
           IconButton(
             icon: const Icon(Icons.edit_outlined, size: 20),
             tooltip: '编辑打印机',
+            // 删除也收进编辑对话框 (2026-10-21: 显眼位置易误触)。
             onPressed: () => showEditPrinterDialog(context, ref, profile),
-          ),
-          IconButton(
-            icon: const Icon(Icons.delete_outline),
-            tooltip: '删除打印机',
-            onPressed: () => _confirmRemove(context, ref, profile.name),
           ),
         ],
       ),
       body: DashboardBody(profileId: profileId, conn: conn, state: state),
-    );
-  }
-
-  void _confirmRemove(BuildContext context, WidgetRef ref, String name) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: DeckColors.surface,
-        title: const Text('删除打印机'),
-        content: Text('确定删除「$name」吗?凭据将同时清除。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: DeckColors.error),
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              Navigator.of(context).pop(); // back to home
-              ref.read(printersProvider.notifier).remove(profileId);
-            },
-            child: const Text('删除'),
-          ),
-        ],
-      ),
     );
   }
 }
@@ -134,9 +112,9 @@ class DashboardBody extends ConsumerWidget {
     final accent = stateColor(s.gcodeState);
 
     if (compact) {
-      // 反馈 2026-10-20: status/AMS/HMS/device side by side in one slim
-      // top row, the camera wall taking all remaining space (auto-fit to
-      // camera count, tap to zoom).
+      // 反馈 2026-10-21: 顶部行只剩 控制 + AMS —— 任务/进度/温度/层高/报错
+      // 等状态详情全部迁到左侧打印机卡片列表, 相机墙占其余空间 (自动适配
+      // 画面数, 点击放大)。
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -144,37 +122,24 @@ class DashboardBody extends ConsumerWidget {
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
             // Fixed height, not IntrinsicHeight: SegmentedButton's render
             // object cannot answer the dry-layout pass intrinsics need
-            // (crashed on first frame). Adaptive instead: wide enough for
-            // one control line keeps the row slim; below ~1080 the status
-            // card's controls wrap and need the taller box.
+            // (crashed on first frame). 控制行在窄面板会折行, 给到两行高。
             child: LayoutBuilder(builder: (context, box) {
-              // Errors no longer take a row slot - they surface as a chip
-              // in the status card opening a dialog (反馈 2026-10-20), so
-              // the height only depends on the control line wrapping.
-              // Network facts moved to the printer-name row and the speed/
-              // light text dropped (duplicated the controls) - the row is
-              // just status + AMS now, AMS the wider of the two.
-              final h = box.maxWidth >= 1080 ? 150.0 : 196.0;
+              final h = box.maxWidth >= 1080 ? 110.0 : 150.0;
               return SizedBox(
                 height: h,
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // 控制卡内容变少但仍要放下速度分段整行, 多给一点份额。
                     Expanded(
-                      flex: 5,
-                      child: _StatusCard(
-                          profileId: profileId,
-                          s: s,
-                          accent: accent,
-                          live: conn.live),
+                      flex: 6,
+                      child: _ControlCard(
+                          profileId: profileId, s: s, live: conn.live),
                     ),
                     const SizedBox(width: 8),
-                    // AMS gets the widest slot: several units must line up
-                    // horizontally, plus the active-feed channel readout.
-                    // Extra share when the pane is wide - the status card's
-                    // single control line still fits (反馈 2026-10-20).
+                    // AMS 仍需横向排开料仓, 面板更宽时多让一点。
                     Expanded(
-                      flex: box.maxWidth >= 1200 ? 7 : 6,
+                      flex: box.maxWidth >= 1200 ? 6 : 5,
                       child: AmsCard(s: s),
                     ),
                   ],
@@ -525,10 +490,11 @@ class _ControlBar extends ConsumerWidget {
     final notifier = ref.read(connectionProvider(profileId).notifier);
     final profile = ref.watch(printersProvider
         .select((l) => printerByIdOf(l.valueOrNull, profileId)));
+    final canControl = enabled && profile != null;
     final canSwap = enabled &&
         profile != null &&
         profile.autoPlateSwap &&
-        profile.mode == PrinterMode.lan;
+        (profile.mode == PrinterMode.lan || profile.mode == PrinterMode.cloud);
 
     return Card(
       child: Padding(
@@ -542,10 +508,8 @@ class _ControlBar extends ConsumerWidget {
             Row(children: [
               Expanded(
                 child: FilledButton.icon(
-                  onPressed: enabled
-                      ? () async {
-                          await notifier.pause();
-                        }
+                  onPressed: canControl
+                      ? () => runControl(context, profile, s, notifier, 'pause')
                       : null,
                   icon: const Icon(Icons.pause),
                   label: const Text('暂停'),
@@ -554,10 +518,8 @@ class _ControlBar extends ConsumerWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: FilledButton.icon(
-                  onPressed: enabled
-                      ? () async {
-                          await notifier.resume();
-                        }
+                  onPressed: canControl
+                      ? () => runControl(context, profile, s, notifier, 'resume')
                       : null,
                   icon: const Icon(Icons.play_arrow),
                   label: const Text('恢复'),
@@ -568,8 +530,8 @@ class _ControlBar extends ConsumerWidget {
                 child: FilledButton.icon(
                   style:
                       FilledButton.styleFrom(backgroundColor: DeckColors.error),
-                  onPressed: enabled
-                      ? () => confirmStopPrint(context, notifier)
+                  onPressed: canControl
+                      ? () => confirmStopPrint(context, profile, s, notifier)
                       : null,
                   icon: const Icon(Icons.stop),
                   label: const Text('停止'),
@@ -579,8 +541,7 @@ class _ControlBar extends ConsumerWidget {
             if (canSwap) ...[
               const SizedBox(height: 10),
               OutlinedButton.icon(
-                onPressed: () =>
-                    confirmPlateSwap(context, ref, profile, notifier),
+                onPressed: () => confirmPlateSwap(context, profile),
                 icon: const Icon(Icons.auto_awesome_motion_outlined),
                 label: const Text('一键换盘'),
               ),
@@ -626,8 +587,72 @@ class _ControlBar extends ConsumerWidget {
   }
 }
 
+/// 控制分发：dev-ON 局域网(开发者模式确认为开)走 MQTT 直发,否则走 Connect
+/// 自动化服务。MQTT 直发秒回、状态随报告流更新,不弹 snackbar;Connect 走
+/// [runCloudControl](带 snackbar 反馈)。
+Future<void> runControl(BuildContext context, PrinterProfile profile,
+    BambuState s, ConnectionNotifier notifier, String command) async {
+  if (useLanControl(profile, s)) {
+    final ok = switch (command) {
+      'pause' => await notifier.pause(),
+      'resume' => await notifier.resume(),
+      'stop' => await notifier.stop(),
+      _ => false,
+    };
+    LogBuffer.instance.add('[控制] $command ${profile.name}: '
+        '局域网直发${ok ? "已发送" : "失败"}');
+    return;
+  }
+  await runCloudControl(context, profile, command);
+}
+
+/// 通过本机 helper 服务(Bambu Connect 自动化)发送控制命令并落到 snackbar。
+/// dev-OFF/云模式打印机 LAN MQTT 控制会被固件 84033543 拦,故走 Connect(实测
+/// 全链路 ~8s)。
+Future<void> runCloudControl(
+    BuildContext context, PrinterProfile profile, String command) async {
+  final messenger = ScaffoldMessenger.of(context);
+  final label = switch (command) {
+    'pause' => '暂停',
+    'resume' => '恢复',
+    'stop' => '停止',
+    _ => command,
+  };
+  if (!await CloudPrintHelper.instance.health()) {
+    messenger.showSnackBar(const SnackBar(
+        backgroundColor: DeckColors.error,
+        content: Text('本机打印 helper 未运行。请先执行 python bconnect_service.py '
+            '并在 系统设置→隐私与安全性→辅助功能 允许 python')));
+    return;
+  }
+  // 服务端靠 serial 正则定位打印机,空 serial 只会得到一句「缺字段 serial」,
+  // 这里提前拦下并指路 (2026-10-21 实测:某台档案没存序列号)。
+  if (profile.serial.trim().isEmpty) {
+    LogBuffer.instance.add('[控制] $label ${profile.name}: 失败 未配置序列号');
+    messenger.showSnackBar(SnackBar(
+        backgroundColor: DeckColors.error,
+        content: Text('「${profile.name}」未配置序列号,Connect 自动化无法定位'
+            '打印机。请在该打印机卡片 → 编辑打印机 里补上序列号')));
+    return;
+  }
+  final r = await CloudPrintHelper.instance.control(profile.serial, command);
+  LogBuffer.instance.add('[控制] ${r.command ?? command} ${profile.name}: '
+      'ok=${r.ok}${r.error == null ? '' : ' err=${r.error}'}'
+      '${r.elapsed == null ? '' : ' ${r.elapsed!.round()}s'}');
+  if (r.ok) {
+    messenger.showSnackBar(SnackBar(
+        content: Text('已向「${r.printer ?? profile.name}」发送$label'
+            '${r.elapsed == null ? '' : '(${r.elapsed!.round()}s)'}')));
+  } else {
+    messenger.showSnackBar(SnackBar(
+        backgroundColor: DeckColors.error,
+        content: Text('$label失败: ${r.error ?? '未知错误'}')));
+  }
+}
+
 /// Shared stop confirmation (control bar + compact status bar).
-void confirmStopPrint(BuildContext context, ConnectionNotifier notifier) {
+void confirmStopPrint(BuildContext context, PrinterProfile profile,
+    BambuState s, ConnectionNotifier notifier) {
   showDialog(
     context: context,
     builder: (ctx) => AlertDialog(
@@ -643,7 +668,7 @@ void confirmStopPrint(BuildContext context, ConnectionNotifier notifier) {
           style: FilledButton.styleFrom(backgroundColor: DeckColors.error),
           onPressed: () {
             Navigator.of(ctx).pop();
-            notifier.stop();
+            runControl(context, profile, s, notifier, 'stop');
           },
           child: const Text('确认停止'),
         ),
@@ -652,21 +677,22 @@ void confirmStopPrint(BuildContext context, ConnectionNotifier notifier) {
   );
 }
 
-/// 一键换盘 confirmation + execution (换盘 2026-10-20): uploads the bundled
-/// swap model over FTPS and prints it; the model's tail gcode shakes the
-/// finished print off and ejects the plate. Result lands in a snackbar and
-/// the run log either way.
-Future<void> confirmPlateSwap(BuildContext context, WidgetRef ref,
-    PrinterProfile profile, ConnectionNotifier notifier) async {
+/// 一键换盘 (2026-10-21 起统一走 Bambu Connect 打印服务): 把内置换盘模型交给
+/// Bambu Connect 经本机 helper 云端派单, 无需开发者模式 / 局域网。dev-OFF 的 LAN
+/// MQTT project_file 会被固件 84033543 拦, Connect 有合法客户端身份。结果落到
+/// snackbar 和运行日志。
+Future<void> confirmPlateSwap(
+    BuildContext context, PrinterProfile profile) async {
   final ok = await showDialog<bool>(
     context: context,
     builder: (ctx) => AlertDialog(
       backgroundColor: DeckColors.surface,
       title: const Text('一键换盘?'),
       content: Text(
-          '将向「${profile.name}」上传内置换盘模型并开始打印(约 5 分钟)。\n\n'
+          '将通过 Bambu Connect 向「${profile.name}」派单并开始打印(约 5 分钟)。\n\n'
           '热床会快速震动甩下成品并把打印板送到最前端,请确保打印机前方留空。\n'
-          '不会暂停正在进行的任务 - 请在打印机空闲时执行。'),
+          '需要本机已运行打印 helper (python bconnect_service.py) 并在 '
+          '系统设置→隐私与安全性→辅助功能 允许 python。'),
       actions: [
         TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
@@ -680,57 +706,37 @@ Future<void> confirmPlateSwap(BuildContext context, WidgetRef ref,
   if (ok != true || !context.mounted) return;
   final messenger = ScaffoldMessenger.of(context);
   try {
-    // The card's `live` gate counts connecting/reconnecting too, so the
-    // button is clickable while the MQTT link is mid-reconnect - the FTPS
-    // step would still succeed and the publish would abort with a baffling
-    // "未连接". Wait out a reconnect blip first (换盘 2026-10-21).
-    if (!await _waitForConnected(() {
-      // The widget may be gone mid-poll; a dead ref must not crash the
-      // wait - treat it as "still not connected".
-      try {
-        return ref.read(connectionProvider(profile.id)).status ==
-            BambuConnStatus.connected;
-      } catch (_) {
-        return false;
-      }
-    })) {
-      throw Exception('打印机当前未连接(可能在重连),请确认打印机在线后重试');
-    }
-    // 换盘模型按 PLA 切片 - 每次点击都实时读当前 AMS 状态选 PLA 槽位
-    // (颜色不限,用户 2026-10-21);AMS 没有 PLA 就退回外置料并记录。
-    final amsChoice = _pickSwapAmsSafely(ref, profile.id);
-    await startPlateSwap(profile,
-        sendPrint: notifier.printProjectFile, ams: amsChoice);
-    messenger.showSnackBar(
-        const SnackBar(content: Text('已发送,正在等待打印机响应…')));
-    // The MQTT layer accepts the publish even when firmware refuses the
-    // command - post-2025-01 firmware silently drops unsigned project_file
-    // (print_error 84033543) unless 开发者模式 is on. Watch the report
-    // stream so the user learns what ACTUALLY happened (2026-10-21).
-    final container = ProviderScope.containerOf(context);
-    final (started, err) = await _watchSwapOutcome(container, profile.id);
-    // The outcome snackbar is transient - the run log keeps the verdict.
-    LogBuffer.instance.add('[换盘] 观察结果: '
-        '${started ? "已开始执行" : err == 0 ? "无响应" : "报错 $err"}');
-    if (started) {
-      messenger.showSnackBar(
-          const SnackBar(content: Text('换盘已开始执行(先调平,热床会移动甩盘)')));
-    } else if (err == 84033543) {
-      messenger.showSnackBar(const SnackBar(
-          backgroundColor: DeckColors.error,
-          content: Text('打印机拒收了换盘命令(84033543 = 签名校验未通过)。'
-              '请确认 ~/.bambudeck/signing_key.pem 在位并重启 app;'
-              '若固件不信任该签名证书,只能在打印机上开「开发者模式」绕过')));
-    } else if (err != 0) {
-      final text = printErrorDescription(err);
+    if (profile.serial.trim().isEmpty) {
       messenger.showSnackBar(SnackBar(
           backgroundColor: DeckColors.error,
-          content: Text('打印机报错 $err${text == null ? '' : ': $text'}')));
-    } else {
+          content: Text('「${profile.name}」未配置序列号,Connect 自动化无法定位'
+              '打印机。请在该打印机卡片 → 编辑打印机 里补上序列号')));
+      return;
+    }
+    if (!await CloudPrintHelper.instance.health()) {
       messenger.showSnackBar(const SnackBar(
           backgroundColor: DeckColors.error,
-          content: Text('打印机没有响应换盘命令——'
-              '请确认打印机空闲、屏幕没有弹窗,然后重试')));
+          content: Text('本机打印 helper 未运行。请先执行 python bconnect_service.py '
+              '并在 系统设置→隐私与安全性→辅助功能 允许 python')));
+      return;
+    }
+    final r = await startCloudPlateSwap(profile);
+    LogBuffer.instance.add('[换盘] 派单: ok=${r.ok} task=${r.taskId} '
+        'status=${r.taskStatus}'
+        '${r.error == null ? '' : ' err=${r.error}'}'
+        '${r.elapsedTotal == null ? '' : ' 总耗时 ${r.elapsedTotal!.toStringAsFixed(1)}s'}');
+    for (final s in r.steps) {
+      LogBuffer.instance.add('[换盘] $s');
+    }
+    // 成功判定 =「已发送」（离开发送页），不再等任务落库/打印执行。
+    if (r.ok) {
+      messenger.showSnackBar(SnackBar(
+          content: Text('已通过 Bambu Connect 派单'
+              '${r.taskId == null ? '' : '(任务 ${r.taskId})'},打印机将开始换盘')));
+    } else {
+      messenger.showSnackBar(SnackBar(
+          backgroundColor: DeckColors.error,
+          content: Text('换盘未发送: ${r.error ?? 'Bambu Connect 发送页未离开'}')));
     }
   } catch (e) {
     messenger.showSnackBar(SnackBar(
@@ -739,94 +745,18 @@ Future<void> confirmPlateSwap(BuildContext context, WidgetRef ref,
   }
 }
 
-/// Live AMS slot pick for one swap attempt. The printer may be reconnecting
-/// or the widget unmounted - any ref trouble means "no AMS info", not a
-/// crash (换盘 2026-10-21).
-({int amsId, int slot})? _pickSwapAmsSafely(WidgetRef ref, String profileId) {
-  try {
-    final choice = pickSwapAmsSlot(
-        ref.read(connectionProvider(profileId)).state?.ams);
-    LogBuffer.instance.add('[换盘] AMS 选料: '
-        '${choice == null ? "未找到 PLA,改用外置料" : "单元${choice.amsId} 槽${choice.slot + 1}"}');
-    return choice;
-  } catch (_) {
-    return null;
-  }
-}
-
-/// Outcome of watching the printer after a swap command: did the job take
-/// (prepare/running that was not running before) or did firmware report a
-/// fresh print_error (rejection code).
-Future<(bool, int)> _watchSwapOutcome(
-    ProviderContainer container, String profileId,
-    {Duration window = const Duration(seconds: 45)}) async {
-  final initial = () {
-    try {
-      return container.read(connectionProvider(profileId)).state;
-    } catch (_) {
-      return null;
-    }
-  }();
-  final initialError = initial?.printError ?? 0;
-  final wasActive = initial?.gcodeState == GcodeState.prepare ||
-      initial?.gcodeState == GcodeState.running;
-  LogBuffer.instance.add('[换盘] 开始观察 45s '
-      '(gcode=${initial?.gcodeState.label ?? "?"}, print_error=$initialError)');
-  final watch = Stopwatch()..start();
-  while (watch.elapsed < window) {
-    await Future.delayed(const Duration(milliseconds: 600));
-    final conn = () {
-      try {
-        return container.read(connectionProvider(profileId));
-      } catch (_) {
-        return null;
-      }
-    }();
-    final s = conn?.state;
-    if (s == null) continue;
-    if (s.printError != 0 && s.printError != initialError) {
-      LogBuffer.instance.add('[换盘] 打印机报告 print_error=${s.printError} '
-          '(${printErrorDescription(s.printError) ?? "无描述"})');
-      return (false, s.printError);
-    }
-    if (!wasActive &&
-        (s.gcodeState == GcodeState.prepare ||
-            s.gcodeState == GcodeState.running)) {
-      return (true, 0);
-    }
-  }
-  return (false, 0);
-}
-
-/// Polls the connection until it is truly `connected` (not just isLive) or
-/// the timeout elapses - a reconnecting link usually lands within a couple
-/// of seconds.
-Future<bool> _waitForConnected(bool Function() isConnected,
-    {Duration timeout = const Duration(seconds: 8)}) async {
-  const step = Duration(milliseconds: 400);
-  var waited = Duration.zero;
-  while (!isConnected()) {
-    if (waited >= timeout) return false;
-    await Future.delayed(step);
-    waited += step;
-  }
-  return true;
-}
-
-/// Status + control card for the compact pane's top info row: dense task,
-/// progress, temps and controls so the row stays slim and the camera wall
-/// below keeps the space (反馈 2026-10-20).
-class _StatusCard extends ConsumerWidget {
-  const _StatusCard({
+/// 控制卡 —— 紧凑面板顶行的控制按钮 (暂停/恢复/停止 + 速度 + 腔灯 + 换盘)。
+/// 任务/进度/温度等状态详情在左侧打印机卡片列表 (反馈 2026-10-21 迁移),
+/// 本卡只留操作, 垂直居中。
+class _ControlCard extends ConsumerWidget {
+  const _ControlCard({
     required this.profileId,
     required this.s,
-    required this.accent,
     required this.live,
   });
 
   final String profileId;
   final BambuState s;
-  final Color accent;
   final bool live;
 
   @override
@@ -841,96 +771,15 @@ class _StatusCard extends ConsumerWidget {
     final canSwap = live &&
         profile != null &&
         profile.autoPlateSwap &&
-        profile.mode == PrinterMode.lan;
+        (profile.mode == PrinterMode.lan || profile.mode == PrinterMode.cloud);
 
     return Card(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Row(children: [
-              // 任务预览图 (反馈 2026-10-20): 云端任务封面上屏, 同 Bambu
-              // Handy; 无云端凭据的打印机整个不占位。
-              _TaskCover(profileId: profileId, taskName: s.subtaskName),
-              const SizedBox(width: 8),
-              StateBadge(state: s.gcodeState),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  s.subtaskName.isNotEmpty ? s.subtaskName : '无任务',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.w600),
-                ),
-              ),
-              if (s.doorOpen == true) ...[
-                const SizedBox(width: 8),
-                const _DoorChip(),
-              ],
-              if (s.hasError) ...[
-                const SizedBox(width: 8),
-                // Errors live in a dialog now, not a dedicated card
-                // (反馈 2026-10-20) - the chip is the entry point.
-                InkWell(
-                  onTap: () => showHmsDialog(context, s),
-                  borderRadius: BorderRadius.circular(999),
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: DeckColors.error.withValues(alpha: 0.14),
-                      borderRadius: BorderRadius.circular(999),
-                      border: Border.all(
-                          color: DeckColors.error.withValues(alpha: 0.5)),
-                    ),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      const Icon(Icons.error_outline,
-                          size: 13, color: DeckColors.error),
-                      const SizedBox(width: 4),
-                      Text(
-                          s.hms.length > 1 ? '报错 ${s.hms.length}' : '报错',
-                          style: const TextStyle(
-                              color: DeckColors.error, fontSize: 12)),
-                    ]),
-                  ),
-                ),
-              ],
-              const SizedBox(width: 8),
-              Text('${s.progress}%',
-                  style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: accent)),
-            ]),
-            const SizedBox(height: 6),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(3),
-              child: LinearProgressIndicator(
-                value: s.progress / 100,
-                minHeight: 3,
-                color: accent,
-                backgroundColor: accent.withValues(alpha: 0.15),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 12,
-              runSpacing: 4,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                _temp('喷嘴', s.nozzleTemp, s.nozzleTarget),
-                _temp('热床', s.bedTemp, s.bedTarget),
-                if (s.chamberTemp > 0) _temp('腔体', s.chamberTemp, null),
-                if (s.printing)
-                  Text(
-                      '层 ${s.layerNum}/${s.totalLayers} · 剩 ${fmtRemaining(s.remainingMinutes)}',
-                      style: const TextStyle(
-                          fontSize: 12, color: DeckColors.textSecondary)),
-              ],
-            ),
-            const SizedBox(height: 8),
             // Controls are the row's compressible part: in the compact top
             // row's fixed height a narrow card can't show every control
             // line - scroll instead of painting overflow stripes.
@@ -941,10 +790,10 @@ class _StatusCard extends ConsumerWidget {
                   runSpacing: 6,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    if (canPause || canResume)
+                    if ((canPause || canResume) && profile != null)
                       FilledButton.tonalIcon(
-                        onPressed: () async =>
-                            canPause ? notifier.pause() : notifier.resume(),
+                        onPressed: () => runControl(context, profile, s,
+                            notifier, canPause ? 'pause' : 'resume'),
                         icon: Icon(canPause ? Icons.pause : Icons.play_arrow,
                             size: 16),
                         label: Text(canPause ? '暂停' : '恢复',
@@ -964,8 +813,8 @@ class _StatusCard extends ConsumerWidget {
                         foregroundColor: DeckColors.error,
                         visualDensity: VisualDensity.compact,
                       ),
-                      onPressed: live
-                          ? () => confirmStopPrint(context, notifier)
+                      onPressed: live && profile != null
+                          ? () => confirmStopPrint(context, profile, s, notifier)
                           : null,
                     ),
                     const Text('速度',
@@ -1014,8 +863,7 @@ class _StatusCard extends ConsumerWidget {
                       // canSwap's profile!=null promotes the local - no
                       // re-check needed here.
                       OutlinedButton.icon(
-                        onPressed: () =>
-                            confirmPlateSwap(context, ref, profile, notifier),
+                        onPressed: () => confirmPlateSwap(context, profile),
                         icon: const Icon(Icons.auto_awesome_motion_outlined,
                             size: 16),
                         label: const Text('一键换盘',
@@ -1035,53 +883,6 @@ class _StatusCard extends ConsumerWidget {
           ],
         ),
       ),
-    );
-  }
-
-  Widget _temp(String label, double t, double? target) => Text(
-        target != null && target > 0
-            ? '$label ${t.round()}°/${target.round()}°'
-            : '$label ${t.round()}°',
-        style: const TextStyle(fontSize: 12, color: DeckColors.textSecondary),
-      );
-}
-
-/// Plate preview of the current task (Bambu Handy 风格, 反馈 2026-10-20):
-/// the cloud task cover, fetched per (printer, task). Hidden entirely for
-/// printers without a cloud token; placeholder box while loading/missing.
-class _TaskCover extends ConsumerWidget {
-  const _TaskCover({required this.profileId, required this.taskName});
-
-  final String profileId;
-  final String taskName;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final profile = ref.watch(printersProvider
-        .select((l) => printerByIdOf(l.valueOrNull, profileId)));
-    if (profile == null || profile.token.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    final cover = ref
-        .watch(taskCoverProvider((profileId, taskName)))
-        .valueOrNull;
-    final placeholder = Container(
-      width: 46,
-      height: 46,
-      color: DeckColors.border.withValues(alpha: 0.35),
-      alignment: Alignment.center,
-      child: const Icon(Icons.image_outlined,
-          size: 18, color: DeckColors.textSecondary),
-    );
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: cover == null
-          ? placeholder
-          : Image.network(cover,
-              width: 46,
-              height: 46,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => placeholder),
     );
   }
 }
