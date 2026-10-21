@@ -697,12 +697,77 @@ Future<void> confirmPlateSwap(BuildContext context, WidgetRef ref,
     }
     await startPlateSwap(profile, sendPrint: notifier.printProjectFile);
     messenger.showSnackBar(
-        const SnackBar(content: Text('换盘任务已发送,打印机会自动执行换盘流程')));
+        const SnackBar(content: Text('已发送,正在等待打印机响应…')));
+    // The MQTT layer accepts the publish even when firmware refuses the
+    // command - post-2025-01 firmware silently drops unsigned project_file
+    // (print_error 84033543) unless 开发者模式 is on. Watch the report
+    // stream so the user learns what ACTUALLY happened (2026-10-21).
+    final container = ProviderScope.containerOf(context);
+    final (started, err) = await _watchSwapOutcome(container, profile.id);
+    if (started) {
+      messenger.showSnackBar(
+          const SnackBar(content: Text('换盘已开始执行(先调平,热床会移动甩盘)')));
+    } else if (err == 84033543) {
+      messenger.showSnackBar(const SnackBar(
+          backgroundColor: DeckColors.error,
+          content: Text('打印机拒收了换盘命令(84033543 = 未签名命令)。'
+              '请在打印机屏幕的 局域网/网络 设置里开启「开发者模式」后重试')));
+    } else if (err != 0) {
+      final text = printErrorDescription(err);
+      messenger.showSnackBar(SnackBar(
+          backgroundColor: DeckColors.error,
+          content: Text('打印机报错 $err${text == null ? '' : ': $text'}')));
+    } else {
+      messenger.showSnackBar(const SnackBar(
+          backgroundColor: DeckColors.error,
+          content: Text('打印机没有响应换盘命令——'
+              '请确认打印机空闲、屏幕没有弹窗,然后重试')));
+    }
   } catch (e) {
     messenger.showSnackBar(SnackBar(
         backgroundColor: DeckColors.error,
         content: Text('换盘失败: $e')));
   }
+}
+
+/// Outcome of watching the printer after a swap command: did the job take
+/// (prepare/running that was not running before) or did firmware report a
+/// fresh print_error (rejection code).
+Future<(bool, int)> _watchSwapOutcome(
+    ProviderContainer container, String profileId,
+    {Duration window = const Duration(seconds: 45)}) async {
+  final initial = () {
+    try {
+      return container.read(connectionProvider(profileId)).state;
+    } catch (_) {
+      return null;
+    }
+  }();
+  final initialError = initial?.printError ?? 0;
+  final wasActive = initial?.gcodeState == GcodeState.prepare ||
+      initial?.gcodeState == GcodeState.running;
+  final watch = Stopwatch()..start();
+  while (watch.elapsed < window) {
+    await Future.delayed(const Duration(milliseconds: 600));
+    final conn = () {
+      try {
+        return container.read(connectionProvider(profileId));
+      } catch (_) {
+        return null;
+      }
+    }();
+    final s = conn?.state;
+    if (s == null) continue;
+    if (s.printError != 0 && s.printError != initialError) {
+      return (false, s.printError);
+    }
+    if (!wasActive &&
+        (s.gcodeState == GcodeState.prepare ||
+            s.gcodeState == GcodeState.running)) {
+      return (true, 0);
+    }
+  }
+  return (false, 0);
 }
 
 /// Polls the connection until it is truly `connected` (not just isLive) or
