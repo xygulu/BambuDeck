@@ -1,0 +1,3 @@
+# 唯一第三方依赖：云端 MQTT 快照 + 局域网 MQTT 控制（bconnect_cloud / bconnect_service）。
+# 其余 import 全是标准库。代码用到 paho-mqtt 2.x 的 CallbackAPIVersion，需 >=2.0。
+paho-mqtt>=2.0,<3

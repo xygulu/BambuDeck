@@ -1,0 +1,12 @@
+# 云端登录态 / 访问码 / 密钥 —— 绝不提交
+creds/
+*.pem
+*.key
+
+# 本机运行时状态（token / 模型 key），只应存在于 ~/.bambudeck/
+helper.json
+models.json
+
+# Python 缓存
+__pycache__/
+*.pyc

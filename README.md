@@ -44,7 +44,7 @@
 
 - **一键换盘**: 内置换盘模型(尾段 gcode 把成品震落并送盘)。局域网直连走 FTPS 上传(`FtpsClient`) + `print.project_file`;云端由 Bambu Connect 以拓竹合法客户端身份派单,成功判定 =「已发送」(离开发送页),不等待打印执行。固件校验的是 3mf 内嵌 `Metadata/plate_1.gcode` 的 md5(常量 `kPlateSwapGcodeMd5`)。
 - **开发者模式**: 2025-01 后固件对未签名 `print` 帧回 `84033543`。局域网直发打印/换盘需打印机开「开发者模式」(设置 → 网络 → 仅局域网模式 → 开发者模式 → 启用 → 重启);暂停/恢复/停止不受影响。App 走未签名直发、不加载签名私钥(签名信封在开发者模式关时仍需字段加密 + 装应用证书,是死路)。
-- **Bambu Connect 自动化**: 云模式 / dev-OFF 的打印、换盘、暂停/恢复/停止由本机 helper `bconnect_service.py`(127.0.0.1:8799)驱动 Connect 界面完成 导入 → 打印 → 发送;需在 macOS 系统设置 → 隐私与安全性 → 辅助功能 允许 helper 的 python。
+- **Bambu Connect 自动化**: 云模式 / dev-OFF 的打印、换盘、暂停/恢复/停止由本机 helper [`apps/deck/tool/connect_helper/`](apps/deck/tool/connect_helper/)(`bconnect_service.py`,127.0.0.1:8799)驱动 Connect 界面完成 导入 → 打印 → 发送;需在 macOS 系统设置 → 隐私与安全性 → 辅助功能 允许 helper 的 python。安装/运行见该目录 [README](apps/deck/tool/connect_helper/README.md)(venv + paho-mqtt + 云端登录态 `creds/cloud_session.json`)。
 
 ## 快速上手(开发)
 
@@ -82,6 +82,8 @@ BambuDeck/
 │   │   ├── data/            # 打印机配置(安全存储)、云 API、Riverpod providers
 │   │   ├── features/        # home(打印机网格)/ dashboard(单机监控)
 │   │   └── ui/              # 进度环、状态徽章、AMS 条、HMS 卡片等通用组件
+│   ├── tool/                # 调试/真机验证脚本
+│   │   └── connect_helper/  # 云端打印/控制 helper(Bambu Connect 自动化,Python)
 │   └── test/
 └── packages/bambu_protocol/ # 纯 Dart 协议包(不依赖 Flutter,可被 Hub 服务端复用)
     ├── lib/src/             # 模型、report 解析器、MQTT 客户端、云端 API
