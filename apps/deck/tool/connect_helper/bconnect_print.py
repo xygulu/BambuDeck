@@ -55,6 +55,11 @@ APP = "Bambu Connect"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DEVICE = "03900D642905133"
 
+# BAMBU_SILENT=1：打印/换盘不把 Connect 置前（deep link 用 open -g 后台打开、跳过
+# activate）。控制路径（bconnect_drive）本就不置前；打印多页导航在后台更脆弱（AX 树
+# 切页重建可能空读），默认关，可自行 A/B 测试是否够稳。
+SILENT = os.environ.get("BAMBU_SILENT", "").strip().lower() in ("1", "true", "yes", "on")
+
 sys.path.insert(0, HERE)
 import bconnect_ax as ax  # noqa: E402
 import bconnect_cloud as cloud  # noqa: E402
@@ -69,18 +74,20 @@ def app_running() -> bool:
 
 
 def ensure_app(timeout: int = 30) -> str:
-    """确保 Connect 在跑并置前。返回 'already' / 'launched'。"""
+    """确保 Connect 在跑；默认并置前，BAMBU_SILENT=1 时保持后台。返回 'already'/'launched'。"""
     if app_running():
-        subprocess.run(["osascript", "-e", 'tell application "%s" to activate' % APP],
-                       capture_output=True, text=True)
+        if not SILENT:
+            subprocess.run(["osascript", "-e", 'tell application "%s" to activate' % APP],
+                           capture_output=True, text=True)
         return "already"
     subprocess.run(["open", "-a", "/Applications/%s.app" % APP], check=False)
     for _ in range(timeout):
         time.sleep(1)
         if app_running():
             time.sleep(3)
-            subprocess.run(["osascript", "-e", 'tell application "%s" to activate' % APP],
-                           capture_output=True, text=True)
+            if not SILENT:
+                subprocess.run(["osascript", "-e", 'tell application "%s" to activate' % APP],
+                               capture_output=True, text=True)
             return "launched"
     raise RuntimeError("Bambu Connect 启动失败")
 
@@ -206,7 +213,8 @@ def open_deeplink(path: str, name: str | None = None) -> str:
     url = "bambu-connect://import-file?path=%s&name=%s&version=1.0.0" % (
         urllib.parse.quote(os.path.abspath(path), safe=""),
         urllib.parse.quote(name, safe=""))
-    subprocess.run(["open", url], check=False)
+    # SILENT 时 -g 后台打开（不抢焦点）；否则默认前台激活 Connect。
+    subprocess.run(["open", "-g", url] if SILENT else ["open", url], check=False)
     return url
 
 

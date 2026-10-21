@@ -53,6 +53,12 @@ cd apps/deck/tool/connect_helper
 ./.venv/bin/python bconnect_service.py       # 监听 127.0.0.1:8799
 ```
 
+环境变量:
+
+- `BAMBU_SESSION` — 云端登录态文件路径(默认本目录 `creds/cloud_session.json`)。
+- `BAMBU_SILENT=1` — 打印/换盘不把 Connect 置前(deep link 用 `open -g` 后台打开、跳过 activate)。
+  控制路径本就静默(AXPress 后台点按钮);打印多页导航在后台更脆弱,默认关,可自行测试是否够稳。
+
 接口(请求头带 `X-Deck-Token`,token 持久化在 `~/.bambudeck/helper.json`):
 
 - `GET  /health` → `{ok, busy, app_running, uid_resolved}`
