@@ -61,8 +61,9 @@ cd apps/deck/tool/connect_helper
   - `command=pause|resume|stop` — Connect 自动化,失败退回 LAN MQTT
   - `command=status` — 云 MQTT 只读快照
 
-打印成功判定 = **已发送**(点发送后离开发送页),不等待任务落库/打印执行——一键换盘本身
-需要一段时间,等 RUNNING 是多余阻塞。
+打印成功判定 = **点下「发送」即算成功**(Connect 已派单),不等发送页离开/任务落库/打印执行
+——换盘本身需要一段时间,等 RUNNING 是多余阻塞。派单后立即返回、释放服务端 busy 锁,
+用户可马上再下停止/暂停等控制。
 
 ## 安全
 

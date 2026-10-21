@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import secrets
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -91,6 +92,28 @@ def load_lan_conf() -> dict:
             return json.load(f)
     except Exception:
         return {}
+
+
+def _frontmost_app() -> str | None:
+    """当前最前 app 名字（Connect 自动化会把 Connect 置前，结束后还原焦点）。"""
+    r = subprocess.run(
+        ["osascript", "-e",
+         'tell application "System Events" to get name of first process '
+         'whose frontmost is true'],
+        capture_output=True, text=True, timeout=30)
+    return (r.stdout or "").strip() or None
+
+
+def _restore_frontmost(prev: str | None) -> None:
+    """把焦点还给操作前的 app（若它不是 Connect 且还活着）。绝不抛异常。"""
+    if not prev or prev == "Bambu Connect":
+        return
+    try:
+        subprocess.run(
+            ["osascript", "-e", 'tell application "%s" to activate' % prev],
+            capture_output=True, text=True, timeout=30)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------- 控制
@@ -332,6 +355,7 @@ class Handler(BaseHTTPRequestHandler):
         if mutating and not _BUSY.acquire(blocking=False):
             self._send(409, {"ok": False, "error": "已有命令在执行，请稍后重试"})
             return
+        prev = _frontmost_app() if mutating else None
         try:
             res = dispatch(serial, command, params)
         except Exception as e:  # noqa: BLE001
@@ -339,6 +363,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if mutating:
                 _BUSY.release()
+            _restore_frontmost(prev)
 
         self._send(200 if res.get("ok") else 502, res)
 

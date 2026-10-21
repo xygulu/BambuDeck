@@ -29,7 +29,7 @@
     python bconnect_print.py --dump                          # 调试：按钮+文字
 
 JSON 输出契约（--json）:
-    {"ok": bool,  # True = 已点发送且离开发送页（已派单），不等任务落库/打印执行
+    {"ok": bool,  # True = 已点「发送」即派单成功，不等页面离开/任务落库/打印执行
      "file": str, "steps": [{"step": str, "ok": bool, "detail": str,
                              "elapsed": float, "since_prev": float}],
      "task": {"id": int|None, "status": int|None, "device": str|None},
@@ -334,16 +334,14 @@ def run(path: str, stop_before_send: bool = False,
             result["error"] = "点不到「发送」按钮（desc=confirm 与文字均失败）"
             rec("click-send", False, result["error"])
             return result
-    # 点发送后等一小拍，让 Connect 开始切页；避免第一次探测落在重建的瞬时空树。
+    # 成功判定 = 点下了「发送」按钮（Connect 以合法身份派单）。不再用 gone_probe
+    # 等「发送页离开」——Electron 切页后旧页文字常滞留在 AX 树里，gone_probe 会一直
+    # 「看得到发送页」→ 误报「未离开」，即便真发成功了。点下发送即 ok=True，尽快
+    # 返回、释放服务端 busy 锁，用户可立即再下停止/暂停等控制。
+    result["ok"] = True
+    rec("click-send", True, "已点发送（派单成功，不等页面离开）")
+    # 给 Connect 一小拍真正派单，再回读任务列表（只记日志，不阻塞成功判定）。
     time.sleep(0.8)
-    # 发送成功后 Connect 会离开发送页（跳到设备/AMS 页）。
-    # 按需求：只要「已发送」即算成功，不再等任务落库 / 打印机真正开始执行
-    # （换盘本身需要一段时间，等 RUNNING 是多余的阻塞）。
-    left = gone_probe(15, texts=[SEND_PAGE])
-    result["ok"] = left
-    rec("click-send", left,
-        "已点发送" + ("，页面已离开发送页（已发送）" if left
-                      else "，但页面未离开，可能未真正派单"))
 
     # 4) 派单后做一次「快照」回读（tries=1 不轮询、wait=0 不阻塞），只用于
     #    记日志 / 校验目标机，绝不阻塞成功判定。
