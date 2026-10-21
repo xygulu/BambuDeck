@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/format.dart';
 import '../../core/theme.dart';
 import '../../data/plate_swap.dart';
+import '../../data/log_buffer.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 import '../../ui/widgets.dart';
@@ -704,6 +705,9 @@ Future<void> confirmPlateSwap(BuildContext context, WidgetRef ref,
     // stream so the user learns what ACTUALLY happened (2026-10-21).
     final container = ProviderScope.containerOf(context);
     final (started, err) = await _watchSwapOutcome(container, profile.id);
+    // The outcome snackbar is transient - the run log keeps the verdict.
+    LogBuffer.instance.add('[换盘] 观察结果: '
+        '${started ? "已开始执行" : err == 0 ? "无响应" : "报错 $err"}');
     if (started) {
       messenger.showSnackBar(
           const SnackBar(content: Text('换盘已开始执行(先调平,热床会移动甩盘)')));
@@ -746,6 +750,8 @@ Future<(bool, int)> _watchSwapOutcome(
   final initialError = initial?.printError ?? 0;
   final wasActive = initial?.gcodeState == GcodeState.prepare ||
       initial?.gcodeState == GcodeState.running;
+  LogBuffer.instance.add('[换盘] 开始观察 45s '
+      '(gcode=${initial?.gcodeState.label ?? "?"}, print_error=$initialError)');
   final watch = Stopwatch()..start();
   while (watch.elapsed < window) {
     await Future.delayed(const Duration(milliseconds: 600));
@@ -759,6 +765,8 @@ Future<(bool, int)> _watchSwapOutcome(
     final s = conn?.state;
     if (s == null) continue;
     if (s.printError != 0 && s.printError != initialError) {
+      LogBuffer.instance.add('[换盘] 打印机报告 print_error=${s.printError} '
+          '(${printErrorDescription(s.printError) ?? "无描述"})');
       return (false, s.printError);
     }
     if (!wasActive &&
