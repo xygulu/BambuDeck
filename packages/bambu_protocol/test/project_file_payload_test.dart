@@ -30,4 +30,25 @@ void main() {
     final node = p['print'] as Map<String, dynamic>;
     expect(node.containsKey('md5'), isFalse);
   });
+
+  test('secured url_enc replaces cleartext url (§10.3)', () {
+    final p = buildProjectFilePayload(
+      sequenceId: '2042',
+      url: 'ftp:///cache/bambudeck_plate_swap.3mf',
+      urlEnc: 'Kj9w8...==',
+    );
+    final node = p['print'] as Map<String, dynamic>;
+    expect(node['url_enc'], 'Kj9w8...==');
+    expect(node.containsKey('url'), isFalse);
+  });
+
+  test('developer mode keeps cleartext url, no url_enc', () {
+    final p = buildProjectFilePayload(
+      sequenceId: '2043',
+      url: 'ftp:///cache/bambudeck_plate_swap.3mf',
+    );
+    final node = p['print'] as Map<String, dynamic>;
+    expect(node['url'], 'ftp:///cache/bambudeck_plate_swap.3mf');
+    expect(node.containsKey('url_enc'), isFalse);
+  });
 }

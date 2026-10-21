@@ -303,6 +303,7 @@ BambuState parsePrintSection(Map<dynamic, dynamic> print_,
     hms: hms,
     ams: ams,
     isCalibrationJob: isCalibration,
+    fun: has('fun') ? _intOrNull(print_['fun']) : previous?.fun,
   );
 }
 

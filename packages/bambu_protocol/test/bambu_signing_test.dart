@@ -97,7 +97,8 @@ void main() {
         amsSlot: 2);
     final print = payload['print'] as Map<String, dynamic>;
     expect(print['use_ams'], isTrue);
-    expect(print['ams_mapping'], [2]);
+    // A1 形态: 固定 5 元素, 从右往左, 空位 -1。
+    expect(print['ams_mapping'], [-1, -1, -1, -1, 2]);
     expect(print['ams_mapping2'], [
       {'ams_id': 0, 'slot_id': 2}
     ]);

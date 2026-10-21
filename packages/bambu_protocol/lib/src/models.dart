@@ -291,6 +291,7 @@ class BambuState {
     this.hms = const [],
     this.ams,
     this.isCalibrationJob = false,
+    this.fun,
   });
 
   final DateTime updatedAt;
@@ -324,6 +325,17 @@ class BambuState {
 
   final AmsState? ams;
   final bool isCalibrationJob;
+
+  /// `print.fun` capability bitmask; null when the firmware doesn't report it
+  /// (A1 01.07.02.00 does not — the only reliable read of Developer Mode then
+  /// is the printer screen).
+  final int? fun;
+
+  /// Developer Mode OFF (secured) per `print.fun` bit 29: clear = developer
+  /// mode on (cleartext url/param, unsigned header optional), set = secured
+  /// (`*_enc` + signing required). Null when `fun` is unreported.
+  bool? get developerModeOff =>
+      fun == null ? null : ((fun! >> 29) & 1) == 1;
 
   bool get printing => gcodeState.isPrinting;
   bool get hasError => printError != 0 || hms.isNotEmpty;

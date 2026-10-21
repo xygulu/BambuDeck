@@ -8,12 +8,15 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show X509Certificate;
 import 'dart:math';
 
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
+import 'package:pointycastle/export.dart' show RSAPublicKey;
 import 'package:typed_data/typed_data.dart';
 
+import 'bambu_field_encryption.dart';
 import 'bambu_signing.dart';
 import 'models.dart';
 import 'report_parser.dart';
@@ -68,6 +71,46 @@ class BambuMqttConfig {
   bool get acceptBadCertificates => mode == PrinterMode.lan;
 }
 
+/// 一条 `print` 命令的固件回执。
+///
+/// 成功: `{"print":{"sequence_id":"…","command":"pause","result":"success",
+/// "reason":"success"}}`。
+/// 被拒: 只有 `err_code`、**没有** `result` 字段 —— 这正是「按钮点了没反应」
+/// 的根源(旧代码只在报文含 result/reason 时打日志，err_code 帧被整个吞掉)。
+class BambuCommandAck {
+  const BambuCommandAck({this.command, this.result, this.reason, this.errCode});
+
+  final String? command;
+  final String? result;
+  final String? reason;
+  final int? errCode;
+
+  bool get success => result == 'success';
+
+  /// 给人看的一句话，直接丢到 UI/日志里。
+  String get describe {
+    if (success) return '$command 成功';
+    switch (errCode) {
+      case 84033543:
+        return '$command 被拒(84033543): 固件要求 print 帧带签名 —— '
+            '需在该打印机上开启「开发者模式」(设置→网络→仅局域网模式→开发者模式→'
+            '勾选确认→启用→重启)';
+      case 84033544:
+        return '$command 被拒(84033544): 文件校验失败或 sequence_id 复用';
+      case 84033545:
+        return '$command 被拒(84033545): 报文格式错误';
+      case 84033546:
+        return '$command 被拒(84033546): 签名无效(所用证书已被打印机吊销)';
+      case 84033547:
+      case 84033548:
+        return '$command 被拒($errCode): 应用证书未安装';
+      default:
+        return '$command 被拒(err_code=${errCode ?? '?'}'
+            '${reason == null ? '' : ' $reason'})';
+    }
+  }
+}
+
 class BambuMqttClient {
   BambuMqttClient({
     required this.config,
@@ -88,6 +131,29 @@ class BambuMqttClient {
   /// Signs `print` commands (bambu_signing.dart). Null = unsigned frames,
   /// which post-2025-01 firmware rejects with 84033543.
   final BambuCommandSigner? _signer;
+
+  /// Printer device-cert public key (CN=<serial>), captured from the LAN TLS
+  /// handshake on :8883 — the key firmware decrypts `url_enc`/`param_enc`
+  /// against. Null until the first (re)connect or for cloud transports.
+  RSAPublicKey? _devicePublicKey;
+
+  /// Developer-mode-off (secured) override. Null = auto-detect from
+  /// `print.fun` bit 29 in the report stream (unreported on A1 01.07.02.00,
+  /// so a caller that already knows the toggle state can pin it here).
+  bool? _securedOverride;
+
+  BambuFieldEncryptor? get _fieldEncryptor {
+    final key = _devicePublicKey;
+    return key == null ? null : BambuFieldEncryptor(key);
+  }
+
+  /// Whether the next `print` command should be field-encrypted (`*_enc`).
+  /// Resolves override → report bit 29 → false (assume developer mode on).
+  bool get _secured => _securedOverride ?? _lastState?.developerModeOff ?? false;
+
+  /// The captured device cert public key, for tests/tools that build `*_enc`
+  /// fields themselves. Null until the TLS handshake has completed.
+  RSAPublicKey? get devicePublicKey => _devicePublicKey;
 
   MqttServerClient? _client;
   Timer? _staleTimer;
@@ -110,6 +176,10 @@ class BambuMqttClient {
 
   final _states = StreamController<BambuState>.broadcast();
   final _status = StreamController<BambuConnStatus>.broadcast();
+
+  /// sequence_id → 正在等回执的 completer。固件把回执塞回 report 流里，
+  /// 不按 seq 关联的话，成功和失败都只能靠猜。
+  final Map<String, Completer<BambuCommandAck>> _pendingAcks = {};
 
   Stream<BambuState> get states => _states.stream;
   Stream<BambuConnStatus> get status => _status.stream;
@@ -168,7 +238,20 @@ class BambuMqttClient {
       // mqtt_client casts this to bool Function(Object) internally
       // (mqtt_server_client.dart:165), so the parameter must be typed Object -
       // a (X509Certificate) signature fails that runtime cast.
-      client.onBadCertificate = (Object cert) => true;
+      client.onBadCertificate = (Object cert) {
+        // The LAN self-signed leaf IS the printer device cert (CN=<serial>);
+        // its public key is what firmware decrypts url_enc/param_enc against
+        // (§10.2). Capture it so secured project_file can field-encrypt.
+        if (cert is X509Certificate) {
+          try {
+            _devicePublicKey = rsaPublicKeyFromCertPem(cert.pem);
+            _logLine('已捕获设备证书公钥(字段加密)');
+          } catch (e) {
+            _logLine('设备证书公钥解析失败: $e');
+          }
+        }
+        return true;
+      };
     }
 
     _logLine('connecting ${config.host}:${config.port} as ${config.username}');
@@ -204,6 +287,10 @@ class BambuMqttClient {
         final text =
             MqttPublishPayload.bytesToStringAsString(recMess.payload.message);
         _lastMessageAt = DateTime.now();
+        // 命令回执: 固件在 report 流里按 sequence_id 回执。被拒帧只有
+        // err_code、没有 result —— 必须在这里抓，否则「按钮点了没反应」
+        // 永远查不到原因(换盘诊断 2026-10-21)。
+        _captureAck(text);
         final state = parseReport(text, previous: _lastState);
         if (state != null) {
           _lastState = state;
@@ -271,6 +358,42 @@ class BambuMqttClient {
   }
 
   void _logLine(String line) => log?.call('[${config.serial}] $line');
+
+  /// 从 report 流里抓命令回执：`result` 或 `err_code` 任一出现即为回执帧，
+  /// 按 `sequence_id` 兑现等待中的 completer。
+  ///
+  /// 注意被拒帧的形状是 `{"print":{…,"err_code":84033543}}` —— 没有
+  /// `result`、没有 `reason`，只认 result 的写法会把它当普通状态帧丢掉。
+  void _captureAck(String text) {
+    if (!text.contains('err_code') && !text.contains('"result"')) return;
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(text);
+    } on FormatException {
+      return;
+    }
+    if (decoded is! Map) return;
+    for (final ns in const ['print', 'info', 'system', 'security']) {
+      final node = decoded[ns];
+      if (node is! Map) continue;
+      if (!node.containsKey('result') && !node.containsKey('err_code')) {
+        continue;
+      }
+      final ack = BambuCommandAck(
+        command: node['command']?.toString(),
+        result: node['result']?.toString(),
+        reason: node['reason']?.toString(),
+        errCode: node['err_code'] is int
+            ? node['err_code'] as int
+            : int.tryParse('${node['err_code']}'),
+      );
+      _logLine('回执 ${ack.describe}');
+      final seq = node['sequence_id']?.toString();
+      if (seq == null) continue;
+      final pending = _pendingAcks.remove(seq);
+      if (pending != null && !pending.isCompleted) pending.complete(ack);
+    }
+  }
 
   // -- publishing -----------------------------------------------------------
 
@@ -348,9 +471,41 @@ class BambuMqttClient {
   // Bambu's control commands are `pause`/`resume`/`stop` (no `_print`
   // suffix — that suffix only appears in `print_speed`). Sending `stop_print`
   // is silently ignored by the printer (停止按钮不起作用 2026-10-20).
-  Future<bool> pausePrint() => _publishSigned(_printNode('pause', {}));
-  Future<bool> resumePrint() => _publishSigned(_printNode('resume', {}));
-  Future<bool> stopPrint() => _publishSigned(_printNode('stop', {}));
+  // 2025+ 固件要求 print 帧显式带 `param`(哪怕是空串),缺了整帧被静默丢弃
+  // 连错误都不回(doctor.py L1 探针实测 2026-10-21)。
+  Future<bool> pausePrint() => _controlCommand('pause');
+  Future<bool> resumePrint() => _controlCommand('resume');
+  Future<bool> stopPrint() => _controlCommand('stop');
+
+  /// 发一条控制命令并等固件回执。返回值语义是「**打印机接受了没有**」，
+  /// 不是「MQTT publish 成功没有」—— 这两件事差别很大：publish 成功而
+  /// 打印机拒收(如云模式 84033543)时，旧写法照样返回 true，UI 就表现成
+  /// 无响应。
+  ///
+  /// 命令不需要回执时(超时)沿用 publish 结果，避免误报失败。
+  Future<bool> _controlCommand(String command) async {
+    final node = _printNode(command, {'param': ''});
+    final seq = node['sequence_id']?.toString();
+    final completer = Completer<BambuCommandAck>();
+    if (seq != null) _pendingAcks[seq] = completer;
+
+    final published = await _publishSigned(node);
+    if (!published) {
+      if (seq != null) _pendingAcks.remove(seq);
+      _logLine('$command: publish 失败(MQTT 未连接)');
+      return false;
+    }
+    if (seq == null) return true;
+
+    try {
+      final ack = await completer.future.timeout(const Duration(seconds: 6));
+      return ack.success;
+    } on TimeoutException {
+      _pendingAcks.remove(seq);
+      _logLine('$command: 6s 内无回执(固件不 ack 该命令)，按 publish 成功处理');
+      return true;
+    }
+  }
 
   /// Prints a 3mf already on the printer's local storage (uploaded over FTPS
   /// first — see BambuDeck's FtpsClient). [url] is the printer-local path in
@@ -369,9 +524,23 @@ class BambuMqttClient {
     // testability; the signer wants the inner node so it wraps exactly one
     // print key. Double-wrapping shipped once and the firmware silently
     // dropped the whole frame (print.print.command - 换盘 无响应 2026-10-21).
+    //
+    // Secured (developer-mode-off) firmware requires `url` → `url_enc`
+    // (RSA under the device cert), cleartext `url` alone is rejected 84033544
+    // (§10.3). Field-encrypt BEFORE signing so the signature covers `url_enc`.
+    String? urlEnc;
+    if (_secured) {
+      final enc = _fieldEncryptor;
+      if (enc == null) {
+        _logLine('secured 但尚未拿到设备证书,url 保持明文(将 84033544)');
+      } else {
+        urlEnc = enc.encryptField(url);
+      }
+    }
     final envelope = buildProjectFilePayload(
       sequenceId: _nextSequence(),
       url: url,
+      urlEnc: urlEnc,
       param: param,
       md5: md5,
       name: name,
@@ -396,6 +565,46 @@ class BambuMqttClient {
       'interval_time': 0,
     })));
   }
+
+  /// Pins the secured (developer-mode-off) policy for field encryption. Null
+  /// restores auto-detection from `print.fun` bit 29. Needed on firmware that
+  /// doesn't report `fun` (A1 01.07.02.00) where the caller already knows the
+  /// printer's toggle state.
+  void setSecured(bool? secured) => _securedOverride = secured;
+
+  /// Installs the shared app cert chain + CRL into the printer's volatile
+  /// trust store (`security.app_cert_install`). RAM-only — re-run after every
+  /// printer reboot. Unsigned (it IS the bootstrap that makes later signed
+  /// `print` frames verify). The report-stream reply carries `printer_cert`
+  /// (the authoritative device cert) + `result`.
+  Future<bool> installAppCert({
+    required List<String> appCertPems,
+    required List<String> crlPems,
+  }) {
+    _logLine(
+        'app_cert_install (${appCertPems.length} certs, ${crlPems.length} crls)');
+    return _publish(jsonEncode({
+      'security': {
+        'sequence_id': _nextSequence(),
+        'command': 'app_cert_install',
+        'app_cert': appCertPems,
+        'crl': crlPems,
+      }
+    }));
+  }
+
+  /// Lists the app cert_ids the printer currently trusts (observability; the
+  /// `type` field is mandatory, `sequence_id` must stay a string).
+  Future<bool> appCertList() {
+    _logLine('app_cert_list');
+    return _publish(jsonEncode({
+      'security': {
+        'sequence_id': '1',
+        'command': 'app_cert_list',
+        'type': 'app',
+      }
+    }));
+  }
 }
 
 /// Payload for the `print.project_file` command (local print). Extracted as
@@ -403,6 +612,7 @@ class BambuMqttClient {
 Map<String, dynamic> buildProjectFilePayload({
   required String sequenceId,
   required String url,
+  String? urlEnc,
   String param = 'Metadata/plate_1.gcode',
   String md5 = '',
   String name = 'BambuDeck',
@@ -420,7 +630,9 @@ Map<String, dynamic> buildProjectFilePayload({
         'task_id': '0',
         'subtask_id': '0',
         'subtask_name': name,
-        'url': url,
+        // Secured firmware reads url_enc (not url); developer mode needs the
+        // cleartext url (§10.3).
+        if (urlEnc != null) 'url_enc': urlEnc else 'url': url,
         // A1 + AMS lite: the swap model is sliced for a single PLA filament,
         // so the caller picks a live AMS slot of matching type on every
         // start (颜色不限 - 用户 2026-10-21). ams_id 0 = the A1's single AMS
@@ -428,7 +640,10 @@ Map<String, dynamic> buildProjectFilePayload({
         // ams_mapping2 prefers it, legacy firmware reads ams_mapping).
         if (amsSlot != null) ...{
           'use_ams': true,
-          'ams_mapping': [amsSlot],
+          // A1 的 ams_mapping 是固定 5 元素、从右往左对应槽位、空位填 -1
+          // (Doridian/OpenBambuAPI mqtt.md; 调研复核 2026-10-21)。早期的
+          // [slot] 是 X1 时代的遗留形态。
+          'ams_mapping': [-1, -1, -1, -1, amsSlot],
           'ams_mapping2': [
             {'ams_id': amsId, 'slot_id': amsSlot}
           ],

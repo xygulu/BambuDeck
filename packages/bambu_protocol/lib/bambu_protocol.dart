@@ -4,6 +4,7 @@
 library;
 
 export 'src/bambu_cloud.dart';
+export 'src/bambu_field_encryption.dart';
 export 'src/bambu_mqtt_client.dart';
 export 'src/bambu_signing.dart';
 export 'src/error_text.dart';
