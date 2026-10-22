@@ -56,8 +56,9 @@ cd apps/deck/tool/connect_helper
 环境变量:
 
 - `BAMBU_SESSION` — 云端登录态文件路径(默认本目录 `creds/cloud_session.json`)。
-- 打印/换盘**默认静默**(不把 Connect 置前,deep link 用 `open -g` 后台打开)。控制路径本就静默
-  (AXPress 后台点按钮)。要回到旧前台行为设 `BAMBU_SILENT=0`。
+- 打印/换盘**默认静默**:deep link 用 `open -g` 后台打开、跳过 activate,并在**导入弹窗出现后 /
+  点完发送后立刻**把焦点压回用户原来的 app(不是等到整个流程结束)。控制路径本就静默
+  (AXPress 后台点按钮)。要回到旧前台行为(Connect 全程置前、结束才还原焦点)设 `BAMBU_SILENT=0`。
 
 接口(请求头带 `X-Deck-Token`,token 持久化在 `~/.bambudeck/helper.json`):
 

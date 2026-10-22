@@ -55,9 +55,9 @@ APP = "Bambu Connect"
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DEVICE = "03900D642905133"
 
-# 默认静默：打印/换盘不把 Connect 置前（deep link 用 open -g 后台打开、跳过 activate）。
-# 控制路径（bconnect_drive）本就不置前；打印多页导航在后台更脆弱（AX 树切页重建可能
-# 空读），要回到旧前台行为设 BAMBU_SILENT=0。
+# 默认静默：打印/换盘不把 Connect 置前（deep link 用 open -g 后台打开、跳过 activate），
+# 并在「导入弹窗出现后 / 点完发送后」立刻把焦点压回用户原来的 app（不等到整个流程结束）。
+# 要回到旧前台行为（Connect 全程置前、结束才还原焦点）设 BAMBU_SILENT=0。
 SILENT = os.environ.get("BAMBU_SILENT", "1").strip().lower() not in ("0", "false", "no", "off")
 
 sys.path.insert(0, HERE)
@@ -66,6 +66,28 @@ import bconnect_cloud as cloud  # noqa: E402
 
 
 # ---------------------------------------------------------------- 应用控制
+def _frontmost_app() -> str | None:
+    """当前最前 app 名。SILENT 模式下 Connect 收到 deep link 会自己弹到最前，
+    用它把焦点还给用户原来的 app。"""
+    r = subprocess.run(
+        ["osascript", "-e",
+         'tell application "System Events" to get name of first process '
+         'whose frontmost is true'],
+        capture_output=True, text=True, timeout=30)
+    return (r.stdout or "").strip() or None
+
+
+def _restore_frontmost(prev: str | None) -> None:
+    """把焦点还给 prev（若不是 Connect）。绝不抛异常。"""
+    if not prev or prev == APP:
+        return
+    try:
+        subprocess.run(["osascript", "-e", 'tell application "%s" to activate' % prev],
+                       capture_output=True, text=True, timeout=30)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def app_running() -> bool:
     r = subprocess.run(["pgrep", "-f",
                         "%s.app/Contents/MacOS/%s" % (APP, APP)],
@@ -235,6 +257,9 @@ def run(path: str, stop_before_send: bool = False,
     steps: list[dict] = []
     t0 = time.time()
     _prev = [t0]
+    # SILENT：Connect 收到 deep link 会自己弹到最前（导入弹窗）。记下当前 app，
+    # 导入弹窗出现后、点完发送后立刻把焦点压回去，不等到整个流程结束。
+    frontmost = _frontmost_app() if SILENT else None
 
     def rec(step: str, ok: bool, detail: str = "") -> None:
         now = time.time()
@@ -306,6 +331,9 @@ def run(path: str, stop_before_send: bool = False,
         result["error"] = "导入弹窗未出现"
         rec("click-import", False, result["error"])
         return result
+    # SILENT：导入弹窗已出现（Connect 自己弹到了最前），立刻把焦点压回用户原来的 app。
+    if SILENT:
+        _restore_frontmost(frontmost)
     if not press_text("导入Gcode"):
         if not press_desc("confirm"):
             result["error"] = "导入弹窗里点不到「导入Gcode 3MF文件」"
@@ -348,6 +376,10 @@ def run(path: str, stop_before_send: bool = False,
     # 返回、释放服务端 busy 锁，用户可立即再下停止/暂停等控制。
     result["ok"] = True
     rec("click-send", True, "已点发送（派单成功，不等页面离开）")
+    # SILENT：点完发送立刻把焦点压回用户原来的 app（AXPress 一般不抢焦点，这里兜底，
+    # 防止发送后 Connect 再弹到最前）。
+    if SILENT:
+        _restore_frontmost(frontmost)
     # 给 Connect 一小拍真正派单，再回读任务列表（只记日志，不阻塞成功判定）。
     time.sleep(0.8)
 
