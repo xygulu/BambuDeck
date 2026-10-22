@@ -491,6 +491,8 @@ class _ControlBar extends ConsumerWidget {
     final profile = ref.watch(printersProvider
         .select((l) => printerByIdOf(l.valueOrNull, profileId)));
     final canControl = enabled && profile != null;
+    final canPause = canControl && s.gcodeState == GcodeState.running;
+    final canResume = canControl && s.gcodeState == GcodeState.pause;
     final canSwap = enabled &&
         profile != null &&
         profile.autoPlateSwap &&
@@ -508,7 +510,7 @@ class _ControlBar extends ConsumerWidget {
             Row(children: [
               Expanded(
                 child: FilledButton.icon(
-                  onPressed: canControl
+                  onPressed: canPause
                       ? () => runControl(context, profile, s, notifier, 'pause')
                       : null,
                   icon: const Icon(Icons.pause),
@@ -518,7 +520,7 @@ class _ControlBar extends ConsumerWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: FilledButton.icon(
-                  onPressed: canControl
+                  onPressed: canResume
                       ? () => runControl(context, profile, s, notifier, 'resume')
                       : null,
                   icon: const Icon(Icons.play_arrow),
@@ -530,7 +532,7 @@ class _ControlBar extends ConsumerWidget {
                 child: FilledButton.icon(
                   style:
                       FilledButton.styleFrom(backgroundColor: DeckColors.error),
-                  onPressed: canControl
+                  onPressed: canControl && s.printing
                       ? () => confirmStopPrint(context, profile, s, notifier)
                       : null,
                   icon: const Icon(Icons.stop),
@@ -813,7 +815,7 @@ class _ControlCard extends ConsumerWidget {
                         foregroundColor: DeckColors.error,
                         visualDensity: VisualDensity.compact,
                       ),
-                      onPressed: live && profile != null
+                      onPressed: live && profile != null && s.printing
                           ? () => confirmStopPrint(context, profile, s, notifier)
                           : null,
                     ),
