@@ -1,4 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 本 App 全网络原生：局域网/云 MQTT、RTSP、ONVIF、云 API、通知推送都需要网络。
+         Flutter 只在 debug/profile 清单里带 INTERNET，release 构建必须显式声明。 -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="deck"
         android:name="${applicationName}"
