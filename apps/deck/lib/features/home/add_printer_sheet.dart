@@ -35,7 +35,7 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
       : CloudRegion.us;
   final _tokenCtrl = TextEditingController();
   List<CloudDevice>? _devices;
-  CloudDevice? _selected;
+  final Set<String> _selectedSerials = {};
   var _fetching = false;
   String? _error;
 
@@ -206,27 +206,63 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
             ),
           ),
         ]),
-        if (_devices != null) ...[
+        if (_devices != null && _devices!.isNotEmpty) ...[
           const SizedBox(height: 10),
-          DropdownButtonFormField<CloudDevice>(
-            initialValue: _selected,
-            decoration: const InputDecoration(labelText: '选择打印机'),
-            items: [
+          Row(children: [
+            Expanded(
+              child: Text(
+                '已选 ${_selectedSerials.length}/${_devices!.length} 台',
+                style: const TextStyle(
+                    fontSize: 12, color: DeckColors.textSecondary),
+              ),
+            ),
+            TextButton(
+              onPressed: () => _toggleAll(!_allSelected),
+              child: Text(_allSelected ? '取消全选' : '全选'),
+            ),
+          ]),
+          Container(
+            decoration: BoxDecoration(
+              border: Border.all(color: Theme.of(context).dividerColor),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(children: [
               for (final d in _devices!)
-                DropdownMenuItem(
-                  value: d,
-                  child: Text('${d.productName} "${d.devName}"'
-                      ' (${d.online ? "在线" : "离线"})'),
+                CheckboxListTile(
+                  value: _selectedSerials.contains(d.devId),
+                  onChanged: (v) => setState(() {
+                    if (v == true) {
+                      _selectedSerials.add(d.devId);
+                    } else {
+                      _selectedSerials.remove(d.devId);
+                    }
+                  }),
+                  title: Text(_deviceLabel(d)),
+                  subtitle: Text(d.online ? '在线' : '离线'),
+                  dense: true,
+                  controlAffinity: ListTileControlAffinity.leading,
                 ),
-            ],
-            onChanged: (d) => setState(() => _selected = d),
+            ]),
           ),
         ],
         const SizedBox(height: 16),
-        FilledButton(
-          onPressed: (_selected != null) ? _saveCloud : null,
-          child: const Text('保存并连接'),
-        ),
+        Row(children: [
+          Expanded(
+            child: FilledButton(
+              onPressed: _selectedSerials.isEmpty ? null : _addSelected,
+              child: Text('添加选中 (${_selectedSerials.length})'),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: FilledButton.tonal(
+              onPressed: (_devices != null && _devices!.isNotEmpty)
+                  ? _addAll
+                  : null,
+              child: const Text('一键添加全部'),
+            ),
+          ),
+        ]),
       ]);
 
   Future<void> _fetchDevices() async {
@@ -250,7 +286,11 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
       debugPrint('[cloud] devices: ${devices.length}');
       setState(() {
         _devices = devices;
-        _selected = devices.isNotEmpty ? devices.first : null;
+        // Default to all selected: batch-add is the common case, the user
+        // unchecks the few they don't want.
+        _selectedSerials
+          ..clear()
+          ..addAll(devices.map((d) => d.devId));
         _error = devices.isEmpty ? '该账号下没有绑定的打印机' : null;
         _fetching = false;
       });
@@ -431,32 +471,87 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
     if (mounted) Navigator.of(context).pop();
   }
 
-  Future<void> _saveCloud() async {
+  bool get _allSelected =>
+      _devices != null &&
+      _devices!.isNotEmpty &&
+      _selectedSerials.length == _devices!.length;
+
+  void _toggleAll(bool on) => setState(() {
+        _selectedSerials.clear();
+        if (on) _selectedSerials.addAll(_devices!.map((d) => d.devId));
+      });
+
+  /// Dropdown / checkbox label: `A1 "打印房"`, or the best available fallback.
+  String _deviceLabel(CloudDevice d) {
+    final name = d.devName.trim();
+    final product = d.productName.trim();
+    if (name.isNotEmpty && product.isNotEmpty) return '$product "$name"';
+    if (name.isNotEmpty) return name;
+    if (product.isNotEmpty) return product;
+    return d.devId;
+  }
+
+  /// Stored profile name (no product prefix).
+  String _deviceName(CloudDevice d) {
+    final name = d.devName.trim();
+    if (name.isNotEmpty) return name;
+    final product = d.productName.trim();
+    if (product.isNotEmpty) return product;
+    return d.devId;
+  }
+
+  Future<void> _addSelected() async {
+    await _addDevices(
+        _devices!.where((d) => _selectedSerials.contains(d.devId)).toList());
+  }
+
+  Future<void> _addAll() async {
+    await _addDevices(List.of(_devices!));
+  }
+
+  Future<void> _addDevices(List<CloudDevice> devices) async {
     final token = _tokenCtrl.text.trim();
-    final device = _selected;
-    if (device == null || token.isEmpty) {
-      setState(() => _error = '请完成 Token 与打印机选择');
+    if (token.isEmpty) {
+      setState(() => _error = '请先登录获取 Token');
       return;
     }
     final api = ref.read(cloudApiProvider);
-    final userId = api.userIdFromToken(token) ?? '';
-    if (userId.isEmpty) {
+    final userId = await api.userIdFromToken(token, _region);
+    if (userId == null || userId.isEmpty) {
       setState(() => _error = '无法从 Token 解析用户 ID,请确认 Token 有效');
       return;
     }
-    final id = 'p_${DateTime.now().millisecondsSinceEpoch}';
-    await ref.read(printersProvider.notifier).add(PrinterProfile(
-          id: id,
-          name: device.devName.isEmpty
-              ? (device.productName.isEmpty ? device.devId : device.productName)
-              : device.devName,
-          mode: PrinterMode.cloud,
-          serial: device.devId,
-          region: _region,
-          token: token,
-          userId: userId,
-          model: device.modelName,
-        ));
-    if (mounted) Navigator.of(context).pop();
+    final existing =
+        ref.read(printersProvider).valueOrNull ?? const <PrinterProfile>[];
+    final existingSerials = existing.map((p) => p.serial).toSet();
+    final notifier = ref.read(printersProvider.notifier);
+    var added = 0;
+    var skipped = 0;
+    for (final d in devices) {
+      if (existingSerials.contains(d.devId)) {
+        skipped++;
+        continue;
+      }
+      // id is stable per serial, so a re-add is idempotent instead of piling
+      // duplicates; the serial check above already guards the list.
+      await notifier.add(PrinterProfile(
+        id: 'p_${d.devId}',
+        name: _deviceName(d),
+        mode: PrinterMode.cloud,
+        serial: d.devId,
+        region: _region,
+        token: token,
+        userId: userId,
+        model: d.modelName,
+        accessCode: d.accessCode,
+      ));
+      added++;
+    }
+    if (!mounted) return;
+    if (added == 0 && skipped > 0) {
+      setState(() => _error = '所选打印机均已添加过');
+      return;
+    }
+    Navigator.of(context).pop();
   }
 }

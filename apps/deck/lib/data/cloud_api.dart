@@ -3,13 +3,14 @@ import 'dart:io';
 
 /// Cloud-facing helpers for the add-printer flow. Injectable for tests.
 abstract class CloudApi {
-  String? userIdFromToken(String token);
+  Future<String?> userIdFromToken(String token, CloudRegion region);
   Future<List<CloudDevice>> devices(String token, CloudRegion region);
 }
 
 class HttpCloudApi implements CloudApi {
   @override
-  String? userIdFromToken(String token) => extractCloudUserId(token);
+  Future<String?> userIdFromToken(String token, CloudRegion region) =>
+      resolveCloudUserId(token, region);
 
   @override
   Future<List<CloudDevice>> devices(String token, CloudRegion region) =>

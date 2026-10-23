@@ -18,21 +18,28 @@ class CloudDevice {
     required this.modelName,
     required this.productName,
     required this.online,
+    this.accessCode = '',
   });
 
   final String devId; // printer serial
-  final String devName;
+  final String devName; // user-assigned name (bind field `name`)
   final String modelName; // e.g. "C12" (hardware id)
   final String productName; // e.g. "P1S"
   final bool online;
+
+  /// LAN access code (bind field `dev_access_code`). Empty when the account
+  /// has never opened LAN mode for this device.
+  final String accessCode;
 
   @override
   String toString() => 'CloudDevice($devId $productName "$devName" '
       '${online ? "online" : "offline"})';
 }
 
-/// Extract `u_{uid}` from a JWT access token payload (field `uid`).
-/// Returns null when the token is not a JWT or carries no uid.
+/// Extract `u_{uid}` from a JWT access token payload. The id lives under
+/// `uid`, `sub`, or `user_id` depending on login path (match the helper's
+/// chain). Returns null when the token is not a JWT — CN SMS login returns an
+/// opaque 144-char token, so callers fall back to [resolveCloudUserId].
 String? extractCloudUserId(String token) {
   final parts = token.split('.');
   if (parts.length != 3) return null;
@@ -40,11 +47,41 @@ String? extractCloudUserId(String token) {
   if (payload == null) return null;
   try {
     final map = jsonDecode(payload) as Map<String, dynamic>;
-    final uid = map['uid'];
+    final uid = map['uid'] ?? map['sub'] ?? map['user_id'];
     if (uid == null) return null;
-    return 'u_$uid';
+    final s = uid.toString().replaceFirst(RegExp(r'^u_'), '');
+    return s.isEmpty ? null : 'u_$s';
   } on FormatException {
     return null;
+  }
+}
+
+/// Resolve the `u_{uid}` used as the cloud-MQTT username and the helper
+/// account-match gate. JWT first, then `/my/profile` for non-JWT tokens
+/// (CN SMS login). Mirrors bconnect_cloud.resolve_uid: `uidStr`/`uid`/`sub`.
+Future<String?> resolveCloudUserId(String token, CloudRegion region) async {
+  final fromJwt = extractCloudUserId(token);
+  if (fromJwt != null) return fromJwt;
+
+  final uri = Uri.parse('${region.apiBase}/v1/user-service/my/profile');
+  final client = HttpClient();
+  try {
+    final req = await client.getUrl(uri);
+    req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+    req.headers.set(
+        HttpHeaders.userAgentHeader, 'bambu_network_agent/01.09.05.01');
+    final res = await req.close();
+    final body = await utf8.decodeStream(res);
+    if (res.statusCode != 200) return null;
+    final doc = jsonDecode(body);
+    if (doc is! Map<String, dynamic>) return null;
+    final raw = doc['uidStr'] ?? doc['uid'] ?? doc['sub'];
+    final s = raw?.toString().replaceFirst(RegExp(r'^u_'), '') ?? '';
+    return s.isEmpty ? null : 'u_$s';
+  } catch (_) {
+    return null;
+  } finally {
+    client.close();
   }
 }
 
@@ -116,8 +153,8 @@ String _serverMessage(String body) {
   return body.isEmpty ? '(no body)' : body;
 }
 
-Future<Map<String, dynamic>> _postJson(
-    Uri uri, Map<String, dynamic> body) async {
+/// POST JSON and return `(status, rawBody)` without interpreting the body.
+Future<(int, String)> _postRaw(Uri uri, Map<String, dynamic> body) async {
   final client = HttpClient();
   try {
     final req = await client.postUrl(uri);
@@ -129,14 +166,32 @@ Future<Map<String, dynamic>> _postJson(
     req.add(utf8.encode(jsonEncode(body)));
     final res = await req.close();
     final text = await utf8.decodeStream(res);
-    if (res.statusCode != 200) {
-      throw HttpException('HTTP ${res.statusCode}: ${_serverMessage(text)}',
-          uri: uri);
-    }
-    final doc = jsonDecode(text);
-    return doc is Map<String, dynamic> ? doc : <String, dynamic>{};
+    return (res.statusCode, text);
   } finally {
     client.close();
+  }
+}
+
+/// POST JSON and parse the answer as a JSON object (login / device-bind
+/// endpoints). Throws [HttpException] on non-200, [FormatException] if a
+/// 200 body is not JSON.
+Future<Map<String, dynamic>> _postJson(
+    Uri uri, Map<String, dynamic> body) async {
+  final (status, text) = await _postRaw(uri, body);
+  if (status != 200) {
+    throw HttpException('HTTP $status: ${_serverMessage(text)}', uri: uri);
+  }
+  final doc = jsonDecode(text);
+  return doc is Map<String, dynamic> ? doc : <String, dynamic>{};
+}
+
+/// POST JSON and only require a 200. The send-code endpoints answer 200 with
+/// an EMPTY body on success (BambuHelper cloud_login.cpp never parses it),
+/// so parsing here would throw `Unexpected end of input`.
+Future<void> _postStatus(Uri uri, Map<String, dynamic> body) async {
+  final (status, text) = await _postRaw(uri, body);
+  if (status != 200) {
+    throw HttpException('HTTP $status: ${_serverMessage(text)}', uri: uri);
   }
 }
 
@@ -189,11 +244,11 @@ Future<void> cloudSendLoginCode({
   if (isEmailAccount(account)) {
     final uri =
         Uri.parse('${region.apiBase}/v1/user-service/user/sendemail/code');
-    await _postJson(uri, {'email': account, 'type': 'codeLogin'});
+    await _postStatus(uri, {'email': account, 'type': 'codeLogin'});
   } else {
     final uri =
         Uri.parse('${region.apiBase}/v1/user-service/user/sendsmscode');
-    await _postJson(uri, {'phone': account, 'type': 'codeLogin'});
+    await _postStatus(uri, {'phone': account, 'type': 'codeLogin'});
   }
 }
 
@@ -222,11 +277,15 @@ Future<List<CloudDevice>> fetchCloudDevices(String token, CloudRegion region,
         .whereType<Map<String, dynamic>>()
         .map((d) => CloudDevice(
               devId: d['dev_id']?.toString() ?? '',
-              devName: d['dev_name']?.toString() ?? '',
+              // The user-set name is `name`; `dev_name` does not exist in the
+              // bind payload (measured - it answered empty and left the list
+              // with no name).
+              devName: (d['name'] ?? d['dev_name'])?.toString() ?? '',
               modelName: d['dev_model_name']?.toString() ?? '',
               productName: d['dev_product_name']?.toString() ?? '',
               online: d['online'] == true ||
                   d['online']?.toString() == 'true',
+              accessCode: d['dev_access_code']?.toString() ?? '',
             ))
         .toList();
   } finally {
