@@ -6,12 +6,15 @@ import 'package:media_kit/media_kit.dart';
 
 import 'core/theme.dart';
 import 'data/app_settings.dart';
+import 'data/camera_audio.dart';
 import 'data/camera_profile.dart';
 import 'data/cloud_print_helper.dart';
 import 'data/hub_server.dart';
 import 'data/log_buffer.dart';
+import 'data/plate_swap.dart';
 import 'data/print_events.dart';
 import 'data/printer_profile.dart';
+import 'data/rtsp_quality.dart';
 import 'data/vision_guard.dart';
 import 'data/providers.dart';
 import 'features/home/home_page.dart';
@@ -139,13 +142,148 @@ class _DeckAppState extends ConsumerState<DeckApp> {
       }
       return r.ok;
     };
+    // 网页端(手机/平板浏览器)的暂停、继续、停止与一键换盘: 和 App 内按钮
+    // 走同一条路由 —— dev-ON 局域网直发, 其余走 Bambu Connect helper。
+    hubServer.controlHandler = (profile, command) async {
+      final state = ref.read(connectionProvider(profile.id)).state;
+      if (useLanControl(profile, state)) {
+        final n = ref.read(connectionProvider(profile.id).notifier);
+        final ok = switch (command) {
+          'pause' => await n.pause(),
+          'resume' => await n.resume(),
+          'stop' => await n.stop(),
+          _ => false,
+        };
+        LogBuffer.instance.add(
+            '[网页] $command ${profile.name}: 局域网直发${ok ? "已发送" : "失败"}');
+        return <String, dynamic>{
+          'ok': ok,
+          'command': command,
+          'printer': profile.name,
+          'method': 'lan',
+          if (!ok) 'error': '局域网直发失败(检查开发者模式与网络)',
+        };
+      }
+      if (profile.serial.trim().isEmpty) {
+        return <String, dynamic>{
+          'ok': false,
+          'error': '「${profile.name}」未配置序列号, Connect 自动化无法定位打印机',
+        };
+      }
+      final r = await CloudPrintHelper.instance.control(profile.serial, command);
+      LogBuffer.instance.add('[网页] ${r.command ?? command} ${profile.name}: '
+          'ok=${r.ok}${r.error == null ? '' : ' err=${r.error}'}');
+      return <String, dynamic>{
+        'ok': r.ok,
+        'command': r.command ?? command,
+        'printer': r.printer ?? profile.name,
+        'method': r.method ?? 'connect',
+        if (r.elapsed != null) 'elapsed': r.elapsed,
+        if (r.error != null) 'error': r.error,
+      };
+    };
+    hubServer.plateSwapHandler = (profile) async {
+      if (profile.serial.trim().isEmpty) {
+        return <String, dynamic>{
+          'ok': false,
+          'error': '「${profile.name}」未配置序列号, Connect 自动化无法定位打印机',
+        };
+      }
+      if (!await CloudPrintHelper.instance.health()) {
+        return <String, dynamic>{
+          'ok': false,
+          'error': '打印服务不可用（Mac 上的 bconnect_service.py 没在跑）',
+        };
+      }
+      final r = await startCloudPlateSwap(profile);
+      LogBuffer.instance.add('[网页] 换盘 ${profile.name}: ok=${r.ok}'
+          '${r.error == null ? '' : ' err=${r.error}'}');
+      return <String, dynamic>{
+        'ok': r.ok,
+        'printer': profile.name,
+        if (r.taskId != null) 'task': r.taskId,
+        if (r.taskStatus != null) 'taskStatus': r.taskStatus,
+        if (r.elapsedTotal != null) 'elapsed': r.elapsedTotal,
+        if (r.error != null) 'error': r.error,
+        'steps': r.steps,
+      };
+    };
+    // 网页端速度档位 / 腔灯：和 App 控制卡一样只发到本机 MQTT 连接。
+    hubServer.setHandler = (profile, {speed, light}) async {
+      final n = ref.read(connectionProvider(profile.id).notifier);
+      var ok = true;
+      if (speed != null) ok = await n.setSpeed(speed) && ok;
+      if (light != null) ok = await n.setLight(light) && ok;
+      LogBuffer.instance.add('[网页] 设置 ${profile.name}: '
+          '${speed == null ? '' : '速度$speed '}'
+          '${light == null ? '' : '腔灯${light ? '开' : '关'} '}'
+          '${ok ? '已发送' : '失败(打印机未连接?)'}');
+      return <String, dynamic>{
+        'ok': ok,
+        'printer': profile.name,
+        if (speed != null) 'speed': speed,
+        if (light != null) 'light': light,
+        if (!ok) 'error': '局域网直发失败(打印机未连接或不在局域网)',
+      };
+    };
+    // 网页端摄像头按钮 (和 App 的 CameraTile 一一对应):
+    // 翻转/旋转/码流写回摄像头配置, 静音切全局设置并立刻作用到正在播放的画面上。
+    hubServer.connStatusOf = (printerId) =>
+        ref.read(connectionProvider(printerId)).status.name;
+    hubServer.cameraHandler = (cameraId,
+        {bool? flipH, int? rotationDeg, RtspQuality? quality}) async {
+      final list = ref.read(camerasProvider).valueOrNull ?? const [];
+      CameraProfile? cam;
+      for (final c in list) {
+        if (c.id == cameraId) cam = c;
+      }
+      if (cam == null) {
+        return <String, dynamic>{'ok': false, 'error': '摄像头已不存在'};
+      }
+      await ref.read(camerasProvider.notifier).replace(cam.copyWith(
+            flipH: flipH,
+            rotationDeg: rotationDeg,
+            quality: quality,
+          ));
+      // 立刻同步给网页快照, 不等 provider 监听的下一次调度 —— 页面收到响应
+      // 就会马上换 src 重拉流, 那时代码必须已经读到新配置。
+      hubServer.cameras = ref.read(camerasProvider).valueOrNull ?? list;
+      LogBuffer.instance.add('[网页] 摄像头 ${cam.name}: '
+          '${flipH == null ? '' : '翻转${flipH ? '开' : '关'} '}'
+          '${rotationDeg == null ? '' : '旋转$rotationDeg° '}'
+          '${quality == null ? '' : '${quality == RtspQuality.sub ? '子' : '主'}码流'}');
+      return <String, dynamic>{
+        'ok': true,
+        'camera': cameraId,
+        if (flipH != null) 'flipH': flipH,
+        if (rotationDeg != null) 'rotation': rotationDeg,
+        if (quality != null) 'quality': quality.name,
+      };
+    };
+    hubServer.muteHandler = (muted) async {
+      final s = ref.read(appSettingsProvider).valueOrNull;
+      if (s == null) return;
+      if (s.cameraMuted != muted) {
+        await ref
+            .read(appSettingsProvider.notifier)
+            .set(s.copyWith(cameraMuted: muted));
+      }
+      cameraAudioBus.apply(muted);
+      LogBuffer.instance.add('[网页] 摄像头声音${muted ? '已静音' : '已恢复'}');
+    };
+    // 打印/控制服务：远程地址优先（手机/平板），留空则用本机 helper.json。
+    void syncService(AppSettings s) {
+      CloudPrintHelper.instance.settings = s;
+      printEvents.settings = s;
+      visionGuard.settings = s;
+      _syncHub(s);
+    }
+
+    final loaded = ref.read(appSettingsProvider).valueOrNull;
+    if (loaded != null) syncService(loaded);
     ref.listenManual(appSettingsProvider, (_, next) {
       final s = next.valueOrNull;
-      if (s != null) {
-        printEvents.settings = s;
-        visionGuard.settings = s;
-        _syncHub(s);
-      }
+      if (s != null) syncService(s);
     });
     ref.listenManual(camerasProvider, (_, next) {
       final list = next.valueOrNull;
@@ -153,11 +291,16 @@ class _DeckAppState extends ConsumerState<DeckApp> {
         visionGuard.cameras = list;
         hubServer.cameras = list;
       }
-    });
+    }, fireImmediately: true);
     ref.listenManual(printersProvider, (_, next) {
       final list = next.valueOrNull;
-      if (list != null) hubServer.printers = list;
-    });
+      if (list != null) {
+        // The headless vision grab needs the bound printer for a Bambu
+        // camera's IP / access code.
+        visionGuard.printers = list;
+        hubServer.printers = list;
+      }
+    }, fireImmediately: true);
   }
 
   /// Start/stop the web hub (网页访问) with its switch; a port change while

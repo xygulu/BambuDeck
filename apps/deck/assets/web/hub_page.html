@@ -2,81 +2,594 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BambuDeck · 网页监控</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BambuDeck</title>
 <style>
+  /* 配色、字号、圆角全部照抄 app 的 DeckColors / buildDeckTheme:
+     卡片 14 圆角 + 1px 边框, 控件 10 圆角, 状态色固定。
+     布局照 app 的监控页 (MonitorPage): 左栏打印机卡片列表, 右栏选中那台
+     的 控制 + AMS + 摄像头墙; 窄屏退化成卡片列表, 点开进详情 (对应 app 的
+     push DashboardPage)。 */
   :root {
-    --bg: #0f1115; --surface: #171a21; --line: #262b36;
-    --text: #e7eaf0; --dim: #8b93a3;
-    --run: #3fb950; --pause: #d29922; --err: #f85149; --fin: #58a6ff;
+    --bg: #0E1216; --surface: #161B21; --card: #1A2027; --border: #262E37;
+    --text: #E6E9EE; --text2: #8B94A3;
+    --running: #4ADE80; --finish: #34D399; --prepare: #38BDF8;
+    --idle: #94A3B8; --pause: #FBBF24; --error: #EF4444; --warning: #F59E0B;
+    --on-accent: #062012;
+    --head: calc(56px + env(safe-area-inset-top, 0px));
+    --rail: 330px;
   }
   * { box-sizing: border-box; }
+  html { background: var(--bg); }
   body {
     margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.5 -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC",
+          "Segoe UI", "Helvetica Neue", sans-serif;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-font-smoothing: antialiased;
   }
+
+  /* 顶栏 = app 的 AppBar: 标题 + 视角切换 (打印机/摄像头) + 连接状态。 */
   header {
-    display: flex; align-items: baseline; gap: 10px;
-    padding: 14px 18px; border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 8;
+    display: flex; align-items: center; gap: 14px;
+    height: var(--head);
+    padding: env(safe-area-inset-top, 0px)
+             max(18px, env(safe-area-inset-right)) 0
+             max(18px, env(safe-area-inset-left));
+    background: rgba(14, 18, 22, .92);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
   }
-  header h1 { font-size: 16px; margin: 0; }
-  header .st { font-size: 12px; color: var(--dim); }
-  main { padding: 16px; max-width: 1400px; margin: 0 auto; }
-  h2 { font-size: 13px; color: var(--dim); margin: 18px 0 8px; font-weight: 600; }
-  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
-  .cams { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
-  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
-  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-  .name { font-size: 15px; font-weight: 700; }
-  .badge { font-size: 11px; padding: 2px 9px; border-radius: 20px; background: #2a2f3a; color: var(--dim); white-space: nowrap; }
-  .badge.RUNNING { background: rgba(63,185,80,.16); color: var(--run); }
-  .badge.PAUSE   { background: rgba(210,153,34,.16); color: var(--pause); }
-  .badge.FAILED  { background: rgba(248,81,73,.16); color: var(--err); }
-  .badge.FINISH  { background: rgba(88,166,255,.16); color: var(--fin); }
-  .sub { font-size: 12px; color: var(--dim); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bar { height: 7px; border-radius: 4px; background: #242936; margin: 10px 0 6px; overflow: hidden; }
-  .bar i { display: block; height: 100%; background: var(--run); border-radius: 4px; transition: width .6s; }
-  .metrics { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--dim); margin-top: 6px; }
-  .metrics b { color: var(--text); font-weight: 600; }
-  .errline { margin-top: 8px; font-size: 12px; color: var(--err); }
-  .cam img, .cam .off {
-    width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #000;
-    border-radius: 8px; display: block; margin-top: 10px;
+  h1 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: .2px; }
+
+  .seg {
+    display: flex; gap: 2px; padding: 3px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 999px;
   }
-  .cam .off { display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 12px; }
-  .empty { color: var(--dim); font-size: 13px; padding: 24px 0; text-align: center; }
-  #gate { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column;
-          align-items: center; justify-content: center; gap: 12px; z-index: 9; }
-  #gate input { background: var(--surface); border: 1px solid var(--line); color: var(--text);
-                border-radius: 8px; padding: 10px 14px; font-size: 14px; width: 240px; text-align: center; }
-  #gate button { background: #2f81f7; border: 0; color: #fff; border-radius: 8px; padding: 10px 22px; font-size: 14px; }
+  .seg button {
+    display: flex; align-items: center; gap: 6px;
+    border: 0; border-radius: 999px; background: transparent; color: var(--text2);
+    font: inherit; font-size: 12px; font-weight: 600;
+    padding: 5px 14px; cursor: pointer;
+  }
+  .seg button.on { background: rgba(74, 222, 128, .14); color: var(--running); }
+  .seg svg { width: 14px; height: 14px; }
+
+  .conn {
+    margin-left: auto; display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text2); white-space: nowrap;
+  }
+  .conn i { width: 7px; height: 7px; border-radius: 50%; background: var(--text2); }
+  .conn.ok i { background: var(--running); }
+  .conn.bad i { background: var(--error); }
+  #clock { font-size: 12px; color: var(--text2); font-variant-numeric: tabular-nums; }
+
+  main { max-width: 1600px; margin: 0 auto; }
+  section { display: none; }
+  body[data-tab="printers"] #s-printers { display: block; }
+  body[data-tab="cameras"] #s-cameras { display: block; }
+  #s-cameras { padding: 16px; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 12px;
+  }
+
+  /* ---- 打印机视角: 左右两栏 ---- */
+  #printers-layout {
+    display: grid; grid-template-columns: var(--rail) minmax(0, 1fr);
+    height: calc(100dvh - var(--head));
+  }
+
+  /* 左栏: 打印机卡片列表 (MonitorPrinterCard) */
+  #rail { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+  .rail-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 14px 4px;
+  }
+  .rail-head b { font-size: 14px; font-weight: 700; }
+  #plist {
+    flex: 1; overflow-y: auto; padding: 4px 10px 12px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+
+  .pcard {
+    background: var(--card); border: 1px solid transparent;
+    border-radius: 14px; padding: 12px; cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .pcard:hover { background: #1D242B; }
+  .pcard.sel { border-color: rgba(74, 222, 128, .7); }
+
+  .prow { display: flex; align-items: flex-start; gap: 10px; }
+  .pident { min-width: 0; flex: 1; }
+  .pident .name {
+    font-size: 15px; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pident .meta { font-size: 12px; color: var(--text2); margin-top: 3px; }
+  /* 没收到状态时用连接状态的小圆点, 颜色跟 App 的 _connDot 一致。 */
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text2); margin-top: 6px; flex: 0 0 auto; }
+  .dot.ok   { background: var(--running); }
+  .dot.warn { background: var(--warning); }
+  .dot.err  { background: var(--error); }
+
+  .badge {
+    flex: 0 0 auto; font-size: 13px; font-weight: 600; letter-spacing: .2px;
+    padding: 4px 10px; border-radius: 999px;
+    border: 1px solid transparent; white-space: nowrap;
+  }
+  .badge.running { color: var(--running); background: rgba(74,222,128,.14); border-color: rgba(74,222,128,.5); }
+  .badge.pause   { color: var(--pause);   background: rgba(251,191,36,.14); border-color: rgba(251,191,36,.5); }
+  .badge.prepare { color: var(--prepare); background: rgba(56,189,248,.14); border-color: rgba(56,189,248,.5); }
+  .badge.finish  { color: var(--finish);  background: rgba(52,211,153,.14); border-color: rgba(52,211,153,.5); }
+  .badge.failed  { color: var(--error);   background: rgba(239,68,68,.14);  border-color: rgba(239,68,68,.5); }
+  .badge.idle    { color: var(--idle);    background: rgba(148,163,184,.14); border-color: rgba(148,163,184,.5); }
+
+  .taskrow { display: flex; align-items: baseline; gap: 8px; margin-top: 10px; }
+  .task {
+    flex: 1; min-width: 0; font-size: 12px; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pct { font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .bar {
+    height: 3px; border-radius: 2px; margin: 5px 0 6px;
+    background: rgba(38, 46, 55, .6); overflow: hidden;
+  }
+  .bar i { display: block; height: 100%; border-radius: 2px; transition: width .6s; }
+  .facts { font-size: 11px; color: var(--text2); margin-top: 4px; font-variant-numeric: tabular-nums; }
+  /* App 的步骤行: Icons.timelapse + 绿色文字 */
+  .stage {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 11px; font-weight: 600; color: var(--running); margin-top: 3px;
+  }
+  .stage svg { width: 11px; height: 11px; flex: 0 0 auto; }
+  .door { font-size: 11px; color: var(--warning); margin-top: 4px; }
+  /* 报错芯片 = 弹窗入口 (App 里点它打开 HMS 详情)。 */
+  .errchip {
+    display: inline-flex; align-items: center; gap: 4px;
+    margin-top: 6px; padding: 3px 8px; border-radius: 999px;
+    font-size: 11px; color: var(--error); cursor: pointer;
+    background: rgba(239,68,68,.14); border: 1px solid rgba(239,68,68,.5);
+  }
+  .errchip:hover { filter: brightness(1.2); }
+  .errchip:focus-visible { outline: 2px solid var(--error); outline-offset: 2px; }
+
+  /* 报错详情弹窗 (App 的 showHmsDialog) */
+  #modal {
+    position: fixed; inset: 0; z-index: 26; background: rgba(0,0,0,.62);
+    display: none; align-items: center; justify-content: center; padding: 16px;
+  }
+  #modal.show { display: flex; }
+  .modal-card {
+    width: 100%; max-width: 460px; max-height: 80vh; overflow: auto;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 18px;
+  }
+  .modal-card h3 { font-size: 16px; margin-bottom: 12px; }
+  /* 边框/标题色按最严重的一条换 (App 的 hmsWorstRank: 0 致命 1 严重 其余一般)。 */
+  .hms-box { border-radius: 12px; padding: 12px; --hms: var(--error); }
+  .hms-box.fatal   { background: rgba(239,68,68,.10);  border: 1px solid rgba(239,68,68,.55);  --hms: var(--error); }
+  .hms-box.serious { background: rgba(245,158,11,.10); border: 1px solid rgba(245,158,11,.55); --hms: var(--warning); }
+  .hms-box.common  { background: rgba(251,191,36,.10); border: 1px solid rgba(251,191,36,.55); --hms: var(--pause); }
+  .hms-head {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px; font-weight: 600; color: var(--hms);
+  }
+  .hms-entry { margin-top: 6px; }
+  .hms-entry .code { font-size: 12px; font-weight: 600; color: var(--hms); opacity: .85; }
+  .hms-entry .desc { font-size: 12px; color: var(--text2); }
+  .modal-card .btn { margin: 12px 0 0 auto; display: flex; }
+
+  /* 右栏: 选中打印机的详情 */
+  #pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .pane-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px 4px; min-height: 40px;
+  }
+  .pane-head .ptitle { font-size: 16px; font-weight: 700; }
+  .phead-main { flex: 1; min-width: 0; }
+  /* 窄屏详情页没有左栏卡片, 任务/进度/剩余补到标题下面; 宽屏左栏已经有。 */
+  .pjob {
+    display: none; margin-top: 3px; font-size: 12px; color: var(--text2);
+    font-variant-numeric: tabular-nums;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pane-head .pnet {
+    margin-left: auto; font-size: 12px; color: var(--text2);
+    font-variant-numeric: tabular-nums;
+  }
+  .back {
+    display: none; align-items: center; justify-content: center;
+    width: 32px; height: 32px; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--border); background: transparent; color: var(--text);
+    font-size: 17px; line-height: 1;
+  }
+  .pane-body {
+    flex: 1; min-height: 0; display: flex; flex-direction: column;
+    padding: 6px 16px 12px; gap: 8px;
+  }
+  .toprow { display: flex; gap: 8px; align-items: stretch; }
+  /* 反馈 2026-10-24: 控制卡只要放得下按钮就行, 宽度让给 AMS ——
+     料盘要横排 4 格 + 外部料卷, 窄了颜色名全被省略。 */
+  .toprow .ctl { flex: 4; min-width: 0; }
+  .toprow .amscard { flex: 7; min-width: 0; }
+
+  .ctl { display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+  .ctl-title { font-size: 13px; font-weight: 600; }
+  .ctl-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .lbl { font-size: 12px; color: var(--text2); }
+  /* 「速度」跟着分段控件、「灯」跟着开关一起换行, 不拆散。 */
+  .ctlgrp { display: inline-flex; align-items: center; gap: 8px; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    height: 34px; border: 0; border-radius: 10px; padding: 0 12px;
+    font: inherit; font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: filter .15s, transform .05s;
+    background: transparent; color: var(--text);
+  }
+  .btn svg { width: 16px; height: 16px; }
+  .btn.primary { background: rgba(74,222,128,.16); color: var(--running); }
+  .btn.danger { background: rgba(239,68,68,.15); color: var(--error); }
+  .btn.outline { background: transparent; color: var(--text); border: 1px solid var(--border); height: 32px; font-size: 12px; }
+  .btn:hover { filter: brightness(1.15); }
+  .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity: .35; cursor: default; filter: none; transform: none; }
+  .btn.icon { width: 34px; padding: 0; }
+
+  /* 速度分段 (SegmentedButton) */
+  .speed {
+    display: inline-flex; padding: 2px; gap: 1px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .speed button {
+    border: 0; background: transparent; color: var(--text2);
+    font: inherit; font-size: 11px; font-weight: 600;
+    padding: 4px 9px; border-radius: 6px; cursor: pointer;
+  }
+  .speed button.on { background: rgba(74,222,128,.18); color: var(--running); }
+  .speed button:disabled { opacity: .35; cursor: default; }
+
+  .lamp { display: inline-flex; color: var(--text2); }
+  .lamp.on { color: #FFC107; }
+  .lamp svg { width: 17px; height: 17px; }
+  .sw { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+  .sw input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .sw span.track {
+    width: 36px; height: 20px; border-radius: 999px;
+    background: rgba(148,163,184,.35); position: relative;
+    transition: background .15s;
+  }
+  .sw span.track::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; transition: transform .15s;
+  }
+  .sw input:checked + span.track { background: var(--running); }
+  .sw input:checked + span.track::after { transform: translateX(16px); }
+  .sw input:disabled + span.track { opacity: .35; }
+
+  /* AMS 卡 */
+  .amscard { display: flex; align-items: center; }
+  .ams-row { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
+  .ams-unit {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 8px 10px;
+  }
+  .ams-unit .uh { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .ams-unit .uh b { font-size: 12px; font-weight: 600; }
+  .hum { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text2); }
+  .hum i { width: 7px; height: 7px; border-radius: 50%; }
+  .dry { font-size: 10px; color: var(--warning); background: rgba(245,158,11,.15); border-radius: 6px; padding: 1px 6px; }
+  .trays { display: flex; gap: 6px; }
+  .tray { display: flex; flex-direction: column; align-items: center; width: 56px; }
+  .tray .c {
+    position: relative; width: 34px; height: 34px; border-radius: 50%;
+    border: 1.5px solid rgba(255,255,255,.7);
+  }
+  .tray.active .c { border: 3.5px solid var(--running); }
+  .tray .flow {
+    position: absolute; inset: 0; margin: auto; width: 24px; height: 14px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,.82); border-radius: 6px;
+    font-size: 9px; font-weight: 700; color: #0E1216; letter-spacing: .3px;
+  }
+  .tray .play {
+    position: absolute; right: -2px; bottom: -2px; width: 14px; height: 14px;
+    border-radius: 50%; background: var(--running); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 9px;
+  }
+  .tray .t {
+    font-size: 10px; font-weight: 600; margin-top: 3px;
+    max-width: 56px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tray .p { font-size: 10px; color: var(--text2); }
+  .ams-none { font-size: 13px; color: var(--text2); }
+
+  /* 摄像头墙 (右栏下半 / CameraWallSection) */
+  .wall {
+    flex: 1; min-height: 0; overflow-y: auto;
+    display: grid; gap: 10px; align-content: start;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  }
+  .wall .cam { padding: 10px; }
+  .camview {
+    position: relative; margin-top: 8px; border-radius: 10px; overflow: hidden;
+    background: #000;
+  }
+  .camview .shot {
+    display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: contain;
+    cursor: zoom-in; transition: transform .18s;
+  }
+  .wall .off, .cam .off {
+    width: 100%; aspect-ratio: 16 / 9; background: #000;
+    border-radius: 10px; margin-top: 8px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text2); font-size: 12px;
+  }
+  .wall-empty {
+    grid-column: 1 / -1; padding: 26px 12px; text-align: center;
+    color: var(--text2); font-size: 13px;
+  }
+
+  /* CameraTile 的悬浮控制: 右上 码流/静音/翻转旋转, 右下 云台 */
+  .camchips {
+    position: absolute; right: 8px; top: 8px;
+    display: flex; gap: 6px; align-items: center;
+  }
+  .chip {
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    height: 26px; padding: 0 8px; border: 0; border-radius: 10px;
+    background: rgba(0,0,0,.55); color: #fff;
+    font: inherit; font-size: 11px; cursor: pointer;
+  }
+  .chip.icon { width: 26px; padding: 0; }
+  .chip svg { width: 14px; height: 14px; }
+  .chip:hover { filter: brightness(1.3); }
+  .chip.on { color: var(--pause); }
+  .ptz {
+    position: absolute; right: 8px; bottom: 8px; width: 96px; height: 96px;
+    border-radius: 50%; background: rgba(0,0,0,.4);
+    display: flex; align-items: center; justify-content: center;
+    transition: opacity .15s; touch-action: none;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
+  .ptz.unavailable { opacity: .45; }
+  .ptz .mid { width: 18px; height: 18px; color: rgba(255,255,255,.7); }
+  .ptz .spin {
+    width: 16px; height: 16px; border-width: 2px;
+    border-color: rgba(255,255,255,.25); border-top-color: #fff;
+  }
+  .ptz button {
+    position: absolute; width: 30px; height: 30px; padding: 0;
+    border: 0; border-radius: 50%; background: rgba(0,0,0,.35); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; touch-action: none;
+  }
+  .ptz button:hover { background: rgba(0,0,0,.55); }
+  .ptz button svg { width: 18px; height: 18px; }
+  .ptz .up    { top: 3px;    left: 50%; margin-left: -15px; }
+  .ptz .down  { bottom: 3px; left: 50%; margin-left: -15px; }
+  .ptz .left  { left: 3px;   top: 50%;  margin-top: -15px; }
+  .ptz .right { right: 3px;  top: 50%;  margin-top: -15px; }
+
+  /* 画面翻转 / 旋转的选择面板 (App 的 _orientationMenu) */
+  .optlist { display: flex; flex-direction: column; gap: 6px; }
+  .opt {
+    display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 12px;
+    border: 1px solid var(--border); border-radius: 10px; background: transparent;
+    color: var(--text); font: inherit; font-size: 13px; cursor: pointer; text-align: left;
+  }
+  .opt:hover { background: #202833; }
+  .opt.on { border-color: rgba(74,222,128,.6); color: var(--running); }
+  .opt .tick { width: 14px; flex: 0 0 auto; text-align: center; }
+
+  /* 画面放大 */
+  #zoom {
+    position: fixed; inset: 0; z-index: 25; background: rgba(0,0,0,.9);
+    display: none; align-items: center; justify-content: center; padding: 16px;
+    overflow: hidden;
+  }
+  #zoom.show { display: flex; }
+  #zoom img {
+    max-width: 100%; max-height: 100%; object-fit: contain;
+    border-radius: 10px; cursor: zoom-out;
+  }
+  /* 90/270° 时画面绕中心转了 90°, 用视口的高宽互换后再放得下。 */
+  #zoom img.rot { max-width: calc(100vh - 32px); max-height: calc(100vw - 32px); }
+
+  /* 状态占位 */
+  .placeholder {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px; padding: 40px 16px; color: var(--text2); font-size: 13px;
+  }
+  .spin {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 3px solid var(--border); border-top-color: var(--running);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 摄像头视角网格 */
+  .grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    align-items: start;
+  }
+  h2 { font-size: 14px; font-weight: 700; margin: 2px 0 10px; }
+
+  /* 空态 */
+  .empty {
+    grid-column: 1 / -1;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 56px 16px; color: var(--text2); text-align: center;
+  }
+  .empty svg { width: 56px; height: 56px; opacity: .55; }
+  .empty b { font-size: 16px; font-weight: 500; color: var(--text2); }
+  .empty span { font-size: 13px; max-width: 34em; }
+
+  /* 访问令牌 */
+  #gate {
+    position: fixed; inset: 0; z-index: 30; background: var(--bg);
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  #gate .gate-card {
+    width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 10px;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 22px;
+  }
+  #gate h1 { font-size: 20px; }
+  #gate p { margin: 0 0 4px; font-size: 13px; color: var(--text2); }
+  #gate input {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 10px; padding: 12px 14px; font: inherit; font-size: 14px;
+    width: 100%; outline: none;
+  }
+  #gate input:focus { border-color: rgba(74, 222, 128, .6); }
+  #gate button {
+    background: var(--running); border: 0; color: var(--on-accent);
+    border-radius: 10px; padding: 12px; font: inherit; font-size: 14px;
+    font-weight: 600; cursor: pointer;
+  }
+
+  /* 提示条 (SnackBar) */
+  #toast {
+    position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%) translateY(8px);
+    max-width: min(88vw, 520px); padding: 11px 16px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    font-size: 13px; color: var(--text);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+    opacity: 0; pointer-events: none; z-index: 20;
+    transition: opacity .18s, transform .18s;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.ok { border-color: rgba(74, 222, 128, .5); }
+  #toast.err { border-color: rgba(239, 68, 68, .5); }
+
   .hidden { display: none !important; }
+  [hidden] { display: none !important; }
+
+  /* 窄屏 (<1000px): 左栏变卡片网格, 右栏改成点开的详情页 (app 的
+     GridView + push DashboardPage)。 */
+  @media (max-width: 999px) {
+    #printers-layout { display: block; height: auto; }
+    #rail { border-right: 0; display: block; }
+    #plist {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 10px; overflow: visible; padding: 4px 12px 16px;
+    }
+    #pane { display: none; padding-bottom: 8px; }
+    body[data-view="detail"] #rail { display: none; }
+    body[data-view="detail"] #pane { display: flex; }
+    body[data-view="detail"] .pjob { display: block; }
+    /* 窄屏把 WiFi/IP 折到第二行, 让任务行有整行宽度。 */
+    body[data-view="detail"] .pane-head { flex-wrap: wrap; row-gap: 2px; }
+    body[data-view="detail"] .pnet {
+      flex-basis: 100%; margin-left: 0; text-align: right; font-size: 11px;
+    }
+    .back { display: inline-flex; }
+    .pane-body { padding: 6px 12px 16px; }
+    .toprow { flex-direction: column; }
+    .wall { overflow: visible; grid-template-columns: 1fr; }
+    #s-cameras { padding: 12px; }
+    .grid { grid-template-columns: 1fr; gap: 10px; }
+  }
+
+  /* 手机: 单列、按钮加高, 顶栏收窄; 一次只显示一个视角 (和 app 一致)。 */
+  @media (max-width: 700px) {
+    :root { --head: calc(52px + env(safe-area-inset-top, 0px)); }
+    header { gap: 8px; padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); }
+    h1 { font-size: 17px; }
+    .seg button { padding: 4px 10px; font-size: 11px; gap: 4px; }
+    .seg svg { width: 13px; height: 13px; }
+    #clock { display: none; }
+    .pident .name { font-size: 16px; }
+    .ctl-row { gap: 10px; }
+    .btn { height: 40px; font-size: 14px; }
+    .btn.icon { width: 40px; }
+    .speed button { padding: 6px 12px; font-size: 12px; }
+    #toast { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  }
+  /* 竖屏 iPhone 上顶栏放不下文字状态, 只留一个点。 */
+  @media (max-width: 430px) {
+    header { gap: 6px; }
+    h1 { font-size: 16px; }
+    .conn .txt { display: none; }
+  }
 </style>
 </head>
-<body>
+<body data-tab="printers" data-view="list">
 <div id="gate" class="hidden">
-  <div>请输入访问令牌(app 设置 → 网页访问)</div>
-  <input id="tok" placeholder="访问令牌">
-  <button id="go">进入</button>
+  <div class="gate-card">
+    <h1>BambuDeck</h1>
+    <p>输入访问令牌。Mac 上的 BambuDeck → 设置 → 网页访问 里可以复制。</p>
+    <input id="tok" placeholder="访问令牌" autocomplete="off" autocapitalize="off">
+    <button id="go">进入</button>
+  </div>
 </div>
+
 <header>
-  <h1>BambuDeck · 网页监控</h1>
-  <span class="st" id="conn">连接中…</span>
-  <span class="st" id="clock"></span>
+  <h1>BambuDeck</h1>
+  <div class="seg" role="tablist" aria-label="视角">
+    <button class="on" data-tab="printers" role="tab" aria-selected="true">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z"/></svg>
+      打印机
+    </button>
+    <button data-tab="cameras" role="tab" aria-selected="false">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
+      摄像头
+    </button>
+  </div>
+  <span class="conn" id="conn"><i></i><span class="txt">连接中…</span></span>
+  <span id="clock"></span>
 </header>
+
 <main>
-  <h2>打印机</h2>
-  <div class="grid" id="printers"><div class="empty">等待数据…</div></div>
-  <h2>摄像头</h2>
-  <div class="grid cams" id="cameras"></div>
+  <section id="s-printers">
+    <div id="printers-layout">
+      <aside id="rail">
+        <div class="rail-head"><b id="rail-title">打印机</b></div>
+        <div id="plist"></div>
+      </aside>
+      <div id="pane">
+        <div class="pane-head">
+          <button class="back" id="back" aria-label="返回列表">←</button>
+          <div class="phead-main">
+            <div class="ptitle" id="ptitle"></div>
+            <div class="pjob" id="pjob"></div>
+          </div>
+          <div class="pnet" id="pnet"></div>
+        </div>
+        <div class="pane-body" id="pane-body"></div>
+      </div>
+    </div>
+  </section>
+  <section id="s-cameras">
+    <h2 id="h-cameras">摄像头</h2>
+    <div class="grid" id="cameras"></div>
+  </section>
 </main>
+
+<div id="zoom"></div>
+<div id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal-card">
+    <h3 id="modal-title"></h3>
+    <div id="modal-body"></div>
+    <button class="btn outline" id="modal-close">关闭</button>
+  </div>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
 <script>
 'use strict';
 let TOKEN = localStorage.getItem('hubToken') || '';
 const $ = id => document.getElementById(id);
 
-// ?token= is only a handoff from the settings page URL - store it and
-// clean the address bar so the token never sits in history.
+// ?token= 只是设置页 / iOS 壳交一次手的参数: 存进 localStorage 后立刻从
+// 地址栏抹掉, 令牌不进浏览历史。
 const q = new URLSearchParams(location.search);
 if (q.get('token')) {
   TOKEN = q.get('token');
@@ -88,7 +601,7 @@ if (q.get('token')) {
 if (!TOKEN) $('gate').classList.remove('hidden');
 $('go').onclick = () => {
   TOKEN = $('tok').value.trim();
-  if (!TOKEN) return;
+  if (!TOKEN) { $('tok').focus(); return; }
   localStorage.setItem('hubToken', TOKEN);
   $('gate').classList.add('hidden');
   boot();
@@ -96,65 +609,884 @@ $('go').onclick = () => {
 $('tok').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
 
 const api = path => path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
-const fmtRemaining = m => m > 0
-  ? (m >= 60 ? Math.floor(m / 60) + '时' + (m % 60) + '分' : m + '分') : '';
-const fmtTemp = (t, tg) => (t ? t.toFixed(0) : '0') + (tg ? ' / ' + tg.toFixed(0) : '') + '°';
-
-function renderPrinters(list) {
-  const el = $('printers');
-  if (!list.length) { el.innerHTML = '<div class="empty">还没有打印机配置</div>'; return; }
-  el.innerHTML = list.map(p => {
-    const s = p.state || {};
-    const g = s.gcode || 'UNKNOWN';
-    const pct = s.progress || 0;
-    const remain = fmtRemaining(s.remainingMinutes);
-    const task = s.subtaskName ? `<div class="sub">${esc(s.subtaskName)}</div>` : '';
-    const stage = s.stage ? ` · ${esc(s.stage)}` : '';
-    const layer = s.totalLayers ? `<span>层 <b>${s.layerNum || 0}</b>/${s.totalLayers}</span>` : '';
-    const err = s.hasError
-      ? `<div class="errline">⚠ 打印机报错${s.printError ? ' (print_error ' + s.printError + ')' : ''}</div>` : '';
-    return `<div class="card">
-      <div class="row"><span class="name">${esc(p.name)}</span>
-        <span class="badge ${esc(g)}">${esc(g)}</span></div>
-      ${task}
-      <div class="bar"><i style="width:${pct}%"></i></div>
-      <div class="row"><span>${pct}%${remain ? ' · 剩余 ' + remain : ''}${stage}</span></div>
-      <div class="metrics">
-        <span>喷嘴 <b>${fmtTemp(s.nozzleTemp, s.nozzleTarget)}</b></span>
-        <span>热床 <b>${fmtTemp(s.bedTemp, s.bedTarget)}</b></span>
-        ${layer}
-      </div>${err}</div>`;
-  }).join('');
-}
-
-function renderCameras(list) {
-  const el = $('cameras');
-  if (!list.length) { el.innerHTML = '<div class="empty" style="grid-column:1/-1">还没有摄像头配置</div>'; return; }
-  el.innerHTML = '';
-  for (const c of list) {
-    const card = document.createElement('div');
-    card.className = 'card cam';
-    card.innerHTML = `<div class="row"><span class="name">${esc(c.name)}</span>
-      <span class="badge">${esc(c.type || '')}</span></div>`;
-    if (c.stream) {
-      const img = document.createElement('img');
-      img.alt = c.name;
-      img.onerror = () => { img.replaceWith(off('画面不可用')); };
-      img.src = api(c.stream);
-      card.appendChild(img);
-    } else {
-      card.appendChild(off(c.enabled === false ? '已停用' : '视频源不可用'));
-    }
-    el.appendChild(card);
-  }
-}
-const off = t => { const d = document.createElement('div'); d.className = 'off'; d.textContent = t; return d; };
 const esc = s => String(s).replace(/[&<>"]/g, ch =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
 
+// 与 app 的 fmtRemaining / fmtTemp 一致。
+const fmtRemaining = m => {
+  if (!m || m <= 0) return '0分钟';
+  const h = Math.floor(m / 60), mm = m % 60;
+  if (h === 0) return mm + '分钟';
+  return mm === 0 ? h + '小时' : h + '小时' + mm + '分';
+};
+// BambuConnStatus → 卡片上的连接文字 (和 App 左栏卡片一样)。
+const CONN = {
+  connected: ['已连接', 'ok'],
+  connecting: ['连接中', 'warn'],
+  reconnecting: ['重连中', 'warn'],
+  disconnected: ['未连接', 'off'],
+  error: ['错误', 'err'],
+};
+const fmtTemp = (v, t) => {
+  const cur = Math.round(v || 0) + '°';
+  return t && t > 0 ? cur + '/' + Math.round(t) + '°' : cur;
+};
+
+// gcodeStateLabel(zh) + stateColor。
+const STATE = {
+  RUNNING: ['打印中', 'running'], PREPARE: ['准备中', 'prepare'],
+  PAUSE: ['已暂停', 'pause'], FINISH: ['已完成', 'finish'],
+  FAILED: ['失败', 'failed'], IDLE: ['空闲', 'idle'],
+  UNKNOWN: ['未知', 'idle'], OTHER: ['其他', 'idle'],
+};
+const COLOR = {
+  running: 'var(--running)', prepare: 'var(--prepare)', pause: 'var(--pause)',
+  finish: 'var(--finish)', failed: 'var(--error)', idle: 'var(--idle)',
+};
+const stateOf = g => STATE[g] || STATE.UNKNOWN;
+
+const ICON = {
+  pause: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>',
+  play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
+  stop: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 6h12v12H6z"/></svg>',
+  swap: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>',
+  printer: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z"/></svg>',
+  bulbOn: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M9 21h6v-1H9v1zm3-19a7 7 0 00-4 12.7V17h8v-2.3A7 7 0 0012 2z"/></svg>',
+  bulbOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 18h6M10 21h4M12 3a6 6 0 00-3.5 10.9V16h7v-2.1A6 6 0 0012 3z"/></svg>',
+  stage: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.24 7.76A5.97 5.97 0 0012 6v6l-4.24 2.45a6 6 0 108.48-6.69zM12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z"/></svg>',
+};
+
+let lastPrinters = [];
+let lastCameras = [];
+let selectedId = localStorage.getItem('hubSel') || '';
+const pending = new Map(); // printerId -> 正在执行的动作名
+
+const WIDE = () => window.matchMedia('(min-width: 1000px)').matches;
+
+function selected() {
+  if (!lastPrinters.length) return null;
+  let p = lastPrinters.find(x => x.id === selectedId);
+  if (!p) {
+    p = lastPrinters[0];
+    selectedId = p.id;
+  }
+  return p;
+}
+
+function byId(id) { return lastPrinters.find(p => p.id === id) || null; }
+
+/* ---------------- 左栏: 打印机卡片 (MonitorPrinterCard) ---------------- */
+
+function pressureSig(p) {
+  return JSON.stringify([p.id, p.name, p.mode, p.plateSwap, p.conn,
+    p.state || null, pending.get(p.id) || '']);
+}
+
+function pcardsHtml(list) {
+  if (!list.length) {
+    return `<div class="empty">${ICON.printer}
+      <b>还没有打印机</b>
+      <span>在 Mac 的 BambuDeck 里添加打印机，这里会自动出现</span></div>`;
+  }
+  return list.map(p => {
+    const s = p.state;
+    const g = s ? s.gcode : 'IDLE';
+    const [zh, cls] = stateOf(g);
+    const [connZh, connCls] = CONN[p.conn] || CONN.disconnected;
+    const color = COLOR[cls];
+    const pct = s ? (s.progress || 0) : 0;
+    const stage = s && s.stage
+      ? `<div class="stage">${ICON.stage}步骤 ${esc(s.stage)}</div>` : '';
+    // 打印中永远给剩余时间, 0 分钟也写「0分钟」(和 app 的 fmtRemaining 一样)。
+    const layer = s && s.printing
+      ? `<div class="facts">层 ${s.layerNum || 0}/${s.totalLayers || 0} · 剩 ${fmtRemaining(s.remainingMinutes)}</div>`
+      : '';
+    const temps = s
+      ? `喷嘴 ${fmtTemp(s.nozzleTemp, s.nozzleTarget)} · 热床 ${fmtTemp(s.bedTemp, s.bedTarget)}` +
+        (s.chamberTemp > 0 ? ` · 腔体 ${Math.round(s.chamberTemp)}°` : '')
+      : '';
+    return `<div class="pcard${p.id === selectedId ? ' sel' : ''}" data-id="${esc(p.id)}">
+      <div class="prow">
+        <div class="pident">
+          <div class="name">${esc(p.name)}</div>
+          <div class="meta">${esc([p.mode, connZh].filter(Boolean).join(' · '))}</div>
+        </div>
+        ${s ? `<span class="badge ${cls}">${zh}</span>`
+            : `<span class="dot ${connCls}"></span>`}
+      </div>
+      ${s ? `
+      <div class="taskrow">
+        <span class="task">${esc(s.subtaskName || '无任务')}</span>
+        <span class="pct" style="color:${color}">${pct}%</span>
+      </div>
+      <div class="bar"><i style="width:${pct}%;background:${color}"></i></div>
+      <div class="facts">${temps}</div>
+      ${stage}${layer}
+      ${s.doorOpen === true ? '<div class="door">舱门已开</div>' : ''}
+      ${s.hasError ? `<div class="errchip" role="button" tabindex="0">ⓘ ${hmsLabel(s)}</div>` : ''}` : ''}
+    </div>`;
+  }).join('');
+}
+
+// 芯片文字和 App 的 MonitorPrinterCard 一致: 只有「报错」/「报错 N」,
+// print_error 的细节在弹窗里。
+function hmsLabel(s) {
+  const n = (s.hms || []).length;
+  return n > 1 ? `报错 ${n}` : '报错';
+}
+
+const SEVERITY = { fatal: '致命', serious: '严重', common: '一般', unknown: '未知' };
+
+// App 的 showHmsDialog + HmsCard: 标题按条数, 内容按最严重一条着色。
+function showHms(p) {
+  const s = p ? p.state : null;
+  if (!s) return;
+  const hms = s.hms || [];
+  $('modal-title').textContent = hms.length > 1
+    ? `打印机报错 · ${hms.length} 条` : '打印机报错';
+  const worst = s.hmsWorst === 0 ? 'fatal' : s.hmsWorst === 1 ? 'serious' : 'common';
+  const entries = hms.map(e => `<div class="hms-entry">
+      <div class="code">${esc(e.code)} · ${esc(SEVERITY[e.severity] || '未知')}</div>
+      ${e.desc ? `<div class="desc">${esc(e.desc)}</div>` : ''}
+    </div>`).join('');
+  const fallback = s.printError && !hms.length
+    ? `<div class="desc">${esc(s.printErrorDesc ||
+        '打印机上报了错误码,等待详情推送…')}</div>` : '';
+  $('modal-body').innerHTML = `<div class="hms-box ${worst}">
+      <div class="hms-head">ⓘ ${s.printError
+        ? `打印错误 (print_error ${esc(s.printError)})`
+        : `HMS 错误 (${hms.length})`}</div>
+      ${entries}${fallback}
+    </div>`;
+  $('modal').classList.add('show');
+}
+
+function closeModal() { $('modal').classList.remove('show'); }
+$('modal-close').addEventListener('click', closeModal);
+$('modal').addEventListener('click', e => { if (e.target === $('modal')) closeModal(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('modal').classList.contains('show')) closeModal();
+});
+
+let railSig = null;
+function renderRail(list) {
+  const sig = list.map(pressureSig).join('|') + '#' + selectedId;
+  $('rail-title').textContent = '打印机' + (list.length ? ` (${list.length})` : '');
+  if (sig === railSig) return;
+  railSig = sig;
+  $('plist').innerHTML = pcardsHtml(list);
+}
+
+$('plist').addEventListener('click', e => {
+  const card = e.target.closest('.pcard');
+  if (!card) return;
+  // 报错芯片先吃掉点击, 别顺带切到这台机器的详情。
+  if (e.target.closest('.errchip')) { showHms(byId(card.dataset.id)); return; }
+  select(card.dataset.id);
+});
+$('plist').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const chip = e.target.closest('.errchip');
+  if (!chip) return;
+  e.preventDefault();
+  showHms(byId(chip.closest('.pcard').dataset.id));
+});
+
+function select(id) {
+  if (id !== selectedId) {
+    selectedId = id;
+    localStorage.setItem('hubSel', id);
+    paneSig = ''; amsSig = null; wallSig = null;
+  }
+  if (!WIDE()) document.body.dataset.view = 'detail';
+  renderRail(lastPrinters);
+  renderPane();
+  syncWalls();
+}
+
+$('back').addEventListener('click', () => {
+  document.body.dataset.view = 'list';
+  syncWalls();
+});
+
+/* ---------------- 右栏: 选中打印机的 控制 + AMS + 摄像头墙 ---------------- */
+
+let paneSig = '';
+let amsSig = null;
+let wallSig = null;
+
+// 骨架只在「换机器 / 换状态有无 / 换盘能力变化」时重建; 数值每秒走
+// updatePane, 免得每秒 innerHTML 把手指下的按钮换掉。
+function paneKey(p) {
+  return [p.id, p.plateSwap ? 1 : 0, p.state ? 1 : 0].join('|');
+}
+
+function renderPane() {
+  const p = selected();
+  $('ptitle').textContent = p ? p.name : '';
+  if (!p) {
+    paneSig = '';
+    $('pnet').textContent = '';
+    $('pane-body').innerHTML = `<div class="placeholder">
+      <b>还没有打印机</b><span>在 Mac 的 BambuDeck 里添加打印机</span></div>`;
+    return;
+  }
+  if (paneKey(p) !== paneSig) {
+    paneSig = paneKey(p);
+    amsSig = null; wallSig = null;
+    buildPane(p);
+  }
+  updatePane(p);
+  renderAms(p);
+  renderWall(p);
+}
+
+function buildPane(p) {
+  const s = p.state;
+  if (!s) {
+    $('pane-body').innerHTML = `<div class="placeholder">
+      <div class="spin"></div><span>正在连接打印机…</span></div>`;
+    return;
+  }
+  $('pane-body').innerHTML = `
+    <div class="toprow">
+      <div class="card ctl">
+        <div class="ctl-title">控制</div>
+        <div class="ctl-row">
+          <button class="btn primary" id="b-pause" data-act="pause">${ICON.pause}暂停</button>
+          <button class="btn primary" id="b-resume" data-act="resume">${ICON.play}恢复</button>
+          <button class="btn icon danger" id="b-stop" data-act="stop" aria-label="停止">${ICON.stop}</button>
+          <span class="ctlgrp"><span class="lbl">速度</span>
+            <div class="speed" id="speed">
+              <button data-speed="1">静音</button><button data-speed="2">标准</button>
+              <button data-speed="3">运动</button><button data-speed="4">疯狂</button>
+            </div>
+          </span>
+          <span class="ctlgrp"><span class="lamp" id="lamp">${ICON.bulbOff}</span>
+            <label class="sw"><input type="checkbox" id="light"><span class="track"></span></label>
+          </span>
+          ${p.plateSwap
+            ? `<button class="btn outline" id="b-swap" data-act="plate-swap">${ICON.swap}一键换盘</button>`
+            : ''}
+        </div>
+      </div>
+      <div class="card amscard" id="ams"></div>
+    </div>
+    <div class="wall" id="camwall"></div>`;
+}
+
+// 每秒刷新数值和控制态 (按钮 DOM 不重建)。
+function updatePane(p) {
+  const s = p.state;
+  const job = $('pjob');
+  if (!s) {
+    // 还没收到状态推送 (打印机离线/正在连): 头部只留名字和「未连接」。
+    if (job) job.textContent = '';
+    $('pnet').textContent = '未连接';
+    return;
+  }
+  const net = [s.wifi != null ? `WiFi ${s.wifi} dBm` : '', s.ip || ''].filter(Boolean).join(' · ');
+  $('pnet').textContent = net;
+  if (job) {
+    const bits = [s.subtaskName || ''];
+    if (s.printing) {
+      bits.push(`${s.progress || 0}%`, `层 ${s.layerNum || 0}/${s.totalLayers || 0}`);
+      const rem = fmtRemaining(s.remainingMinutes);
+      if (rem) bits.push('剩 ' + rem);
+    }
+    job.textContent = bits.filter(Boolean).join(' · ');
+  }
+
+  const setHidden = (id, v) => { const el = $(id); if (el) el.hidden = v; };
+  const busy = pending.get(p.id) != null;
+  const g = s.gcode;
+  setHidden('b-pause', !(g === 'RUNNING' && !busy));
+  setHidden('b-resume', !(g === 'PAUSE' && !busy));
+  const stop = $('b-stop');
+  if (stop) stop.disabled = busy || !s.printing;
+
+  const speed = $('speed');
+  if (speed) {
+    const cur = s.speedLevel > 0 ? s.speedLevel : 2;
+    for (const b of speed.querySelectorAll('button')) {
+      b.classList.toggle('on', Number(b.dataset.speed) === cur);
+      b.disabled = busy;
+    }
+  }
+  const lamp = $('lamp');
+  if (lamp) {
+    lamp.className = 'lamp' + (s.light ? ' on' : '');
+    lamp.innerHTML = s.light ? ICON.bulbOn : ICON.bulbOff;
+  }
+  const light = $('light');
+  if (light) { light.checked = !!s.light; light.disabled = busy; }
+
+  if (busy) {
+    const t = $('ptitle');
+    if (t) t.textContent = p.name + ' · ' + busy + '中…';
+  } else {
+    $('ptitle').textContent = p.name;
+  }
+}
+
+/* AMS 卡 (AmsCard / AmsStrip) */
+function trayHtml(t, active, flow) {
+  const color = t.color || '#262E37';
+  const label = t.present && t.type ? t.type : '-';
+  const pct = t.present && t.remain >= 0 ? t.remain + '%' : '';
+  const flowTag = active
+    ? `<span class="flow">${flow === 'unload' ? 'OUT' : 'IN'}</span>` : '';
+  const playTag = active ? '<span class="play">▶</span>' : '';
+  return `<div class="tray${active ? ' active' : ''}">
+    <div class="c" style="background:${esc(color)}">${flowTag}${playTag}</div>
+    <div class="t">${esc(label)}</div>
+    <div class="p">${pct}</div>
+  </div>`;
+}
+
+function unitHtml(u, ams, flow) {
+  const label = u.id >= 128 ? `AMS HT ${u.id - 127}` : `AMS ${u.id + 1}`;
+  const hum = u.dry
+    ? '<span class="dry">烘干中</span>'
+    : `<span class="hum"><i style="background:${humColor(u)}"></i>${
+        u.humidityRaw > 0 ? 'RH ' + u.humidityRaw + '%' : '湿度 ' + u.humidity}</span>`;
+  const trays = (u.trays || []).map((t, i) =>
+    trayHtml(t, ams.activeId === u.id && ams.activeIndex === i, flow)).join('');
+  return `<div class="ams-unit">
+    <div class="uh"><b>${label}</b>${hum}</div>
+    <div class="trays">${trays}</div>
+  </div>`;
+}
+
+function humColor(u) {
+  if (u.humidityRaw > 0) {
+    return u.humidityRaw <= 40 ? 'var(--running)'
+      : u.humidityRaw <= 60 ? 'var(--warning)' : 'var(--error)';
+  }
+  return u.humidity >= 4 ? 'var(--running)'
+    : u.humidity <= 1 ? 'var(--error)' : 'var(--warning)';
+}
+
+function renderAms(p) {
+  const el = $('ams');
+  if (!el) return;
+  const s = p.state;
+  const ams = s && s.ams;
+  const sig = JSON.stringify([p.id, ams || null, s ? s.stgCur : null]);
+  if (sig === amsSig) return;
+  amsSig = sig;
+  if (!ams) {
+    el.innerHTML = '<span class="ams-none">未检测到 AMS</span>';
+    return;
+  }
+  // 进料/退料方向来自打印子阶段 stg_cur (24 进料 / 22 退料)。
+  const flow = s.stgCur === 24 ? 'load' : s.stgCur === 22 ? 'unload' : 'none';
+  const parts = (ams.units || []).map(u => unitHtml(u, ams, flow));
+  if (ams.vt) {
+    parts.push(`<div class="ams-unit">
+      <div class="uh"><b>外部料卷</b></div>
+      <div class="trays">${trayHtml(ams.vt, ams.activeId === 254, flow)}</div>
+    </div>`);
+  }
+  el.innerHTML = parts.length
+    ? `<div class="ams-row">${parts.join('')}</div>`
+    : '<span class="ams-none">AMS 未连接</span>';
+}
+
+/* ---------------- 摄像头卡片 (App 的 CameraTile) ---------------- */
+
+const CAM_ICON = {
+  rotate: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.48 2.52c3.27 1.55 5.61 4.72 5.97 8.48h1.5C23.44 4.84 18.29 0 12 0l-.66.03 3.81 3.81 1.33-1.32zm-6.25-.77a1.5 1.5 0 10-2.12 2.12l1.06 1.06-1.06 1.06a1.5 1.5 0 102.12 2.12l1.06-1.06 1.06 1.06a1.5 1.5 0 002.12-2.12l-1.06-1.06 1.06-1.06a1.5 1.5 0 10-2.12-2.12l-1.06 1.06-1.06-1.06zM7.52 21.48A7.43 7.43 0 011.55 13h-1.5C.56 19.16 5.71 24 12 24l.66-.03-3.81-3.81-1.33 1.32zm8.75-8.75h-1.06V8h-1.5v4.73h-1.06l1.81 1.81 1.81-1.81z"/></svg>',
+  volOn: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 00-2.5-4.03v8.05A4.5 4.5 0 0016.5 12zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>',
+  volOff: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.5 12a4.5 4.5 0 00-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0021 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 003.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>',
+  up: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg>',
+  down: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>',
+  left: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M15.41 7.41L14.83 6 8.83 12l6 6 .58-1.41L10.24 12z"/></svg>',
+  right: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8.59 16.59L10 18l6-6-6-6-1.41 1.41L13.17 12z"/></svg>',
+  cam: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>',
+};
+
+const byCam = id => lastCameras.find(c => c.id === id) || null;
+
+// App 的 _orient(): 先水平翻转再顺时针旋转, 只转画面不动按钮。
+function camTransform(c) {
+  const parts = [];
+  if (c.flipH) parts.push('scaleX(-1)');
+  if (c.rotation) parts.push(`rotate(${c.rotation}deg)`);
+  return parts.join(' ') || 'none';
+}
+
+function hasCamControls(c) { return !!c.rtsp; }
+
+function camChipsHtml(c) {
+  if (!hasCamControls(c)) return '';
+  return `<div class="camchips">
+    ${c.canQuality ? `<button class="chip" data-cam-act="quality" data-cam="${esc(c.id)}"
+      title="切换主/子码流">${c.quality === 'sub' ? '子码流' : '主码流'}</button>` : ''}
+    ${c.audio ? `<button class="chip icon" data-cam-act="mute" data-cam="${esc(c.id)}"
+      title="静音" aria-pressed="false">${CAM_ICON.volOn}</button>` : ''}
+    <button class="chip icon" data-cam-act="orient" data-cam="${esc(c.id)}"
+      title="画面翻转 / 旋转">${CAM_ICON.rotate}</button>
+  </div>`;
+}
+
+// 云台盘: 常显 (不可用时变淡), 按住方向键每 250ms 重发, 松手发 stop。
+function camPadHtml(c) {
+  if (!c.ptz) return '';
+  return `<div class="ptz" data-cam="${esc(c.id)}" title="云台">
+    <div class="mid">${CAM_ICON.cam}</div>
+    <button class="up" data-ptz="up" aria-label="上" title="上">${CAM_ICON.up}</button>
+    <button class="down" data-ptz="down" aria-label="下" title="下">${CAM_ICON.down}</button>
+    <button class="left" data-ptz="left" aria-label="左" title="左">${CAM_ICON.left}</button>
+    <button class="right" data-ptz="right" aria-label="右" title="右">${CAM_ICON.right}</button>
+  </div>`;
+}
+
+function camCard(c) {
+  const card = document.createElement('div');
+  card.className = 'card cam';
+  card.dataset.cam = c.id;
+  if (c.stream) {
+    card.innerHTML = `<div class="prow"><div class="pident"><div class="name">${esc(c.name)}</div>
+        <div class="meta">${esc(c.type || '')}</div></div></div>
+      <div class="camview">
+        <img class="shot" alt="${esc(c.name)}" data-cam="${esc(c.id)}"
+          data-src="${esc(c.stream)}" style="transform:${camTransform(c)}">
+        ${camChipsHtml(c)}${camPadHtml(c)}
+      </div>`;
+    card.querySelector('img').addEventListener('click', () => zoomOn(c.id));
+  } else {
+    card.innerHTML = `<div class="prow"><div class="pident"><div class="name">${esc(c.name)}</div>
+        <div class="meta">${esc(c.type || '')}</div></div></div>
+      <div class="off">${c.enabled === false ? '已停用' : '视频源不可用'}</div>`;
+  }
+  return card;
+}
+
+// 摄像头墙: 只显示绑定到这台打印机的画面 (与 App 的 CameraWallSection 一致)
+function paneCameras(p) {
+  return lastCameras.filter(c => (c.printers || []).includes(p.id));
+}
+
+// 只在这些字段变了才重建卡片; 翻转/旋转/静音/码流走 paintCam，重画会把
+// 每条 MJPEG 流都断一次。
+const camSigOf = c => [c.id, c.name, c.type, c.stream || '', c.enabled,
+  c.canQuality ? 1 : 0, c.ptz ? 1 : 0, c.audio ? 1 : 0, c.rtsp ? 1 : 0].join('|');
+
+function renderWall(p) {
+  const el = $('camwall');
+  if (!el) return;
+  const cams = paneCameras(p);
+  const sig = p.id + '#' + cams.map(camSigOf).join('#');
+  if (sig === wallSig) { syncWalls(); return; }
+  wallSig = sig;
+  if (!cams.length) {
+    el.innerHTML = '<div class="wall-empty">这台打印机没有绑定摄像头。在 Mac 的 BambuDeck → 摄像头里可以绑定。</div>';
+    return;
+  }
+  el.innerHTML = '';
+  for (const c of cams) {
+    el.appendChild(camCard(c));
+    // 云台能不能用由服务端探测 (ONVIF / HCNetSDK 兜底): 先显示, 探不通变淡。
+    if (c.ptz) probePtz(c);
+  }
+  syncWalls();
+  paintCam();
+}
+
+// 摄像头墙的 <img> 只在看得见时挂 MJPEG, 切走/换机器就摘掉。
+function syncWalls() {
+  const visible = document.body.dataset.tab === 'printers' &&
+    (WIDE() || document.body.dataset.view === 'detail');
+  for (const img of document.querySelectorAll('#camwall img')) {
+    if (visible) mountStream(img);
+    else unmountStream(img);
+  }
+}
+
+// 每次挂流都带一个时间戳, 码流切换后重挂才能绕开缓存。
+function mountStream(img) {
+  const base = img.dataset.src;
+  if (!base || img.hasAttribute('src')) return;
+  img.src = base + (base.includes('?') ? '&' : '?') + 'v=' + Date.now();
+}
+function unmountStream(img) {
+  if (img.hasAttribute('src')) img.removeAttribute('src');
+}
+
+// 只重拉一台摄像头的画面 (换码流后服务端已经放掉旧 relay)。
+function reloadStream(camId) {
+  for (const img of document.querySelectorAll(`img[data-cam="${CSS.escape(camId)}"]`)) {
+    if (img.closest('#zoom')) continue;
+    unmountStream(img);
+  }
+  syncWalls();
+  syncCameras();
+}
+
+/* 静音 / 码流 / 翻转旋转 / 云台 */
+
+let cameraMuted = false;
+
+// 这些字段每次推送都可能变, 直接改现有 DOM, 不触发重建。
+function paintCam() {
+  for (const chip of document.querySelectorAll('[data-cam-act="quality"]')) {
+    const c = byCam(chip.dataset.cam);
+    const label = c && c.quality === 'sub' ? '子码流' : '主码流';
+    if (chip.textContent !== label) chip.textContent = label;
+  }
+  for (const chip of document.querySelectorAll('[data-cam-act="mute"]')) {
+    // 每秒重写 innerHTML 会在手指按下时换掉图标, 值没变就跳过。
+    const state = cameraMuted ? '1' : '0';
+    chip.classList.toggle('on', cameraMuted);
+    if (chip.dataset.state === state) continue;
+    chip.dataset.state = state;
+    chip.innerHTML = cameraMuted ? CAM_ICON.volOff : CAM_ICON.volOn;
+    chip.title = cameraMuted ? '开启声音' : '静音';
+    chip.setAttribute('aria-pressed', cameraMuted ? 'true' : 'false');
+  }
+  for (const chip of document.querySelectorAll('[data-cam-act="orient"]')) {
+    const c = byCam(chip.dataset.cam);
+    chip.classList.toggle('on', !!(c && (c.flipH || c.rotation)));
+  }
+  for (const img of document.querySelectorAll('img[data-cam]')) {
+    const c = byCam(img.dataset.cam);
+    if (!c) continue;
+    img.style.transform = camTransform(c);
+    img.classList.toggle('rot', c.rotation === 90 || c.rotation === 270);
+  }
+}
+
+async function toggleQuality(c) {
+  const next = c.quality === 'sub' ? 'main' : 'sub';
+  try {
+    const { j } = await post('/api/camera', { camera: c.id, quality: next });
+    if (!j.ok) { toast('码流切换失败：' + (j.error || '未知错误'), 'err'); return; }
+    c.quality = next;
+    paintCam();
+    reloadStream(c.id);
+    toast(`「${c.name}」已切到${next === 'sub' ? '子' : '主'}码流`, 'ok');
+  } catch (e) {
+    toast('码流切换请求失败：' + e, 'err');
+  }
+}
+
+async function toggleMute(c) {
+  const next = !cameraMuted;
+  try {
+    const { j } = await post('/api/camera', { camera: c.id, muted: next });
+    if (!j.ok) { toast('声音切换失败：' + (j.error || '未知错误'), 'err'); return; }
+    // 静音是全局设置 (和 App 同一个开关), 所有画面一起变。
+    cameraMuted = next;
+    paintCam();
+    toast(next ? '摄像头已静音' : '摄像头声音已恢复', 'ok');
+  } catch (e) {
+    toast('声音切换请求失败：' + e, 'err');
+  }
+}
+
+function openOrient(c) {
+  $('modal-title').textContent = `${c.name} · 画面翻转 / 旋转`;
+  $('modal-body').innerHTML = `<div class="optlist">
+    <button class="opt${c.flipH ? ' on' : ''}" data-orient="flip" data-cam="${esc(c.id)}">
+      <span class="tick">${c.flipH ? '✓' : ''}</span>水平翻转</button>
+    ${[0, 90, 180, 270].map(d => `<button class="opt${c.rotation === d ? ' on' : ''}"
+      data-orient="${d}" data-cam="${esc(c.id)}">
+      <span class="tick">${c.rotation === d ? '●' : ''}</span>旋转 ${d === 0 ? '0°(正常)' : d + '°'}</button>`).join('')}
+  </div>`;
+  $('modal').classList.add('show');
+}
+
+async function setOrient(c, value) {
+  const body = { camera: c.id };
+  if (value === 'flip') body.flipH = !c.flipH;
+  else body.rotation = Number(value);
+  try {
+    const { j } = await post('/api/camera', body);
+    if (!j.ok) { toast('画面设置失败：' + (j.error || '未知错误'), 'err'); return; }
+    if (body.flipH != null) c.flipH = body.flipH;
+    if (body.rotation != null) c.rotation = body.rotation;
+    paintCam();
+    closeModal();
+  } catch (e) {
+    toast('画面设置请求失败：' + e, 'err');
+  }
+}
+
+$('modal-body').addEventListener('click', e => {
+  const b = e.target.closest('[data-orient]');
+  if (!b) return;
+  const c = byCam(b.dataset.cam);
+  if (c) setOrient(c, b.dataset.orient);
+});
+
+/* 云台: 按住不放连续转, 松手 stop */
+
+const ptzProbed = new Set();
+async function probePtz(c) {
+  if (ptzProbed.has(c.id)) return;
+  ptzProbed.add(c.id);
+  for (const pad of document.querySelectorAll(`.ptz[data-cam="${CSS.escape(c.id)}"]`)) {
+    pad.classList.add('probing');
+    pad.querySelector('.mid').outerHTML = '<div class="spin mid"></div>';
+  }
+  try {
+    const { j } = await post('/api/ptz', { camera: c.id, action: 'probe' });
+    setPtzAvailable(c.id, !!j.ok);
+  } catch (_) {
+    ptzProbed.delete(c.id);
+    setPtzAvailable(c.id, false);
+  }
+}
+
+function setPtzAvailable(camId, ok) {
+  for (const pad of document.querySelectorAll(`.ptz[data-cam="${CSS.escape(camId)}"]`)) {
+    pad.classList.toggle('unavailable', !ok);
+    pad.classList.remove('probing');
+    const mid = pad.querySelector('.mid');
+    if (mid) mid.outerHTML = `<div class="mid">${CAM_ICON.cam}</div>`;
+    pad.title = ok ? '云台' : '云台不可用 - 请确认摄像头支持 ONVIF 或萤石本地服务';
+  }
+}
+
+let ptzTimer = null, ptzCam = null, ptzDir = null;
+
+async function ptzIssue() {
+  if (!ptzCam || !ptzDir) return;
+  try {
+    const { j } = await post('/api/ptz',
+      { camera: ptzCam.id, action: ptzDir, speed: 0.5 });
+    if (j.available === false) setPtzAvailable(ptzCam.id, false);
+  } catch (_) { /* 松手时的 stop 兜底 */ }
+}
+
+function ptzEnd() {
+  if (!ptzTimer && !ptzCam) return;
+  clearInterval(ptzTimer);
+  ptzTimer = null;
+  const cam = ptzCam;
+  ptzCam = null;
+  ptzDir = null;
+  if (cam) post('/api/ptz', { camera: cam.id, action: 'stop' }).catch(() => {});
+}
+
+document.addEventListener('pointerdown', e => {
+  const b = e.target.closest('.ptz button[data-ptz]');
+  if (!b) return;
+  e.preventDefault();
+  const pad = b.closest('.ptz');
+  if (pad.classList.contains('unavailable') || pad.classList.contains('probing')) return;
+  ptzCam = byCam(pad.dataset.cam);
+  if (!ptzCam) return;
+  ptzDir = b.dataset.ptz;
+  ptzIssue();
+  clearInterval(ptzTimer);
+  ptzTimer = setInterval(ptzIssue, 250);
+}, true);
+document.addEventListener('pointerup', ptzEnd, true);
+document.addEventListener('pointercancel', ptzEnd, true);
+window.addEventListener('blur', ptzEnd);
+
+// 芯片点击 (画面墙和放大视图共用)
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-cam-act]');
+  if (!b) return;
+  const c = byCam(b.dataset.cam);
+  if (!c) return;
+  const act = b.dataset.camAct;
+  if (act === 'quality') toggleQuality(c);
+  else if (act === 'mute') toggleMute(c);
+  else if (act === 'orient') openOrient(c);
+});
+
+/* 画面放大 */
+function zoomOn(camId) {
+  const c = byCam(camId);
+  if (!c || !c.stream) return;
+  const z = $('zoom');
+  z.innerHTML = `<img alt="${esc(c.name)}" data-cam="${esc(c.id)}" style="transform:${camTransform(c)}">
+    ${camChipsHtml(c)}${camPadHtml(c)}`;
+  const img = z.querySelector('img');
+  img.src = c.stream + (c.stream.includes('?') ? '&' : '?') + 'v=' + Date.now();
+  z.classList.add('show');
+  paintCam();
+  if (c.ptz) probePtz(c);
+}
+function closeZoom() {
+  const z = $('zoom');
+  z.classList.remove('show');
+  z.innerHTML = '';
+}
+$('zoom').addEventListener('click', e => {
+  // 只点背景或画面本身才关; 点控制按钮不关。
+  if (e.target === $('zoom') || e.target.tagName === 'IMG') closeZoom();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('zoom').classList.contains('show')) closeZoom();
+});
+
+/* ---------------- 控制动作 ---------------- */
+
+async function post(path, body) {
+  const r = await fetch(api(path), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  let j = {};
+  try { j = await r.json(); } catch (_) {}
+  return { r, j };
+}
+
+async function sendAction(id, act) {
+  const p = byId(id) || { name: id };
+  const label = act === 'pause' ? '暂停' : act === 'resume' ? '恢复'
+    : act === 'stop' ? '停止' : '换盘';
+  if (act === 'stop' && !confirm(`停止「${p.name}」的打印？\n\n已打印部分无法恢复。`)) return;
+  if (act === 'plate-swap' &&
+      !confirm(`对「${p.name}」一键换盘？\n\n热床会快速震动甩下成品并把打印板推出，` +
+               `请确保打印机前方留空。`)) return;
+  pending.set(id, label);
+  renderRail(lastPrinters);
+  renderPane();
+  toast(`${label}已发出，等待结果…`, '');
+  const t0 = Date.now();
+  const path = act === 'plate-swap' ? '/api/plate-swap' : '/api/control';
+  const body = act === 'plate-swap' ? { printer: id } : { printer: id, command: act };
+  try {
+    const { j } = await post(path, body);
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+    if (j.ok) toast(`「${j.printer || p.name}」${label}成功 (${secs}s)`, 'ok');
+    else toast(`${label}失败：${j.error || '未知错误'}`, 'err');
+  } catch (e) {
+    toast(`${label}请求失败：${e}`, 'err');
+  } finally {
+    pending.delete(id);
+    renderRail(lastPrinters);
+    renderPane();
+  }
+}
+
+async function setOn(id, body, label) {
+  pending.set(id, label);
+  renderRail(lastPrinters);
+  renderPane();
+  try {
+    const { j } = await post('/api/set', { printer: id, ...body });
+    if (!j.ok) toast(`${label}失败：${j.error || '未知错误'}`, 'err');
+  } catch (e) {
+    toast(`${label}请求失败：${e}`, 'err');
+  } finally {
+    pending.delete(id);
+    renderRail(lastPrinters);
+    renderPane();
+  }
+}
+
+// 右栏控制 (事件委托: 骨架重建后仍有效)。
+$('pane').addEventListener('click', e => {
+  const p = selected();
+  if (!p) return;
+  const b = e.target.closest('button[data-act]');
+  if (b && !b.hidden) { sendAction(p.id, b.dataset.act); return; }
+  const sb = e.target.closest('button[data-speed]');
+  if (sb) { setOn(p.id, { speed: Number(sb.dataset.speed) }, '速度'); return; }
+});
+$('pane').addEventListener('change', e => {
+  const p = selected();
+  if (!p) return;
+  if (e.target.id === 'light') {
+    setOn(p.id, { light: e.target.checked }, '腔灯');
+  }
+});
+
+/* ---------------- 视角切换 / 摄像头视角 ---------------- */
+
+document.querySelector('.seg').addEventListener('click', e => {
+  const b = e.target.closest('button[data-tab]');
+  if (!b || b.classList.contains('on')) return;
+  document.body.dataset.tab = b.dataset.tab;
+  for (const x of document.querySelectorAll('.seg button')) {
+    const on = x === b;
+    x.classList.toggle('on', on);
+    x.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
+  if (b.dataset.tab === 'printers') {
+    document.body.dataset.view = 'list';
+    renderPane();
+  }
+  syncCameras();
+  syncWalls();
+  window.scrollTo({ top: 0 });
+});
+
+// 状态每秒推一次, 但摄像头 <img> 不能跟着重建 —— 重建就等于每秒重连一次
+// MJPEG 流。只有列表本身变了才重画。
+let camSig = null;
+function renderCameras(list) {
+  const el = $('cameras');
+  $('h-cameras').textContent = '摄像头' + (list.length ? ` (${list.length})` : '');
+  const sig = list.map(camSigOf).join('#');
+  if (sig === camSig) return;
+  camSig = sig;
+  if (!list.length) {
+    el.innerHTML = '<div class="empty"><b>还没有摄像头</b><span>在 Mac 的 BambuDeck 里添加摄像头</span></div>';
+    return;
+  }
+  el.innerHTML = '';
+  for (const c of list) {
+    el.appendChild(camCard(c));
+    if (c.ptz) probePtz(c);
+  }
+  syncCameras();
+  paintCam();
+}
+
+// 切到摄像头才挂 MJPEG, 切走就摘掉 —— 不为看不见的画面占着三条流。
+function syncCameras() {
+  const on = document.body.dataset.tab === 'cameras';
+  for (const img of document.querySelectorAll('#cameras img')) {
+    if (on) mountStream(img);
+    else unmountStream(img);
+  }
+}
+
+/* ---------------- 提示条 / 数据推送 ---------------- */
+
+let toastTimer;
+function toast(msg, kind) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'show' + (kind ? ' ' + kind : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ''; }, kind === 'err' ? 6000 : 3500);
+}
+
+// 手指按下时不重建 DOM (否则按钮可能在下标和上标之间被换掉), 抬起后补一次。
+let pointerDown = false;
+let dirty = false;
+document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+document.addEventListener('pointerup', () => {
+  pointerDown = false;
+  if (dirty) { dirty = false; renderAll(); }
+}, true);
+document.addEventListener('pointercancel', () => { pointerDown = false; }, true);
+
+function renderAll() {
+  if (pointerDown) { dirty = true; return; }
+  renderRail(lastPrinters);
+  renderPane();
+}
+
 function apply(data) {
-  renderPrinters(data.printers || []);
-  renderCameras(data.cameras || []);
+  lastPrinters = data.printers || [];
+  lastCameras = data.cameras || [];
+  cameraMuted = data.cameraMuted === true;
+  renderAll();
+  renderCameras(lastCameras);
+  // 翻转/旋转/静音/码流/云台状态每秒都可能变, 但只改现有 DOM —— 重画
+  // 摄像头卡片会把每条 MJPEG 流都断开重连。
+  paintCam();
   $('clock').textContent = '更新 ' + new Date().toLocaleTimeString('zh-CN');
 }
 
@@ -163,10 +1495,16 @@ function connect() {
   if (!TOKEN) return;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
-  ws.onopen = () => { $('conn').textContent = '已连接'; $('conn').style.color = 'var(--run)'; };
+  ws.onopen = () => {
+    const c = $('conn');
+    c.className = 'conn ok';
+    c.querySelector('.txt').textContent = '已连接';
+  };
   ws.onmessage = e => { try { apply(JSON.parse(e.data)); } catch (_) {} };
   ws.onclose = ws.onerror = () => {
-    $('conn').textContent = '已断开,重连中…'; $('conn').style.color = 'var(--err)';
+    const c = $('conn');
+    c.className = 'conn bad';
+    c.querySelector('.txt').textContent = '已断开，重连中…';
     setTimeout(connect, 3000);
   };
 }
@@ -174,10 +1512,14 @@ function connect() {
 async function boot() {
   try {
     const r = await fetch(api('/api/state'));
-    if (r.status === 401) { localStorage.removeItem('hubToken'); TOKEN = '';
-      $('gate').classList.remove('hidden'); return; }
+    if (r.status === 401) {
+      localStorage.removeItem('hubToken');
+      TOKEN = '';
+      $('gate').classList.remove('hidden');
+      return;
+    }
     apply(await r.json());
-  } catch (_) { /* ws reconnect will surface status */ }
+  } catch (_) { /* ws 重连会给出连接状态 */ }
   if (!ws) connect();
 }
 if (TOKEN) boot();

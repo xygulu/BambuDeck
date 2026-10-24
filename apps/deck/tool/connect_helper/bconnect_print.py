@@ -48,6 +48,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 
@@ -133,11 +134,20 @@ def dump() -> dict:
 
 
 # ---------------------------------------------------------------- 轮询工具
-def _poll(fn, timeout: float, interval: float = 1.0) -> bool:
-    """轮询条件；每轮都重设 AX（窗口重建后不加会读到空树）。"""
+# 轮询间隔（2026-10-24 提速）：AX 读取走快速路径（直连 AX API）后单次只要 ~20ms，
+# 间隔从 1.0s 收紧到 0.08s，检测延迟从「最多 2.8s」降到 ~0.1s；总流程的等待时间
+# 现在基本只剩 Connect 自己加载 3mf/切页的真实耗时。
+_POLL_INTERVAL = 0.08
+
+
+def _poll(fn, timeout: float, interval: float = _POLL_INTERVAL) -> bool:
+    """轮询条件。AX 每轮重设一次没必要（窗口重建才需要），改为每 10 轮补一次。"""
     deadline = time.time() + timeout
+    i = 0
     while time.time() < deadline:
-        ax.enable_ax()
+        if i % 10 == 0:
+            ax.enable_ax()
+        i += 1
         try:
             if fn():
                 return True
@@ -161,19 +171,19 @@ def gone_text(marker: str, timeout: float) -> bool:
 
 def press_text(marker: str, tries: int = 3) -> bool:
     for _ in range(tries):
-        ax.enable_ax()
         if ax.press_text(marker):
             return True
-        time.sleep(0.8)
+        ax.enable_ax()
+        time.sleep(0.15)
     return False
 
 
 def press_desc(desc: str, tries: int = 3) -> bool:
     for _ in range(tries):
-        ax.enable_ax()
         if ax.press_desc(desc):
             return True
-        time.sleep(0.8)
+        ax.enable_ax()
+        time.sleep(0.15)
     return False
 
 
@@ -185,14 +195,17 @@ def press_confirm_after(marker: str, timeout: float = 20.0) -> bool:
 
 
 def wait_probe(timeout: float, texts=(), buttons=(),
-               interval: float = 1.0) -> bool:
-    """短路探测轮询：一次遍历同时找多个文字/按钮，找到即停（~2s vs 全量 ~9s）。
+               interval: float = _POLL_INTERVAL) -> bool:
+    """短路探测轮询：一次遍历同时找多个文字/按钮，找到即停。
 
-    只有全部目标都命中才返回 True。每轮重设 AX（窗口重建后不加会读到空树）。
+    只有全部目标都命中才返回 True。AX 重设改为每 10 轮一次（窗口重建才需要）。
     """
     deadline = time.time() + timeout
+    i = 0
     while time.time() < deadline:
-        ax.enable_ax()
+        if i % 10 == 0:
+            ax.enable_ax()
+        i += 1
         try:
             r = ax.probe(texts=list(texts), buttons=list(buttons))
         except Exception:  # noqa: BLE001
@@ -205,7 +218,7 @@ def wait_probe(timeout: float, texts=(), buttons=(),
 
 
 def gone_probe(timeout: float, texts=(), buttons=(),
-               interval: float = 1.0, confirm: int = 2) -> bool:
+               interval: float = _POLL_INTERVAL, confirm: int = 2) -> bool:
     """轮询直到目标文字/按钮连续 `confirm` 次都不出现。
 
     必须连续多次确认「消失」：Electron 页面切换时会重建 AX 树，瞬时返回空树
@@ -213,8 +226,11 @@ def gone_probe(timeout: float, texts=(), buttons=(),
     """
     deadline = time.time() + timeout
     streak = 0
+    i = 0
     while time.time() < deadline:
-        ax.enable_ax()
+        if i % 10 == 0:
+            ax.enable_ax()
+        i += 1
         try:
             r = ax.probe(texts=list(texts), buttons=list(buttons))
         except Exception:  # noqa: BLE001
@@ -250,10 +266,248 @@ SEND_PAGE = "发送打印任务至"
 IMPORT_PAGE = "导入文件"
 _PAGE_LABEL = {SEND_PAGE: "发送页", IMPORT_PAGE: "导入弹窗"}
 
+# 下拉布局偏移（2026-10-24 实测标定，Bambu Connect 2.5.0-beta.15）。
+# 发送页设备选择器的下拉选项不暴露在 macOS AX 树（AXShowMenu/AXRows/children 都
+# 读不到选项），自动选机只能靠「真实鼠标点击像素坐标」。下拉从设备选择器下方展开，
+# 顺序按名称升序（123 < 嘉兴 < 拓竹A1宇树）；偏移相对选择器组算（不依赖绝对窗口位置）：
+#   第 0 项名字中心 ≈ 组下缘 +26px；行高 36px（2026-10-24 截图实测 473/509/545）。
+# 名字 x：三项文字都从「组左缘 +63px」起（实测 123/嘉兴/拓竹A1宇树 均 528 起）；
+# 取 +71 落在最短文字「123」(528~550) 中间，三项都点得中。带设备头像时文字会被
+# 挤右，故留 +85 作兜底。点完用 send_target_device() 验证闭环。
+_DROP_FIRST_DY = 26
+_DROP_ROW = 36
+_DROP_NAME_X_OFF = (71, 85)
+# 下拉展开判定：检测矩形取「选择器正下方一整块面板区域」，展开前后亮度差
+# 实测约 10~12（闭合 ~50.8 / 展开 ~61.5），取 4 作阈值足够抗噪声。
+_DROP_PROBE_DX = 75
+_DROP_PROBE_DY = 23
+_DROP_PROBE_W = 150
+_DROP_PROBE_H = 50
+_DROP_OPEN_DELTA = 4.0
+
+
+def _activate_connect() -> bool:
+    """把 Connect 置前（SILENT 模式下仅在选机这几秒临时置前，选完还原焦点）。"""
+    r = subprocess.run(["osascript", "-e", 'tell application "%s" to activate' % APP],
+                       capture_output=True, text=True, timeout=30)
+    return r.returncode == 0
+
+
+def _screen_mean(x: int, y: int, w: int, h: int) -> float | None:
+    """截一小块屏幕，返回平均亮度（判断下拉是否真的展开了）。
+
+    为什么需要：下拉是 JS 浮层，AX 树里完全看不到（展开前后树结构一模一样），
+    而刚切到发送页时注入的点击会被吞掉（浮层不出现）。与其猜 sleep 多长，不如
+    用「展开前后这块矩形亮度变了没有」做确定性判断。截图为 BMP，纯 Python 解码。
+    """
+    path = os.path.join(tempfile.gettempdir(), "bc_probe.bmp")
+    try:
+        subprocess.run(["screencapture", "-x", "-R", "%d,%d,%d,%d" % (x, y, w, h),
+                        "-t", "bmp", path], check=False, timeout=5,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(path, "rb") as f:
+            data = f.read()
+    except Exception:  # noqa: BLE001
+        return None
+    if len(data) < 54:
+        return None
+    off = int.from_bytes(data[10:14], "little")
+    wpx = int.from_bytes(data[18:22], "little", signed=True)
+    hpx = int.from_bytes(data[22:26], "little", signed=True)
+    bpp = int.from_bytes(data[28:30], "little")
+    if wpx <= 0 or hpx == 0 or bpp not in (24, 32) or off <= 0:
+        return None
+    step = bpp // 8
+    n = wpx * step
+    stride = (n + 3) // 4 * 4
+    total = cnt = 0
+    for r in range(abs(hpx)):
+        row = data[off + r * stride: off + r * stride + n]
+        if len(row) < n:
+            break
+        for i in range(0, n, step):
+            # BMP 是 BGR(A)
+            total += (row[i] * 114 + row[i + 1] * 587 + row[i + 2] * 299) // 1000
+            cnt += 1
+    return total / cnt if cnt else None
+
+
+def _wait_target(want: str, timeout: float = 0.6) -> bool:
+    """点完下拉项后轮询读回目标机名（快速路径单次 ~20ms，命中即返回）。"""
+    deadline = time.time() + timeout
+    while True:
+        if ax.send_target_device() == want:
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _open_dropdown(cx: float, cy: float, group: dict) -> bool:
+    """点 chevron 展开下拉，并确认浮层真的出现了（没开就重点一次）。
+
+    AX 树对下拉浮层完全无感（展开前后节点数一模一样），所以用像素亮度判断：
+    浮层盖住选择器下方那块区域后亮度明显变化。刚跳转到发送页时第一次点击常被
+    页面吞掉，靠这个检测才能既不误判成功、也不用固定死等 1.5s。
+    返回 (是否已展开, 展开前基线亮度)。基线给调用方判断「后来是不是又被关上了」。
+    """
+    probe = (int(group["x"] + _DROP_PROBE_DX),
+             int(group["y"] + group["h"] + _DROP_PROBE_DY),
+             _DROP_PROBE_W, _DROP_PROBE_H)
+    base = _screen_mean(*probe)
+    if base is None:
+        # 截不到图（缺屏幕录制权限等）→ 退回固定等待，行为与旧版一致
+        if not ax.click_at(cx, cy):
+            return False, None
+        time.sleep(0.45)
+        return True, None
+    for _attempt in range(2):
+        if not ax.click_at(cx, cy):
+            return False, base
+        # 必须是「稳定」的变化：发送页刚出现时那块区域自身也在变化（浮层/加载态
+        # 淡出），单次采样跳变会把「页面自己在动」误判成「下拉展开了」——2026-10-24
+        # 实测就栽在这里（判成已展开，接着去点选项，其实浮层根本没开）。
+        deadline = time.time() + 0.8
+        hits = prev = 0
+        while time.time() < deadline:
+            time.sleep(0.05)
+            cur = _screen_mean(*probe)
+            if cur is None:
+                continue
+            if abs(cur - base) > _DROP_OPEN_DELTA:
+                hits += 1
+                if hits >= 2 and abs(cur - prev) < 2.0:
+                    time.sleep(0.1)  # 浮层画完再点，避免点在展开动画中间
+                    return True, base
+            else:
+                hits = 0
+            prev = cur
+    return False, base
+
+
+def _stable_selector(timeout: float = 2.0) -> dict | None:
+    """等设备选择器几何稳定后再返回。
+
+    发送弹窗是「缩放动画进场」：刚出现的那一刻 AX 读到的是动画中间态（实测组
+    尺寸 225x46@(577,425)，动画结束才是 320x65@(465,382)），照中间态坐标点必然
+    点空——2026-10-24 全流程失败的真正原因（下拉也确实没打开过）。连续两次读数
+    一致即视为稳定，通常 0.2~0.4s，比固定 sleep 1.5s 快且不靠猜。
+    """
+    prev: dict | None = None
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        cur = ax.selector_frame()
+        if cur and prev and _same_frame(prev, cur):
+            return cur
+        prev = cur
+        time.sleep(0.05)
+    return prev or ax.selector_frame()
+
+
+def _same_frame(a: dict, b: dict) -> bool:
+    ga, gb = a.get("group") or {}, b.get("group") or {}
+    if any(abs((ga.get(k) or 0) - (gb.get(k) or 0)) > 0.5
+           for k in ("x", "y", "w", "h")):
+        return False
+    ca, cb = a.get("chevron"), b.get("chevron")
+    if bool(ca) != bool(cb):
+        return False
+    if ca and cb and (abs(ca["x"] - cb["x"]) > 0.5 or abs(ca["y"] - cb["y"]) > 0.5):
+        return False
+    return True
+
+
+def select_device(want_name: str, cur_target: str | None = None) -> bool:
+    """在发送页把打印目标切到 want_name（自动选机）。
+
+    纯 AX 读不到下拉选项（Electron 自定义下拉不映射成 AX 菜单项，AXShowMenu/AXRows/
+    children 全空），所以这里：
+      1. AX 读当前目标机名——已匹配直接 True，零点击（cur_target 可传入省一次读）；
+      2. 临时把 Connect 置前（CGEvent 点击注入的是「该坐标最顶层窗口」，必须 Connect 在最前）；
+      3. 等弹窗进场动画结束、AX 几何读数稳定，点 chevron_down 展开下拉（并确认真的展开）；
+      4. 按「名称升序」算目标项 y，点名字（x 因「是否带头像」而异，逐个试 + 验证）；
+      5. AX 读回目标名验证，选完还原焦点。
+    全程零视觉（视觉慢、OCR 还不稳）。失败返回 False，调用方走 verify-and-abort（绝不误派）。
+    """
+    if not want_name:
+        return False
+    if (ax.send_target_device() if cur_target is None else cur_target) == want_name:
+        return True
+    # 名称升序得目标位次（与下拉实际顺序一致：123 < 嘉兴 < 拓竹A1宇树）
+    names = sorted((d.get("name") or "").strip()
+                   for d in cloud.device_list() if (d.get("name") or "").strip())
+    if want_name not in names:
+        return False
+    idx = names.index(want_name)
+
+    def _geom(frame: dict) -> tuple[dict, dict, float, float, float, tuple]:
+        """由选择器几何算出 (group, chevron, chevron 点击点, 目标项 y, 检测矩形)。"""
+        g = frame["group"]
+        ch = frame.get("chevron")
+        _cx = ch["x"] if ch else g["x"] + g["w"] - 24
+        _cy = ch["y"] if ch else g["y"] + g["h"] / 2
+        _ty = g["y"] + g["h"] + _DROP_FIRST_DY + idx * _DROP_ROW
+        pr = (int(g["x"] + _DROP_PROBE_DX),
+              int(g["y"] + g["h"] + _DROP_PROBE_DY),
+              _DROP_PROBE_W, _DROP_PROBE_H)
+        return g, ch, _cx, _cy, _ty, pr
+
+    # 坐标点击前临时置前 Connect（SILENT 下选完还原焦点）
+    prev = _frontmost_app()
+    need_restore = SILENT and prev and prev != APP
+    try:
+        # 置前 + 等窗口真正拿到焦点：只等「app 在最前」不够——刚激活时窗口还没
+        # key，注入的点击会被系统吞掉（下拉点不开，2026-10-24 实测栽在这里）。
+        _activate_connect()
+        if ax.fast_available():
+            deadline = time.time() + 2.5
+            while time.time() < deadline and not ax.app_ready():
+                time.sleep(0.05)
+        else:
+            time.sleep(0.8)
+        frame = _stable_selector()
+        if not frame:
+            return False
+        group, chevron, cx, cy, ty, probe = _geom(frame)
+        # 展开下拉，并用「这块矩形亮度变没变」确认浮层真的出来了：页面刚就绪时
+        # 注入的点击可能被吞，点完就探、没开就重点一次，不靠固定 sleep。
+        opened, base = _open_dropdown(cx, cy, group)
+        if not opened:
+            # 坐标可能仍是动画中间态 → 重读稳定几何再来一轮
+            frame = _stable_selector(0.5) or frame
+            group, chevron, cx, cy, ty, probe = _geom(frame)
+            opened, base = _open_dropdown(cx, cy, group)
+            if not opened:
+                return False
+        # 逐个试名字 x（无头像 → 短名靠左，带头像 → 名字被挤右）。
+        # 关键：点「头像/空区」这类不可选项时，下拉不会收起（Electron 下拉只在点「项
+        # 名字」或「下拉外」才收），所以两次 x 之间不用重新展开、也不用任何复位动作——
+        # Esc 会关掉发送弹窗、点「中性区」会撞到返回按钮，两者都试过、都会误跳页。
+        for _cycle in range(2):
+            for xoff in _DROP_NAME_X_OFF:
+                tx = group["x"] + xoff
+                if not ax.click_at(tx, ty):  # 点目标项名字（先无头像 x，后带头像 x）
+                    continue
+                if _wait_target(want_name, 0.6):  # 点完立刻轮询读回（~20ms 一次）
+                    return True
+            # 两次都没选中：若亮度回到展开前（浮层已被点掉），重开再试一轮
+            if _cycle:
+                break
+            cur = _screen_mean(*probe) if base is not None else None
+            if cur is None or abs(cur - base) > 2.5:
+                break  # 浮层还开着 → 换个 x 也无意义，放弃（调用方 verify-and-abort）
+            opened, base = _open_dropdown(cx, cy, group)
+            if not opened:
+                return False
+        return False
+    finally:
+        if need_restore:
+            _restore_frontmost(prev)
+
 
 def run(path: str, stop_before_send: bool = False,
         serial: str = DEFAULT_DEVICE, verbose: bool = True,
-        filament: list[str] | None = None) -> dict:
+        filament: list[str] | None = None, select_only: bool = False) -> dict:
     steps: list[dict] = []
     t0 = time.time()
     _prev = [t0]
@@ -365,6 +619,44 @@ def run(path: str, stop_before_send: bool = False,
         result["error"] = "发送页未出现"
         rec("click-send", False, result["error"])
         return result
+    # 目标机复核（2026-10-23 一键换盘误派）：发送页顶部设备选择器显示实际派单目标，
+    # 之前从不选机、派单全看 Connect 当前选中的机器。这里按「序列号」精确核对——发送页
+    # 只暴露机名，先反查名→唯一序列号再和请求的 serial 比（名可重名/改名，序列号才是
+    # 稳定唯一标识）。核对不出唯一序列号也按不匹配处理，绝不把换盘派到别台机器。
+    want_name = ((dev or {}).get("name") or "").strip()
+    target = ax.send_target_device()
+    if target != want_name:
+        # 自动选机（2026-10-24）：发送页只显示机名、下拉选项不暴露给 AX，这里用
+        # 「读选择器几何 + 名称升序坐标点击」选机，再读回机名验证（全程零视觉）。
+        switched = select_device(want_name, cur_target=target)
+        rec("select-device", switched,
+            "目标「%s」→「%s」" % (target or "?", want_name))
+        if switched:
+            target = want_name          # 已校验过，省一次 AX 读
+        else:
+            target = ax.send_target_device()
+    # 目标机复核（序列号精确核对，名可重名/改名，序列号才是稳定唯一标识）：
+    # 即便 select_device 没切成功，这里仍按「反查不到唯一序列号 = 不匹配」处理，
+    # 绝不把换盘派到别台机器。
+    target_serial = cloud.serial_for_name(target) if target else None
+    if target_serial != serial:
+        press_desc("cancel")
+        why = ("发送页读不到目标机名" if not target
+               else ("目标「%s」反查不到唯一序列号" % target) if not target_serial
+               else "目标「%s」(序列号 %s) ≠ 期望「%s」(序列号 %s)"
+                    % (target, target_serial, want_name or "?", serial))
+        result["error"] = ("目标打印机不匹配/无法精确核对：%s。"
+                           "请在 Bambu Connect 里把打印目标切到「%s」后再试"
+                           % (why, want_name or serial))
+        rec("check-target", False, result["error"])
+        return result
+    rec("check-target", True,
+        "目标「%s」序列号 %s == 期望 %s" % (target or "?", target_serial, serial))
+    if select_only:
+        # 只验「自动选机」，不派单（CLI 测试用）：已停到发送页并切好目标机。
+        result["ok"] = True
+        rec("select-only", True, "已切到目标「%s」且不派单" % (target or "?"))
+        return result
     if not press_desc("confirm"):
         if not press_text("发送"):
             result["error"] = "点不到「发送」按钮（desc=confirm 与文字均失败）"
@@ -417,6 +709,8 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="只输出 JSON")
     ap.add_argument("--stop-before-send", action="store_true",
                     help="只到发送页，不点发送（不真打印）")
+    ap.add_argument("--select-only", action="store_true",
+                    help="只自动选机到目标打印机，不派单（测试选机用）")
     ap.add_argument("--list-buttons", action="store_true")
     ap.add_argument("--dump", action="store_true", help="按钮+文字")
     args = ap.parse_args()
@@ -432,7 +726,8 @@ def main() -> int:
 
     fil = [x for x in (args.filament.split(",") if args.filament else []) if x]
     res = run(args.file, stop_before_send=args.stop_before_send,
-              serial=args.serial, verbose=not args.json, filament=fil or None)
+              serial=args.serial, verbose=not args.json, filament=fil or None,
+              select_only=args.select_only)
     print(json.dumps(res, ensure_ascii=False, indent=None if args.json else 2))
     return 0 if res.get("ok") else 1
 

@@ -244,9 +244,11 @@ BambuState parsePrintSection(Map<dynamic, dynamic> print_,
 
   // ---- AMS ------------------------------------------------------------------
   // Frame-level keep: a frame without an ams section reuses the last parsed
-  // AMS state whole (per-tray merging is future work).
-  final ams = has('ams')
-      ? _parseAms(print_['ams'], snowAmsId, snowTrayIdx)
+  // AMS state whole (per-tray merging is future work). The external spool
+  // (`vt_tray`) is a sibling of `ams` at the print level, so a frame carrying
+  // only vt_tray must still re-parse (and not be treated as "no AMS at all").
+  final ams = has('ams') || has('vt_tray')
+      ? _parseAms(print_, snowAmsId, snowTrayIdx)
       : previous?.ams;
 
   // ---- calibration job flags -------------------------------------------------
@@ -307,35 +309,38 @@ BambuState parsePrintSection(Map<dynamic, dynamic> print_,
   );
 }
 
-AmsState? _parseAms(dynamic raw, int snowAmsId, int snowTrayIdx) {
-  if (raw is! Map) return null;
+AmsState? _parseAms(Map<dynamic, dynamic> print_, int snowAmsId, int snowTrayIdx) {
+  final raw = print_['ams'];
   final units = <AmsUnit>[];
-  final rawUnits = raw['ams'] ?? raw['unit'];
-  if (rawUnits is List) {
-    for (final u in rawUnits) {
-      if (u is! Map) continue;
-      final id = _intOr(u['id'], units.length);
-      final trays = <AmsTray>[];
-      final rawTrays = u['tray'];
-      if (rawTrays is List) {
-        for (final t in rawTrays) {
-          trays.add(_parseTray(t));
+  if (raw is Map) {
+    final rawUnits = raw['ams'] ?? raw['unit'];
+    if (rawUnits is List) {
+      for (final u in rawUnits) {
+        if (u is! Map) continue;
+        final id = _intOr(u['id'], units.length);
+        final trays = <AmsTray>[];
+        final rawTrays = u['tray'];
+        if (rawTrays is List) {
+          for (final t in rawTrays) {
+            trays.add(_parseTray(t));
+          }
         }
+        units.add(AmsUnit(
+          id: id,
+          humidity: _intOr(u['humidity'], 0),
+          humidityRaw: _intOr(u['humidity_raw'], 0),
+          tempC: _double(u['temp']),
+          dryRemainMin: _intOr(u['dry_time'], 0),
+          trays: trays,
+        ));
       }
-      units.add(AmsUnit(
-        id: id,
-        humidity: _intOr(u['humidity'], 0),
-        humidityRaw: _intOr(u['humidity_raw'], 0),
-        tempC: _double(u['temp']),
-        dryRemainMin: _intOr(u['dry_time'], 0),
-        trays: trays,
-      ));
     }
   }
 
-  // External spool (virtual tray).
+  // External spool (virtual tray) sits at the PRINT level (`print.vt_tray`),
+  // NOT inside `print.ams` (后者没有这个键, 2026-10-23 实测)。
   AmsTray? vtTray;
-  final rawVt = raw['vt_tray'];
+  final rawVt = print_['vt_tray'];
   if (rawVt is Map) {
     final t = _parseTray(rawVt);
     if (t.present) vtTray = t;
@@ -350,7 +355,7 @@ AmsState? _parseAms(dynamic raw, int snowAmsId, int snowTrayIdx) {
     activeId = snowAmsId;
     activeIdx = snowTrayIdx;
     source = ActiveTraySource.snow;
-  } else {
+  } else if (raw is Map) {
     final trayNow = raw['tray_now'];
     if (trayNow != null) {
       final v = int.tryParse(trayNow.toString());

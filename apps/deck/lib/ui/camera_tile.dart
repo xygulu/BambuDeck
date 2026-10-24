@@ -9,6 +9,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../core/theme.dart';
 import '../data/app_settings.dart';
 import '../data/bambu_mjpeg.dart';
+import '../data/camera_audio.dart';
 import '../data/camera_profile.dart';
 import '../data/hcnetsdk.dart';
 import '../data/log_buffer.dart';
@@ -127,6 +128,12 @@ class _CameraTileState extends ConsumerState<CameraTile> {
   StreamSubscription<String>? _errSub;
   PtzClient? _ptz;
 
+  /// The web console's mute toggle flips the same global setting; the bus
+  /// lets it reach this already-open player.
+  late final void Function(bool muted) _muteSink = _applyMuted;
+
+  void _applyMuted(bool muted) => _player?.setVolume(muted ? 0 : 100);
+
   @override
   void initState() {
     super.initState();
@@ -167,6 +174,7 @@ class _CameraTileState extends ConsumerState<CameraTile> {
     if (ref.read(appSettingsProvider).valueOrNull?.cameraMuted ?? false) {
       await player.setVolume(0);
     }
+    cameraAudioBus.attach(_muteSink);
     final controller = VideoController(player);
     try {
       // RTSP over TCP avoids UDP artifact storms on lossy Wi-Fi; low-latency
@@ -216,6 +224,7 @@ class _CameraTileState extends ConsumerState<CameraTile> {
   }
 
   Future<void> _teardown() async {
+    cameraAudioBus.detach(_muteSink);
     _errSub?.cancel();
     _errSub = null;
     final p = _player;
@@ -392,7 +401,6 @@ class _CameraTileState extends ConsumerState<CameraTile> {
     return PtzPad(
       client: _ptz!,
       flipH: widget.flipH,
-      rotationDeg: widget.rotationDeg,
       invertPan: widget.ptzInvertPan,
       invertTilt: widget.ptzInvertTilt,
     );

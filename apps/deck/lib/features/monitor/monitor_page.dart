@@ -311,6 +311,20 @@ class MonitorPrinterCard extends ConsumerWidget {
                 Text(_tempsLine(state),
                     style: const TextStyle(
                         fontSize: 11, color: DeckColors.textSecondary)),
+                if (state.stageLabel(zh: true) != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Row(children: [
+                      const Icon(Icons.timelapse,
+                          size: 11, color: DeckColors.running),
+                      const SizedBox(width: 4),
+                      Text('步骤 ${state.stageLabel(zh: true)}',
+                          style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: DeckColors.running)),
+                    ]),
+                  ),
                 if (state.printing)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),

@@ -129,6 +129,10 @@ def _http(method: str, path: str, *, headers=None, body=None,
 # ---------------------------------------------------------------- 设备注册表
 _DEVS_CACHE: dict = {"t": 0.0, "devs": [], "ttl": 45.0}
 
+# 名称↔序列号双向映射缓存 (反馈 2026-10-23): 只按「列表指纹」变化重建。
+# 打印机增删/改名时指纹变 → 映射立即重建；列表没变就原样复用，不做无谓更新。
+_MAP_CACHE: dict = {"fp": None, "by_serial": {}, "by_name": {}}
+
 
 def device_list(force: bool = False) -> list[dict]:
     """云端设备注册表。每项: serial/name/online/access_code/model/print_status。
@@ -163,6 +167,65 @@ def resolve_device(serial: str, force: bool = False) -> dict | None:
         if d.get("serial") == serial:
             return d
     return None
+
+
+# ---------------------------------------------------------------- 名称↔序列号映射
+def _list_fingerprint(devs: list[dict]) -> tuple:
+    """设备列表指纹：按 (serial, name) 排序去重。
+
+    增删打印机或改名都会让指纹变化；仅在线状态/访问码变化不影响指纹
+    （那类高频变化走 device_list 的 45s TTL，不必重建映射）。
+    """
+    return tuple(sorted(
+        (d.get("serial"), (d.get("name") or "").strip()) for d in devs))
+
+
+def _build_mapping(devs: list[dict]) -> dict:
+    by_serial: dict[str, str] = {}
+    by_name: dict[str, str | None] = {}
+    for d in devs:
+        s = d.get("serial")
+        n = (d.get("name") or "").strip()
+        if not s:
+            continue
+        by_serial.setdefault(s, n)
+        if not n:
+            continue
+        # 重名 → 反查歧义（置 None，与旧 serial_for_name「不唯一不反查」语义一致）
+        by_name[n] = None if n in by_name else s
+    return {"by_serial": by_serial, "by_name": by_name}
+
+
+def ensure_mapping(force: bool = False) -> dict:
+    """刷新并返回名称↔序列号双向映射。
+
+    force 只控制底层设备列表是否强制重拉（走 device_list 的 TTL）；映射本身
+    只看「列表指纹」——只有列表变了（打印机增删/改名）才重建，列表没变就
+    原样复用缓存（反馈 2026-10-23：无变化不更新，变化及时更新）。
+    """
+    devs = device_list(force=force)
+    fp = _list_fingerprint(devs)
+    if fp != _MAP_CACHE["fp"]:
+        _MAP_CACHE.update(_build_mapping(devs))
+        _MAP_CACHE["fp"] = fp
+    return _MAP_CACHE
+
+
+def name_for_serial(serial: str) -> str | None:
+    """按序列号快速取当前正确名称（O(1)，映射未过期时命中）。"""
+    return ensure_mapping()["by_serial"].get(serial)
+
+
+def serial_for_name(name: str) -> str | None:
+    """按设备名反查序列号（精确匹配，名重复/找不到返回 None）。
+
+    Connect 发送页只显示目标机「名」，要精确核对是不是用户点的那台，得把名
+    翻回唯一序列号再比（名可重名/改名，序列号才是稳定唯一标识）。
+    """
+    n = (name or "").strip()
+    if not n:
+        return None
+    return ensure_mapping()["by_name"].get(n)
 
 
 def access_code(serial: str, force: bool = False) -> str | None:

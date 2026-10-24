@@ -189,18 +189,24 @@ class StatChip extends StatelessWidget {
   }
 }
 
+/// Filament flow direction on the active tray (进料/退料), derived from
+/// `print.stg_cur` (22 退料 / 24 进料).
+enum AmsFlow { none, load, unload }
+
 /// AMS row: one card per unit (humidity + drying), four tray swatches each,
 /// plus the external spool when present.
 class AmsStrip extends StatelessWidget {
-  const AmsStrip({super.key, required this.ams});
+  const AmsStrip({super.key, required this.ams, this.flow = AmsFlow.none});
   final AmsState ams;
+  final AmsFlow flow;
 
   @override
   Widget build(BuildContext context) {
     final children = <Widget>[
-      for (final unit in ams.units) _UnitCard(unit: unit, ams: ams),
+      for (final unit in ams.units) _UnitCard(unit: unit, ams: ams, flow: flow),
       if (ams.vtTray != null)
-        _VtCard(tray: ams.vtTray!, active: ams.activeTrayId == 254),
+        _VtCard(
+            tray: ams.vtTray!, active: ams.activeTrayId == 254, flow: flow),
     ];
     if (children.isEmpty) {
       return const Text('AMS 未连接',
@@ -218,9 +224,10 @@ class AmsStrip extends StatelessWidget {
 }
 
 class _UnitCard extends StatelessWidget {
-  const _UnitCard({required this.unit, required this.ams});
+  const _UnitCard({required this.unit, required this.ams, required this.flow});
   final AmsUnit unit;
   final AmsState ams;
+  final AmsFlow flow;
 
   @override
   Widget build(BuildContext context) {
@@ -254,6 +261,7 @@ class _UnitCard extends StatelessWidget {
               _TraySwatch(
                 tray: unit.trays[i],
                 active: ams.activeTrayId == unit.id && ams.activeTrayIndex == i,
+                flow: flow,
               ),
             ],
           ]),
@@ -264,9 +272,10 @@ class _UnitCard extends StatelessWidget {
 }
 
 class _VtCard extends StatelessWidget {
-  const _VtCard({required this.tray, required this.active});
+  const _VtCard({required this.tray, required this.active, required this.flow});
   final AmsTray tray;
   final bool active;
+  final AmsFlow flow;
 
   @override
   Widget build(BuildContext context) {
@@ -286,7 +295,7 @@ class _VtCard extends StatelessWidget {
                   fontWeight: FontWeight.w600,
                   color: DeckColors.textPrimary)),
           const SizedBox(height: 8),
-          _TraySwatch(tray: tray, active: active),
+          _TraySwatch(tray: tray, active: active, flow: flow),
         ],
       ),
     );
@@ -340,9 +349,11 @@ class _HumidityDot extends StatelessWidget {
 }
 
 class _TraySwatch extends StatelessWidget {
-  const _TraySwatch({required this.tray, required this.active});
+  const _TraySwatch(
+      {required this.tray, required this.active, this.flow = AmsFlow.none});
   final AmsTray tray;
   final bool active;
+  final AmsFlow flow;
 
   @override
   Widget build(BuildContext context) {
@@ -350,8 +361,8 @@ class _TraySwatch extends StatelessWidget {
         ? DeckColors.border
         : Color(0xFF000000 | tray.colorRrggbb!);
     return Column(children: [
-      // 只有正在进料的通道带状态 (反馈 2026-10-20): 绿环 + 右下角播放
-      // 角标; 其余通道就是素色圆 + 类型。
+      // 只有正在进料的通道带状态 (反馈 2026-10-20 / 2026-10-23): 绿环 +
+      // 圆圈中央的「进/退」字; 其余通道就是素色圆 + 类型。
       SizedBox(
         width: 40,
         height: 38,
@@ -364,16 +375,29 @@ class _TraySwatch extends StatelessWidget {
                 color: color,
                 shape: BoxShape.circle,
                 // 深色耗材(尤其黑色)在深色背景下糊成一团: 常驻一圈半透明
-                // 白色细线描边 (反馈 2026-10-20); 进料中换绿环。
+                // 白色细线描边 (反馈 2026-10-20); 进料中换更粗的绿环, 让
+                // 进料状态更明显 (反馈 2026-10-23)。
                 border: Border.all(
                   color: active
                       ? DeckColors.running
                       : Colors.white.withValues(alpha: 0.7),
-                  width: active ? 2.5 : 1.5,
+                  width: active ? 3.5 : 1.5,
                 ),
               ),
             ),
           ),
+          // 进料/退料方向 (反馈 2026-10-23): 退料标「OUT」、进料标「IN」,
+          // 换料时带料流动动画; 平时活动通道常驻「IN」。标签浮在圆圈之上,
+          // 半透明浅色徽章垫底 + 深色英文小字, 在任意耗材颜色上都清晰又不把料色盖死。
+          if (active)
+            Center(
+              child: flow == AmsFlow.unload
+                  ? const _FlowLabel(loading: false, animated: true)
+                  : _FlowLabel(
+                      loading: true, animated: flow == AmsFlow.load),
+            ),
+          // 进料状态角标 (反馈 2026-10-23 恢复): 右下角绿色播放角标, 标记
+          // 「正在进料」的通道, 与中央的「进/退」方向字互补。
           if (active)
             Positioned(
               right: -2,
@@ -416,6 +440,85 @@ class _TraySwatch extends StatelessWidget {
         ),
       ),
     ]);
+  }
+}
+
+/// 「进」/「退」标签, 进料/退料时带竖直流动动画 (反馈 2026-10-23): 标签沿
+/// 流动方向滑动并淡入淡出, 传达「料在动」的方向感。
+class _FlowLabel extends StatefulWidget {
+  const _FlowLabel({required this.loading, this.animated = false});
+  final bool loading; // true = 进 (向下流入喷嘴), false = 退 (向上退回 AMS)
+  final bool animated;
+
+  @override
+  State<_FlowLabel> createState() => _FlowLabelState();
+}
+
+class _FlowLabelState extends State<_FlowLabel>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 800));
+
+  // 半透明浅色徽章 + 深色英文小字 (反馈 2026-10-23): 阴影/笔画描边都有锯齿、
+  // 改用浅色半透明徽章垫底 + 深色字; 方向字用英文 IN/OUT 更简洁, 字号再调小。
+  Widget _label() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.82),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        widget.loading ? 'IN' : 'OUT',
+        style: const TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          height: 1.0,
+          color: Colors.black87,
+        ),
+      ),
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.animated) _c.repeat();
+  }
+
+  @override
+  void didUpdateWidget(_FlowLabel old) {
+    super.didUpdateWidget(old);
+    if (widget.animated && !_c.isAnimating) {
+      _c.repeat();
+    } else if (!widget.animated && _c.isAnimating) {
+      _c.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.animated) return _label();
+    final dir = widget.loading ? 1.0 : -1.0;
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (_, __) {
+        final t = _c.value;
+        final slide = dir * (t * 16.0 - 8.0);
+        final opacity = 1.0 - (t * 2.0 - 1.0).abs();
+        return Opacity(
+          opacity: opacity,
+          child: Transform.translate(
+              offset: Offset(0, slide), child: _label()),
+        );
+      },
+    );
   }
 }
 

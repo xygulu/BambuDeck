@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:visibility_detector/visibility_detector.dart';
 
 import '../../core/theme.dart';
 import '../../data/camera_profile.dart';
@@ -12,8 +11,10 @@ import '../../data/providers.dart';
 import '../../data/rtsp_scanner.dart';
 import '../../ui/camera_tile.dart';
 
-/// Cameras tab body (PRD FR-3): live tile per camera, add via dialog.
-class CamerasPage extends ConsumerWidget {
+/// Cameras tab body (PRD FR-3): a wall of live tiles that auto-fits the
+/// screen, tap a feed to zoom it to fill the page, pinch / scroll to zoom
+/// and pan the enlarged picture, 缩小 returns to the wall.
+class CamerasPage extends ConsumerStatefulWidget {
   const CamerasPage({super.key, required this.onAdd});
 
   /// Opens the add-camera dialog; owned by the shell so the FAB can
@@ -21,7 +22,15 @@ class CamerasPage extends ConsumerWidget {
   final VoidCallback onAdd;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<CamerasPage> createState() => _CamerasPageState();
+}
+
+class _CamerasPageState extends ConsumerState<CamerasPage> {
+  /// Id of the feed zoomed to fill the page; null shows the wall.
+  String? _zoomedId;
+
+  @override
+  Widget build(BuildContext context) {
     final cameras = ref.watch(camerasProvider);
     final printers = ref.watch(printersProvider).valueOrNull ?? const [];
 
@@ -47,129 +56,191 @@ class CamerasPage extends ConsumerWidget {
                       fontSize: 13, color: DeckColors.textSecondary)),
               const SizedBox(height: 20),
               FilledButton.icon(
-                onPressed: onAdd,
+                onPressed: widget.onAdd,
                 icon: const Icon(Icons.add),
                 label: const Text('添加摄像头'),
               ),
             ]),
           );
         }
-        return LayoutBuilder(builder: (context, constraints) {
-          final columns = (constraints.maxWidth ~/ 420).clamp(1, 3);
-          return GridView.count(
-            padding: const EdgeInsets.all(16),
-            crossAxisCount: columns,
-            mainAxisSpacing: 14,
-            crossAxisSpacing: 14,
-            childAspectRatio: 16 / 12,
-            children: [
-              for (final c in list)
-                _CameraCard(camera: c, printers: printers),
-            ],
-          );
-        });
+
+        // A deleted/unbound zoom target falls back to the wall.
+        CameraProfile? zoomed;
+        if (_zoomedId != null) {
+          for (final c in list) {
+            if (c.id == _zoomedId) zoomed = c;
+          }
+          if (zoomed == null) _zoomedId = null;
+        }
+        return zoomed == null
+            ? _wall(list, printers)
+            : _zoomedView(zoomed, printers);
       },
     );
   }
-}
 
-class _CameraCard extends ConsumerStatefulWidget {
-  const _CameraCard({
-    required this.camera,
-    required this.printers,
-  });
-
-  final CameraProfile camera;
-  final List<PrinterProfile> printers;
-
-  @override
-  ConsumerState<_CameraCard> createState() => _CameraCardState();
-}
-
-class _CameraCardState extends ConsumerState<_CameraCard> {
-  /// NFR-3: streams outside the viewport stop pulling. Mounting the tile
-  /// only while visible disposes its player on scroll-out.
-  bool _visible = true;
-
-  @override
-  Widget build(BuildContext context) {
-    final camera = widget.camera;
-    PrinterProfile? linked;
-    for (final p in widget.printers) {
-      if (camera.printerIds.contains(p.id)) linked = p;
-    }
-    final url = camera.resolveUrl(linked);
-
-    return VisibilityDetector(
-      key: Key('cam-${camera.id}'),
-      onVisibilityChanged: (info) {
-        final visible = info.visibleFraction > 0.05;
-        if (mounted && visible != _visible) {
-          setState(() => _visible = visible);
+  /// Grid whose column count lands each cell closest to 16:9, so every
+  /// feed fills the whole tab on one screen however many cameras there
+  /// are (优化需求 3 自动排布). Nothing scrolls - the layout scales to fit.
+  Widget _wall(List<CameraProfile> list, List<PrinterProfile> printers) {
+    return LayoutBuilder(builder: (context, box) {
+      final n = list.length;
+      final w = box.maxWidth > 0 ? box.maxWidth : 1.0;
+      final h = box.maxHeight > 0 ? box.maxHeight : 1.0;
+      var bestCols = 1;
+      var bestErr = double.infinity;
+      for (var cols = 1; cols <= n; cols++) {
+        final rows = (n / cols).ceil();
+        final err = ((w / cols) / (h / rows) / (16 / 9) - 1).abs();
+        if (err < bestErr) {
+          bestErr = err;
+          bestCols = cols;
         }
-      },
-      child: Card(
-        clipBehavior: Clip.antiAlias,
-        child:
-            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          Expanded(
-            child: url != null && camera.enabled && _visible
-                ? CameraTile(streamUrl: url, label: camera.name,
-                    onToggleQuality: qualityToggler(ref, camera),
-                    cameraId: camera.id, frameSlot: 'cameras-grid',
-                    flipH: camera.flipH,
-                    rotationDeg: camera.rotationDeg,
-                    ptzInvertPan: camera.ptzInvertPan,
-                    ptzInvertTilt: camera.ptzInvertTilt)
-                : Container(
-                    color: Colors.black,
-                    alignment: Alignment.center,
-                    child: Text(
-                      !camera.enabled
-                          ? '已停用'
-                          : url == null
-                              ? '未配置视频源'
-                              : '画面已在后台暂停',
-                      style: const TextStyle(
-                          fontSize: 13, color: DeckColors.textSecondary),
+      }
+      final rows = (n / bestCols).ceil();
+      return Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          for (var r = 0; r < rows; r++)
+            Expanded(
+              child: Row(children: [
+                for (var i = r * bestCols; i < (r + 1) * bestCols && i < n; i++)
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.all(5),
+                      child: _wallCell(list[i], printers),
                     ),
                   ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Row(children: [
-              Expanded(
-                child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(camera.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 14, fontWeight: FontWeight.w600)),
-                      Text(
-                        '${camera.sourceType.label}'
-                        '${linked == null ? '' : ' · ${linked.name}'}',
-                        style: const TextStyle(
-                            fontSize: 12,
-                            color: DeckColors.textSecondary),
-                      ),
-                    ]),
+                // Invisible spacers keep a partial last row's cells the
+                // same width as the rows above.
+                for (var i = n; i < (r + 1) * bestCols; i++)
+                  const Expanded(child: SizedBox()),
+              ]),
+            ),
+        ]),
+      );
+    });
+  }
+
+  /// One wall cell: the feed fills the cell, tap to zoom.
+  Widget _wallCell(CameraProfile camera, List<PrinterProfile> printers) {
+    final linked = _linkedPrinter(camera, printers);
+    final url = camera.resolveUrl(linked);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => setState(() => _zoomedId = camera.id),
+        child: Stack(fit: StackFit.expand, children: [
+          if (url != null && camera.enabled)
+            CameraTile(
+              streamUrl: url,
+              label: camera.name,
+              expand: true,
+              onToggleQuality: qualityToggler(ref, camera),
+              cameraId: camera.id,
+              frameSlot: 'cameras-grid',
+              flipH: camera.flipH,
+              rotationDeg: camera.rotationDeg,
+              ptzInvertPan: camera.ptzInvertPan,
+              ptzInvertTilt: camera.ptzInvertTilt,
+            )
+          else
+            Container(
+              color: Colors.black,
+              alignment: Alignment.center,
+              child: Text(
+                !camera.enabled ? '已停用' : '未配置视频源',
+                style: const TextStyle(
+                    fontSize: 13, color: DeckColors.textSecondary),
               ),
-              IconButton(
-                icon: const Icon(Icons.edit_outlined, size: 19),
-                tooltip: '编辑摄像头',
-                // 删除入口收进编辑对话框 (2026-10-21: 显眼位置易误触)。
-                onPressed: () => showAddCameraDialog(context, ref,
-                    editing: camera),
-              ),
-            ]),
+            ),
+          Positioned(
+            left: 8,
+            bottom: 8,
+            child: Icon(Icons.open_in_full,
+                size: 13, color: Colors.white.withValues(alpha: 0.75)),
           ),
         ]),
       ),
     );
   }
+
+  /// A single feed filling the page (点击放大). InteractiveViewer adds the
+  /// 缩放滚动 the user asked for: pinch / scroll-wheel to zoom, drag to pan.
+  Widget _zoomedView(CameraProfile camera, List<PrinterProfile> printers) {
+    final linked = _linkedPrinter(camera, printers);
+    final url = camera.resolveUrl(linked);
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+        child: Row(children: [
+          Expanded(
+            child: Text(camera.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+          ),
+          IconButton(
+            icon: const Icon(Icons.edit_outlined, size: 19),
+            tooltip: '编辑摄像头',
+            onPressed: () => showAddCameraDialog(context, ref, editing: camera),
+          ),
+          IconButton.filledTonal(
+            icon: const Icon(Icons.close_fullscreen, size: 18),
+            tooltip: '缩小',
+            onPressed: () => setState(() => _zoomedId = null),
+          ),
+        ]),
+      ),
+      Expanded(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: InteractiveViewer(
+              minScale: 1.0,
+              maxScale: 6.0,
+              child: Container(
+                color: Colors.black,
+                child: url != null && camera.enabled
+                    ? CameraTile(
+                        streamUrl: url,
+                        label: camera.name,
+                        expand: true,
+                        onToggleQuality: qualityToggler(ref, camera),
+                        cameraId: camera.id,
+                        frameSlot: 'cameras-zoom',
+                        flipH: camera.flipH,
+                        rotationDeg: camera.rotationDeg,
+                        ptzInvertPan: camera.ptzInvertPan,
+                        ptzInvertTilt: camera.ptzInvertTilt,
+                      )
+                    : Center(
+                        child: Text(
+                          !camera.enabled ? '已停用' : '未配置视频源',
+                          style: const TextStyle(
+                              fontSize: 14, color: DeckColors.textSecondary),
+                        ),
+                      ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ]);
+  }
+
+  PrinterProfile? _linkedPrinter(
+      CameraProfile camera, List<PrinterProfile> printers) {
+    for (final p in printers) {
+      if (camera.printerIds.contains(p.id)) return p;
+    }
+    return null;
+  }
 }
+
 
 /// Add-camera dialog: RTSP/ONVIF URL (with LAN auto-scan) or the
 /// printer's own camera.

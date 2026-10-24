@@ -6,10 +6,11 @@
     纯内存、毫秒级，不靠 AX/视觉。
     更精确的「按序列号校验当前页」：详情页右上角三点菜单 → 关于打印机 里有序列号，
     留作后续校验钩子（当前为测速不读 UI）。
-  - 定位：AX 短路遍历 probe()（找到即停），不跑全量 buttons()/texts()（~9s/次）。
-  - 点击：System Events AX（CGEvent 对 Electron 不生效）。
-  - 控制按钮：以「跳过」为锚 + 固定偏移（Connect 图标稳定）。
-    实测布局：跳过[864,302]宽52 → 暂停[924,302] 停止[962,302]，中心 y=318。
+  - 定位：AX 快路径（bconnect_axfast，ctypes 直读，一次全树 ~0.02~0.3s）短路，
+    不可用时回退 System Events。不跑全量 buttons()/texts()（osascript 下 ~9s/次）。
+  - 点击：AXPress（CGEvent 对 Electron 控件不生效）。
+  - 控制按钮：以「跳过」为锚，取同行、空 label、约 30x32 的两个图标按钮，
+    按 x 排序第 1 个=pause/resume、第 2 个=stop。全程不等固定时长，全部轮询就绪标记。
 
 用法：
   python bconnect_drive.py <打印机标识> <pause|resume|stop>
@@ -30,15 +31,21 @@ import bconnect_vision as vis
 LAN_CONF = os.path.expanduser("~/.bambudeck/printers.json")
 SHOT = "/tmp/connect_drive.png"
 
-# 控制按钮相对「跳过」锚左边的固定偏移（像素）。
-_OFF_PAUSE = 75    # 暂停/继续中心 = 跳过左边 + 75
-_OFF_STOP = 113    # 停止中心     = 跳过左边 + 113
-
 _CMDS = {
     "pause": "pause", "暂停": "pause",
     "resume": "resume", "continue": "resume", "继续": "resume",
     "stop": "stop", "停止": "stop",
 }
+
+# 云端 device_list() 的 print_status：这几类表示「机器认为自己有活儿在身」。
+# 只用来做交叉校验（AX 说空闲但云端说在打印 → 再走一次慢路径确认），
+# 数据来自已缓存 45s 的设备表，不额外发请求。
+_BUSY_STATES = {"RUNNING", "PAUSE", "PREPARE", "SLICING", "SLICER"}
+
+
+def _cloud_busy(serial: str) -> bool:
+    d = cloud.resolve_device(serial) or {}
+    return str(d.get("print_status") or "").upper() in _BUSY_STATES
 
 
 def shot(path: str = SHOT) -> str:
@@ -93,19 +100,50 @@ def resolve_printer(identifier: str) -> dict | None:
 
 
 # ---------------------------------------------------------------- 导航
-def _enter(name: str) -> bool:
-    """回到列表 → 点 name 卡片进详情（正向标记：列表有「设备名称」表头）。"""
-    for _ in range(3):
+def _enter(name: str, timeout: float = 4.0) -> bool:
+    """回到列表 → 点 name 卡片进详情（正向标记：列表有「设备名称」表头）。
+
+    轮询就绪标记而不是固定 sleep（AX 快路径一次探测 ~0.02s）：列表出现、卡片点
+    完都立刻返回；详情页真正可用与否交给 control() 里的 _wait_control 轮询，
+    比原来「点完卡片固定等 2s」快且更稳。
+    """
+    deadline = time.time() + timeout
+    on_list = False
+    while time.time() < deadline:
         if ax.probe(texts=["设备名称"])["texts"].get("设备名称"):
+            on_list = True
             break
         ax.click_desc("我的打印机")
-        time.sleep(1.5)
-    if not ax.probe(texts=["设备名称"])["texts"].get("设备名称"):
+        time.sleep(0.25)
+    if not on_list:
         return False
-    if not ax.click_desc(name):
-        return False
-    time.sleep(2.0)
-    return True
+    return ax.click_desc(name)
+
+
+def _wait_control(name: str, cmd: str, serial: str, timeout: float = 3.0,
+                  dwell: float = 0.8) -> dict:
+    """进详情页后轮询控制按钮（页面渲染有先后，不靠固定 sleep）。
+
+    「空闲」下结论要谨慎：刚点完卡片时机器名可能已经进 AX 树、控制行还没渲染完，
+    这时看到 idle_no_skip 不代表真空闲。所以：
+      - 云端说在打印 → 一直轮询到控件出现或超时（超时后交给调用方慢路径复核）；
+      - 云端说空闲 → 也要连续观察满 dwell（0.8s）再收工，避免发布页瞬间误判。
+    真正按到控件就立刻返回（正常打印中 ~0.2s）。
+    """
+    start = time.time()
+    deadline = start + timeout
+    busy = _cloud_busy(serial)
+    r: dict = {"pressed": False, "reason": "not_on_detail"}
+    while True:
+        r = ax.press_control(name, cmd)
+        if r.get("pressed"):
+            return r
+        idle = r.get("reason") == "idle_no_skip"
+        if idle and not busy and time.time() - start >= dwell:
+            return r
+        if time.time() >= deadline:
+            return r
+        time.sleep(0.12)
 
 
 # ---------------------------------------------------------------- 控制
@@ -133,7 +171,11 @@ def control(identifier: str, command: str, verify: bool = False) -> dict:
     r = ax.press_control(name, cmd)
     if not r.get("pressed") and r.get("reason") in ("not_on_detail", "wrong_printer"):
         if _enter(name):
-            r = ax.press_control(name, cmd)
+            r = _wait_control(name, cmd, serial)
+    # 交叉校验：云端说在打印、AX 快路径却说空闲 → 快路径可能漏了控件，用慢路径再确认
+    # （只在矛盾时发生，正常路径零额外开销）
+    if not r.get("pressed") and r.get("reason") == "idle_no_skip" and _cloud_busy(serial):
+        r = ax.press_control(name, cmd, slow=True)
     mark("click")
 
     if not r.get("pressed"):
@@ -154,11 +196,12 @@ def control(identifier: str, command: str, verify: bool = False) -> dict:
     # 别用 label——会撞「取消打印」标题）。pause/resume 是 toggle，无需确认。
     if cmd == "stop":
         confirmed = False
-        for _ in range(5):
-            time.sleep(1.0)
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
             if ax.press_desc("confirm") or ax.press_at(987, 548):
                 confirmed = True
                 break
+            time.sleep(0.12)  # 快路径一次探测 ~0.02s，框一出现就能立刻确认
         if not confirmed:
             return {"ok": False,
                     "error": "停止确认框未出现或找不到「确认」按钮（打印可能仍在进行）",

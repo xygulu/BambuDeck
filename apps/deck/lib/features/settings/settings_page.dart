@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme.dart';
 import '../../data/app_settings.dart';
 import '../../data/camera_profile.dart';
+import '../../data/cloud_print_helper.dart';
 import '../../data/hcnetsdk.dart' show detectLocalIpv4;
 import '../../data/hub_server.dart';
 import '../../data/log_buffer.dart';
@@ -64,6 +65,7 @@ class SettingsPage extends ConsumerWidget {
         ),
         _visionSection(context, ref, settings, notifier),
         _hubSection(context, ref, settings, notifier),
+        _serviceSection(context, ref, settings, notifier),
         const SizedBox(height: 18),
         _sectionLabel('运行日志'),
         ListTile(
@@ -152,7 +154,10 @@ class SettingsPage extends ConsumerWidget {
               controller: baseCtrl,
               decoration: const InputDecoration(
                   labelText: 'API 地址(含 /v1 段)',
-                  hintText: 'https://open.bigmodel.cn/api/paas/v4'),
+                  hintText: 'https://open.bigmodel.cn/api/paas/v4',
+                  helperText: 'OpenAI 接口填到 /v1 或 /v4 为止;MiniMax 这类 '
+                      'Anthropic 兼容接口填 …/anthropic 即可,会自动走 /v1/messages',
+                  helperMaxLines: 2),
               onChanged: (v) => save(settings.copyWith(visionBaseUrl: v.trim())),
             ),
             const SizedBox(height: 8),
@@ -247,6 +252,101 @@ class SettingsPage extends ConsumerWidget {
                       color: testResult!.startsWith('✅')
                           ? Colors.green
                           : DeckColors.error)),
+            ],
+          ]),
+        ),
+      ]);
+    });
+  }
+
+  /// 打印 / 控制服务（bconnect_service.py）：填了地址就通过网络调用那台
+  /// Mac 上的自动化，留空则读本机 `~/.bambudeck/helper.json`。
+  Widget _serviceSection(BuildContext context, WidgetRef ref,
+      AppSettings settings, AppSettingsNotifier notifier) {
+    final urlCtrl = TextEditingController(text: settings.helperUrl);
+    final tokCtrl = TextEditingController(text: settings.helperToken);
+    var testing = false;
+    String? result;
+    return StatefulBuilder(builder: (context, setState) {
+      Future<void> save(AppSettings s) => notifier.set(s);
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const SizedBox(height: 18),
+        _sectionLabel('打印 / 控制服务'),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Column(children: [
+            TextField(
+              controller: urlCtrl,
+              decoration: const InputDecoration(
+                  labelText: '服务地址',
+                  hintText: 'http://192.168.1.10:8799(留空=本机)'),
+              onChanged: (v) => save(settings.copyWith(helperUrl: v.trim())),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: tokCtrl,
+              decoration: const InputDecoration(labelText: '服务令牌'),
+              onChanged: (v) => save(settings.copyWith(helperToken: v.trim())),
+            ),
+            const SizedBox(height: 10),
+            Row(children: [
+              OutlinedButton.icon(
+                icon: const Icon(Icons.wifi_tethering, size: 16),
+                label: const Text('测试连接'),
+                onPressed: testing
+                    ? null
+                    : () async {
+                        setState(() { testing = true; result = null; });
+                        final r = await CloudPrintHelper.instance
+                            .probe(urlCtrl.text, tokCtrl.text);
+                        if (!context.mounted) return;
+                        setState(() {
+                          testing = false;
+                          result = r['ok'] == true
+                              ? '✅ 已连接（Connect ${r['app_running'] == true ? "在运行" : "未运行"}）'
+                              : '❌ ${r['error'] ?? '连接失败'}';
+                        });
+                      },
+              ),
+              const SizedBox(width: 10),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.download, size: 16),
+                label: const Text('读本机 helper'),
+                onPressed: () async {
+                  final ep = await HelperEndpoint.load();
+                  if (!context.mounted) return;
+                  if (ep == null) {
+                    setState(() => result = '❌ 没找到 ~/.bambudeck/helper.json');
+                    return;
+                  }
+                  urlCtrl.text = ep.url;
+                  tokCtrl.text = ep.token;
+                  save(settings.copyWith(
+                      helperUrl: ep.url, helperToken: ep.token));
+                  setState(() => result = '✅ 已填入本机服务地址');
+                },
+              ),
+            ]),
+            const SizedBox(height: 6),
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '手机/平板：填 Mac 的地址，并在 Mac 上用 --lan 启动服务。'
+                '留空则读写本机 ~/.bambudeck/helper.json（仅 macOS）。',
+                style: TextStyle(fontSize: 11, color: DeckColors.textSecondary),
+              ),
+            ),
+            if (result != null) ...[
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(result!,
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: result!.startsWith('✅')
+                            ? Colors.green
+                            : DeckColors.error)),
+              ),
             ],
           ]),
         ),
@@ -397,14 +497,26 @@ class SettingsPage extends ConsumerWidget {
   }
 }
 
-/// One-shot 视觉判读 test: grabs the first mounted camera frame and asks
-/// the configured model. Returns a human line prefixed ✅/❌/⚠ for the
-/// inline result label.
+/// One-shot 视觉判读 test: grabs a frame from the first camera that yields
+/// one and asks the configured model. Returns a human line prefixed
+/// ✅/❌/⚠ for the inline result label.
+///
+/// The settings page is an opaque route, so the camera tiles underneath are
+/// not painted - grabbing the on-screen tile always missed here. The test
+/// therefore pulls a frame straight from each camera's stream.
 Future<String> testVisionNow(WidgetRef ref, AppSettings settings) async {
   final cameras = ref.read(camerasProvider).valueOrNull ?? const [];
   if (cameras.isEmpty) return '❌ 没有已配置的摄像头';
+  final printers = ref.read(printersProvider).valueOrNull ?? const [];
   for (final c in cameras) {
-    final png = await frameRegistry.grab(c.id);
+    if (!c.enabled) continue;
+    // 设置页盖住了下面的监控画面，屏幕上那一帧要么没有要么是旧的，
+    // 测试要的是眼前这一刻，所以直接走直连视频源；每台最多等 10 秒，
+    // 免得几台摄像头都不通时按钮转上一两分钟。
+    final png = await cameraGrabber.grab(c,
+        printers: printers,
+        preferMounted: false,
+        timeout: const Duration(seconds: 10));
     if (png == null) continue;
     final client = VisionLlmClient(
       baseUrl: settings.visionBaseUrl,
@@ -418,10 +530,13 @@ Future<String> testVisionNow(WidgetRef ref, AppSettings settings) async {
       return '❌ 判读失败(检查 API 地址 / Key / 模型,详情见运行日志)';
     }
     final abnormal = verdict.isAbnormal ? '⚠ 异常:${verdict.abnormal}' : '✅ 画面正常';
-    return '$abnormal · 平台物体=${verdict.platformHasObject} · '
+    return '$abnormal · 画面来自 ${c.name} · '
+        '平台物体=${verdict.platformHasObject} · '
         '打印中=${verdict.printRunning}\n${verdict.notes}';
   }
-  return '❌ 没有可抓取的画面(对应摄像头的监控页未显示?)';
+  return '❌ 没有可抓取的画面'
+      '(已直连 ${cameras.length} 个摄像头的视频源,均未取到帧 —— '
+      '检查摄像头地址/密码,或先到监控页确认画面能出)';
 }
 
 /// Run log: connection diagnostics + command traces (ring buffer).

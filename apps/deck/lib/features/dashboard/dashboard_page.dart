@@ -122,9 +122,10 @@ class DashboardBody extends ConsumerWidget {
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
             // Fixed height, not IntrinsicHeight: SegmentedButton's render
             // object cannot answer the dry-layout pass intrinsics need
-            // (crashed on first frame). 控制行在窄面板会折行, 给到两行高。
+            // (crashed on first frame). 控制行在窄面板会折行, 给到两行高;
+            // 顶部行还要容下 AMS 卡 (反馈 2026-10-23 高度不够会截断)。
             child: LayoutBuilder(builder: (context, box) {
-              final h = box.maxWidth >= 1080 ? 110.0 : 150.0;
+              final h = box.maxWidth >= 1080 ? 132.0 : 156.0;
               return SizedBox(
                 height: h,
                 child: Row(
@@ -338,93 +339,24 @@ class AmsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final ams = s.ams;
+    // 进料/退料方向来自打印子阶段 stg_cur (22 退料 / 24 进料)。
+    final flow = switch (s.stgCur) {
+      24 => AmsFlow.load,
+      22 => AmsFlow.unload,
+      _ => AmsFlow.none,
+    };
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              const Text('AMS 耗材',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-              const Spacer(),
-              // 当前进料通道状态 (反馈 2026-10-20).
-              if (s.ams != null) _FeedChip(ams: s.ams!),
-            ]),
-            const SizedBox(height: 10),
-            // Scroll instead of overflowing when the compact top row's
-            // fixed height is shorter than the strip needs (narrow panes
-            // wrap the tray swatches); loose flex keeps natural height in
-            // the full dashboard.
-            Flexible(
-              child: SingleChildScrollView(
-                child: s.ams != null
-                    ? AmsStrip(ams: s.ams!)
-                    : const Text('未检测到 AMS',
-                        style: TextStyle(
-                            fontSize: 13, color: DeckColors.textSecondary)),
-              ),
-            ),
-          ],
-        ),
+        child: ams == null
+            ? const Text('未检测到 AMS',
+                style: TextStyle(
+                    fontSize: 13, color: DeckColors.textSecondary))
+            // 进料状态不再用文字条, 直接在正在进料的通道圆圈里标「进/退」字
+            // (反馈 2026-10-23); 标题行也已去掉, 高度让给料仓。
+            : AmsStrip(ams: ams, flow: flow),
       ),
-    );
-  }
-}
-
-/// The feeding channel right in the AMS header: color swatch of the
-/// active tray + which unit/slot it feeds from (反馈 2026-10-20).
-class _FeedChip extends StatelessWidget {
-  const _FeedChip({required this.ams});
-
-  final AmsState ams;
-
-  @override
-  Widget build(BuildContext context) {
-    final tray = ams.activeTray;
-    if (tray == null) {
-      return const Text('进料 -',
-          style: TextStyle(fontSize: 12, color: DeckColors.textSecondary));
-    }
-    // Mirror AmsStrip's unit naming (widgets.dart).
-    String source;
-    if (ams.activeTrayId == 254) {
-      source = '虚拟通道';
-    } else {
-      AmsUnit? unit;
-      for (final u in ams.units) {
-        if (u.id == ams.activeTrayId) unit = u;
-      }
-      source = unit == null
-          ? '通道 ${(ams.activeTrayIndex ?? 0) + 1}'
-          : '${unit.id >= 128 ? 'AMS HT ${unit.id - 127}' : 'AMS ${unit.id + 1}'}'
-              ' · 通道 ${(ams.activeTrayIndex ?? 0) + 1}';
-    }
-    final color = tray.colorRrggbb == null
-        ? const Color(0xFF9E9E9E)
-        : Color(0xFF000000 | tray.colorRrggbb!);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: DeckColors.textSecondary.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Container(
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(
-            color: color,
-            shape: BoxShape.circle,
-            border: Border.all(
-                color: DeckColors.textPrimary.withValues(alpha: 0.25)),
-          ),
-        ),
-        const SizedBox(width: 6),
-        Text('进料 $source${tray.type.isEmpty ? '' : ' · ${tray.type}'}',
-            style: const TextStyle(
-                fontSize: 12, color: DeckColors.textPrimary)),
-      ]),
     );
   }
 }

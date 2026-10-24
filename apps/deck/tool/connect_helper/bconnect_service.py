@@ -8,7 +8,10 @@
   GET  /health     -> {ok, app_running, ax_ready, uid_resolved, busy}
   GET  /devices    -> 云端设备注册表（serial/name/online/model，access_code 掩码）
   POST /command    body {serial, command, params}
-    command=print     params={file, filament?: [...], stop_before_send?: bool}
+    command=print     params={file | file_b64+filename, filament?: [...],
+                              stop_before_send?: bool}
+                      file_b64 用于手机/其他设备：文件内容随请求上传，
+                      服务端落到 ~/.bambudeck/uploads/ 再派单。
     command=pause      params={}    dev-ON 走 LAN MQTT；云模式回 84033543 明确报错
     command=resume     params={}
     command=stop       params={}
@@ -31,12 +34,16 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +55,16 @@ import bconnect_print as bp     # noqa: E402
 
 _INFO = os.path.expanduser("~/.bambudeck/helper.json")
 _LAN_CONF = os.path.expanduser("~/.bambudeck/printers.json")
+
+# 局域网自动发现：helper 每 5s 广播一条 UDP beacon 到 255.255.255.255:8798。
+# 载荷 {type, uid, name, port, version}；客户端按数据报源 IP 拼回 HTTP 地址，
+# 再调 /identity 校验 Bambu 账号是否一致（一致才允许调用）。
+_BEACON_PORT = 8798
+_BEACON_INTERVAL = 5.0
+
+# 打印机列表定期拉取间隔：后台线程定期 GET /user/bind，列表有变化时立即
+# 重建名称↔序列号映射（无变化不动）。30s 保证改名/增删「及时」跟上。
+_MAPPING_REFRESH_INTERVAL = 30.0
 
 TOKEN = secrets.token_urlsafe(16)
 
@@ -229,11 +246,42 @@ def _ack_result(command: str, ack: dict) -> dict:
             "error": "%s 未确认: %s" % (command, ack.get("reason") or "?")}
 
 
+# ---------------------------------------------------------------- 上传
+def save_upload(params: dict) -> str:
+    """把客户端 base64 上传的模型落到本机，返回绝对路径。
+
+    手机/平板没有「Mac 上的文件路径」这回事，所以远程客户端把字节一起发过来；
+    文件名只保留 basename 并清洗，避免路径穿越。
+    """
+    raw = str(params.get("file_b64") or "")
+    if not raw:
+        raise ValueError("file_b64 为空")
+    if len(raw) > 96 * 1024 * 1024:  # ~72MB 原始数据
+        raise ValueError("上传文件过大")
+    name = re.sub(r"[^A-Za-z0-9._-]", "_",
+                  os.path.basename(str(params.get("filename") or "upload.3mf")))
+    if not name.lower().endswith((".3mf", ".gcode")):
+        name += ".3mf"
+    d = os.path.expanduser("~/.bambudeck/uploads")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, name)
+    tmp = path + ".part"
+    with open(tmp, "wb") as f:
+        f.write(base64.b64decode(raw))
+    os.replace(tmp, path)
+    return path
+
+
 # ---------------------------------------------------------------- 命令路由
 def dispatch(serial: str, command: str, params: dict) -> dict:
     cmd = _COMMAND_ALIASES.get(command, command)
     if cmd == "print":
         file = params.get("file") or ""
+        if not file and params.get("file_b64"):
+            try:
+                file = save_upload(params)
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": "上传文件失败: %s" % e}
         if not file:
             return {"ok": False, "error": "print 缺参数 file"}
         res = bp.run(file,
@@ -293,6 +341,17 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "busy": _BUSY.locked(),
                 "app_running": bp.app_running(),
                 "uid_resolved": bool(cloud.resolve_uid()),
+            })
+            return
+        if self.path == "/identity":
+            if not self._auth_ok():
+                self._send(401, {"ok": False, "error": "bad or missing X-Deck-Token"})
+                return
+            self._send(200, {
+                "ok": True,
+                "uid": cloud.resolve_uid() or "",
+                "name": socket.gethostname(),
+                "version": 1,
             })
             return
         if self.path == "/devices":
@@ -355,7 +414,9 @@ class Handler(BaseHTTPRequestHandler):
         if mutating and not _BUSY.acquire(blocking=False):
             self._send(409, {"ok": False, "error": "已有命令在执行，请稍后重试"})
             return
-        prev = _frontmost_app() if mutating else None
+        # 只有打印会抢焦点（CGEvent 点像素坐标必须 Connect 在最前）；控制走 AXPress，
+        # 后台也能按，省掉两次 osascript 前台查询/还原（~0.3s）。
+        prev = _frontmost_app() if cmd == "print" else None
         try:
             res = dispatch(serial, command, params)
         except Exception as e:  # noqa: BLE001
@@ -368,18 +429,80 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200 if res.get("ok") else 502, res)
 
 
+def _beacon_loop(http_port: int) -> None:
+    """广播本服务供局域网客户端自动发现。载荷含 uid(账号)与 hostname;
+    客户端按数据报源 IP 拼回 http://<ip>:<port>,再调 /identity 校验账号。"""
+    while True:
+        try:
+            msg = json.dumps({
+                "type": "bambudeck-helper",
+                "uid": cloud.resolve_uid() or "",
+                "name": socket.gethostname(),
+                "port": http_port,
+                "version": 1,
+            }, ensure_ascii=False).encode("utf-8")
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.sendto(msg, ("255.255.255.255", _BEACON_PORT))
+            s.close()
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(_BEACON_INTERVAL)
+
+
+def _mapping_refresh_loop() -> None:
+    """定期拉取云端打印机列表；列表一变就重建名称↔序列号映射（没变不动）。
+
+    作用：调用传入序列号时（换盘/打印目标机核对）能立刻拿到「正确名称」，
+    而不是依赖调用那一刻才刷新的懒缓存（反馈 2026-10-23）。
+    """
+    while True:
+        try:
+            cloud.ensure_mapping(force=True)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(_MAPPING_REFRESH_INTERVAL)
+
+
+def lan_ip() -> str | None:
+    """本机在局域网里的地址（不真的发包，只是让内核选出口网卡）。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default=None,
+                    help="监听地址（默认 127.0.0.1，--lan 时 0.0.0.0）")
     ap.add_argument("--port", type=int, default=8799)
+    ap.add_argument("--lan", action="store_true",
+                    help="监听 0.0.0.0，让手机/平板/其他电脑调用本服务")
     args = ap.parse_args()
 
+    host = args.host or ("0.0.0.0" if args.lan else "127.0.0.1")
+    loopback = host in ("127.0.0.1", "localhost", "::1")
+
     load_token()
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    url = "http://%s:%d" % (args.host, args.port)
+    if not loopback:
+        # 只有真的对外监听时广播才有意义；仅本机时广播只会误导局域网客户端。
+        threading.Thread(target=_beacon_loop, args=(args.port,), daemon=True).start()
+    threading.Thread(target=_mapping_refresh_loop, daemon=True).start()
+    srv = ThreadingHTTPServer((host, args.port), Handler)
+    # helper.json 里写「客户端该连的地址」：对外监听时写局域网 IP，
+    # 这样手机端「读本机 helper」拿到的就是能用的地址。
+    dial = "127.0.0.1" if loopback else (lan_ip() or host)
+    url = "http://%s:%d" % (dial, args.port)
     info_path = write_info(url)
-    print(json.dumps({"ok": True, "listening": url, "info_file": info_path},
-                     ensure_ascii=False), flush=True)
+    out = {"ok": True, "listening": url, "host": host, "info_file": info_path}
+    if loopback:
+        out["hint"] = "只监听本机；手机/平板访问请加 --lan 重新启动"
+    print(json.dumps(out, ensure_ascii=False), flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

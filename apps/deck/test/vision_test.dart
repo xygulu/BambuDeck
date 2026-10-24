@@ -44,6 +44,82 @@ void main() {
     });
   });
 
+  group('VisionLlmClient 接口协议', () {
+    final png = Uint8List.fromList([1, 2, 3]);
+
+    test('OpenAI 形状: {base}/chat/completions + Bearer', () async {
+      late Uri uri;
+      late Map<String, dynamic> body;
+      late Map<String, String> headers;
+      final c = VisionLlmClient(
+        baseUrl: 'https://open.bigmodel.cn/api/paas/v4/',
+        apiKey: 'k',
+        model: 'glm-4v-flash',
+        postOverride: (u, b, h) async {
+          uri = u;
+          body = b;
+          headers = h;
+          return {
+            'choices': [
+              {'message': {'content': 'ok'}}
+            ]
+          };
+        },
+      );
+      expect(await c.analyzeFrame(png), 'ok');
+      expect(uri.toString(),
+          'https://open.bigmodel.cn/api/paas/v4/chat/completions');
+      expect(headers['authorization'], 'Bearer k');
+      final part = (body['messages'] as List).first['content'][1];
+      expect(part['type'], 'image_url');
+      expect(part['image_url']['url'], startsWith('data:image/png;base64,'));
+    });
+
+    test('Anthropic 形状 (MiniMax): {base}/v1/messages + x-api-key', () async {
+      late Uri uri;
+      late Map<String, dynamic> body;
+      late Map<String, String> headers;
+      final c = VisionLlmClient(
+        baseUrl: 'https://api.minimaxi.com/anthropic',
+        apiKey: 'k',
+        model: 'MiniMax-M3',
+        postOverride: (u, b, h) async {
+          uri = u;
+          body = b;
+          headers = h;
+          return {
+            'content': [
+              {'type': 'text', 'text': '{"abnormal":"none"}'}
+            ]
+          };
+        },
+      );
+      expect(await c.analyzeFrame(png), '{"abnormal":"none"}');
+      expect(uri.toString(), 'https://api.minimaxi.com/anthropic/v1/messages');
+      expect(headers['x-api-key'], 'k');
+      expect(headers['anthropic-version'], isNotNull);
+      final part = (body['messages'] as List).first['content'][1];
+      expect(part['type'], 'image');
+      expect(part['source']['type'], 'base64');
+      expect(part['source']['media_type'], 'image/png');
+    });
+
+    test('…/anthropic/v1 结尾不会拼成 /v1/v1/messages', () async {
+      late Uri uri;
+      final c = VisionLlmClient(
+        baseUrl: 'https://api.minimaxi.com/anthropic/v1',
+        apiKey: 'k',
+        model: 'MiniMax-M3',
+        postOverride: (u, b, h) async {
+          uri = u;
+          return {'content': <dynamic>[]};
+        },
+      );
+      await c.analyzeFrame(png);
+      expect(uri.toString(), 'https://api.minimaxi.com/anthropic/v1/messages');
+    });
+  });
+
   group('VisionGuard', () {
     VisionGuard newGuard({
       required Future<VisionVerdict?> Function() onFrame,

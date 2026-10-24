@@ -105,9 +105,15 @@ const visionPrompt =
     '4) notes: 一句话说明(中文)。只输出JSON,格式:'
     '{"platform_has_object":true,"print_running":true,"abnormal":"none","notes":"…"}';
 
-/// OpenAI-compatible vision client (chat/completions with an image_url
-/// part). Works with 智谱 GLM-4V, Qwen-VL (DashScope compatible mode),
-/// OpenAI, Ollama+llava, vLLM - anything speaking the standard shape.
+/// Vision client speaking two protocols, picked from the base URL:
+///
+/// - **OpenAI** (`{base}/chat/completions`, image_url + data: URI): 智谱
+///   GLM-4V, Qwen-VL (DashScope compatible mode), OpenAI, Ollama+llava, vLLM.
+/// - **Anthropic Messages** (`{base}/v1/messages`, base64 image block):
+///   api.anthropic.com, and the Anthropic-compatible endpoints the Claude
+///   Code ecosystem uses - e.g. MiniMax's `https://api.minimaxi.com/anthropic`
+///   (M2/M3). A URL whose path contains `anthropic` takes this branch;
+///   posting /chat/completions there answers 404 (实测 2026-10-24).
 class VisionLlmClient {
   VisionLlmClient({
     required this.baseUrl,
@@ -119,7 +125,8 @@ class VisionLlmClient {
   });
 
   /// API root INCLUDING /v1-style prefix, e.g.
-  /// `https://open.bigmodel.cn/api/paas/v4` or `https://api.openai.com/v1`.
+  /// `https://open.bigmodel.cn/api/paas/v4` (OpenAI shape) or
+  /// `https://api.minimaxi.com/anthropic` (Anthropic shape).
   final String baseUrl;
   final String apiKey;
   final String model;
@@ -139,27 +146,8 @@ class VisionLlmClient {
   /// handled). [mimeType] must match the encoded bytes.
   Future<String?> analyzeFrame(Uint8List image,
       {String mimeType = 'image/png'}) async {
-    final dataUri =
-        'data:$mimeType;base64,${base64.encode(image)}';
-    final uri = Uri.parse('$baseUrl/chat/completions');
-    final body = {
-      'model': model,
-      'messages': [
-        {
-          'role': 'user',
-          'content': [
-            {'type': 'text', 'text': visionPrompt},
-            {
-              'type': 'image_url',
-              'image_url': {'url': dataUri},
-            },
-          ],
-        },
-      ],
-      // A short cap keeps verdict latency snappy; the JSON verdict is tiny.
-      'max_tokens': 300,
-      'temperature': 0.1,
-    };
+    final uri = _uri();
+    final body = _body(image, mimeType);
     _logLine('POST $uri model=$model bytes=${image.length}');
     final Map<String, dynamic> doc;
     try {
@@ -171,6 +159,19 @@ class VisionLlmClient {
       return null;
     }
     try {
+      if (_anthropic) {
+        final content = doc['content'];
+        if (content is List) {
+          final texts = [
+            for (final part in content)
+              if (part is Map && part['type'] == 'text' && part['text'] != null)
+                part['text'].toString(),
+          ];
+          if (texts.isNotEmpty) return texts.join('\n');
+        }
+        _logLine('no text in reply: ${doc.keys.toList()}');
+        return null;
+      }
       final choices = doc['choices'];
       if (choices is! List || choices.isEmpty) {
         _logLine('no choices in reply: ${doc.keys.toList()}');
@@ -187,10 +188,78 @@ class VisionLlmClient {
     }
   }
 
-  Map<String, String> _headers() => {
-        'content-type': 'application/json',
-        if (apiKey.isNotEmpty) 'authorization': 'Bearer $apiKey',
+  /// Anthropic Messages protocol when the base path says so (see the class
+  /// docs). The path is normalized so both `…/anthropic` and
+  /// `…/anthropic/v1` end up at `…/v1/messages`.
+  bool get _anthropic =>
+      (Uri.tryParse(baseUrl)?.path.toLowerCase().contains('anthropic')) ??
+      baseUrl.toLowerCase().contains('anthropic');
+
+  Uri _uri() {
+    final base = baseUrl.replaceFirst(RegExp(r'/+$'), '');
+    if (!_anthropic) return Uri.parse('$base/chat/completions');
+    return Uri.parse(
+        base.endsWith('/v1') ? '$base/messages' : '$base/v1/messages');
+  }
+
+  Map<String, dynamic> _body(Uint8List image, String mimeType) {
+    final b64 = base64.encode(image);
+    if (_anthropic) {
+      return {
+        'model': model,
+        'max_tokens': 300,
+        'temperature': 0.1,
+        'messages': [
+          {
+            'role': 'user',
+            'content': [
+              {'type': 'text', 'text': visionPrompt},
+              {
+                'type': 'image',
+                'source': {
+                  'type': 'base64',
+                  'media_type': mimeType,
+                  'data': b64,
+                },
+              },
+            ],
+          },
+        ],
       };
+    }
+    return {
+      'model': model,
+      'messages': [
+        {
+          'role': 'user',
+          'content': [
+            {'type': 'text', 'text': visionPrompt},
+            {
+              'type': 'image_url',
+              'image_url': {'url': 'data:$mimeType;base64,$b64'},
+            },
+          ],
+        },
+      ],
+      // A short cap keeps verdict latency snappy; the JSON verdict is tiny.
+      'max_tokens': 300,
+      'temperature': 0.1,
+    };
+  }
+
+  Map<String, String> _headers() {
+    if (_anthropic) {
+      return {
+        'content-type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        if (apiKey.isNotEmpty) 'x-api-key': apiKey,
+      };
+    }
+    return {
+      'content-type': 'application/json',
+      if (apiKey.isNotEmpty) 'authorization': 'Bearer $apiKey',
+    };
+  }
 
   Future<Map<String, dynamic>> _post(
       Uri uri, Map<String, dynamic> body) async {

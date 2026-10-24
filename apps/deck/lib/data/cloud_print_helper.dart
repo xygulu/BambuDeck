@@ -25,6 +25,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'app_settings.dart';
+
 /// 单步执行结果。
 class CloudPrintStep {
   const CloudPrintStep({
@@ -136,12 +138,20 @@ class CloudControlResult {
       );
 }
 
-/// helper 连接信息（`~/.bambudeck/helper.json`）。
+/// helper 连接信息：本机从 `~/.bambudeck/helper.json` 读，其他设备在设置里
+/// 填服务地址 + 令牌（自动化仍然在跑 helper 的那台 Mac 上执行）。
 class HelperEndpoint {
   const HelperEndpoint({required this.url, required this.token});
 
   final String url;
   final String token;
+
+  /// 远程配置：设置里填了地址就用它（末尾斜杠去掉，免得拼出 `//command`）。
+  static HelperEndpoint? fromSettings(AppSettings s) {
+    final url = s.helperUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    if (url.isEmpty) return null;
+    return HelperEndpoint(url: url, token: s.helperToken.trim());
+  }
 
   static String get _infoPath {
     final home = Platform.environment['HOME'] ?? '';
@@ -170,9 +180,30 @@ class CloudPrintHelper {
 
   static final CloudPrintHelper instance = CloudPrintHelper._();
 
+  /// 由 app 外壳同步的偏好设置（同 visionGuard / hubServer 的做法）。
+  /// 填了远程服务地址就优先用它，否则退回本机 helper.json。
+  AppSettings settings = const AppSettings();
+
+  /// 当前生效的 helper 地址（远程配置优先）。
+  Future<HelperEndpoint?> endpoint() async =>
+      HelperEndpoint.fromSettings(settings) ?? await HelperEndpoint.load();
+
+  /// 设置页「测试连接」：不碰 settings，直接试给定地址。
+  Future<Map<String, dynamic>> probe(String url, String token) async {
+    final clean = url.trim().replaceAll(RegExp(r'/+$'), '');
+    if (clean.isEmpty) return {'ok': false, 'error': '服务地址为空'};
+    try {
+      return await _request(
+          HelperEndpoint(url: clean, token: token.trim()), 'GET', '/health',
+          timeout: const Duration(seconds: 5));
+    } catch (e) {
+      return {'ok': false, 'error': '$e'};
+    }
+  }
+
   /// helper 是否在线。
   Future<bool> health() async {
-    final ep = await HelperEndpoint.load();
+    final ep = await endpoint();
     if (ep == null) return false;
     try {
       final res = await _request(ep, 'GET', '/health');
@@ -193,17 +224,24 @@ class CloudPrintHelper {
     bool stopBeforeSend = false,
     Duration timeout = const Duration(minutes: 5),
   }) async {
-    final ep = await HelperEndpoint.load();
+    final ep = await endpoint();
     if (ep == null) {
       return const CloudPrintResult(
         ok: false,
-        error: '本机打印 helper 未启动（找不到 ~/.bambudeck/helper.json）。'
-            '请先运行 python bconnect_service.py',
+        error: '没有可用的打印服务：Mac 上没跑 bconnect_service.py，'
+            '也没在设置里填服务地址。',
       );
     }
+    // 远程服务里的文件路径指的是「那台 Mac 的磁盘」——手机上传的临时路径它
+    // 看不到。所以远程模式把文件内容一起发过去，服务端落盘后再派单。
+    final remote = HelperEndpoint.fromSettings(settings) != null;
     try {
       final res = await _request(ep, 'POST', '/print', body: {
-        'file': file,
+        if (remote) ...{
+          'file_b64': base64Encode(await File(file).readAsBytes()),
+          'filename': file.split(Platform.pathSeparator).last,
+        } else
+          'file': file,
         if (serial != null) 'serial': serial,
         'stop_before_send': stopBeforeSend,
       }, timeout: timeout);
@@ -224,12 +262,12 @@ class CloudPrintHelper {
     String command, {
     Duration timeout = const Duration(seconds: 60),
   }) async {
-    final ep = await HelperEndpoint.load();
+    final ep = await endpoint();
     if (ep == null) {
       return const CloudControlResult(
         ok: false,
-        error: '本机打印 helper 未启动（找不到 ~/.bambudeck/helper.json）。'
-            '请先运行 python bconnect_service.py',
+        error: '没有可用的打印服务：Mac 上没跑 bconnect_service.py，'
+            '也没在设置里填服务地址。',
       );
     }
     try {
@@ -248,7 +286,7 @@ class CloudPrintHelper {
 
   /// 调试：读取 Connect 当前界面的按钮标题。
   Future<List<String>> buttons() async {
-    final ep = await HelperEndpoint.load();
+    final ep = await endpoint();
     if (ep == null) return const [];
     try {
       final res = await _request(ep, 'POST', '/buttons');

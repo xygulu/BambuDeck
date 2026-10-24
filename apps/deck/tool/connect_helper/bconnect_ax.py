@@ -20,6 +20,18 @@ import sys
 
 APP = "Bambu Connect"
 
+# 快速路径：直接调 AX API（ctypes），比 osascript/System Events 快 20 倍以上
+# （同样一棵树 0.1~0.2s vs 4~6s）。仅当本进程已获「辅助功能」授权且 Connect 在跑
+# 时可用；否则下面各函数自动回退到原来的 System Events 老路径。
+try:
+    import bconnect_axfast as _fast
+except Exception:  # noqa: BLE001  （缺库/无 ctypes 时不影响老路径）
+    _fast = None
+
+
+def _fast_ok() -> bool:
+    return _fast is not None and _fast.available()
+
 # JXA：手动递归 walk UI elements，收集 AXButton 的信息
 _WALK_JS = r"""
 function run(argv) {
@@ -145,6 +157,8 @@ def _osa_js(js: str, *args: str, timeout: int = 120) -> tuple[int, str, str]:
 
 def enable_ax() -> bool:
     """Electron 的 web 内容需要显式打开 AX；窗口重建后要重设。"""
+    if _fast_ok():
+        return _fast.enable_ax()
     r = subprocess.run(
         ["osascript", "-e",
          'tell application "System Events" to tell process "%s" '
@@ -154,6 +168,8 @@ def enable_ax() -> bool:
 
 
 def buttons() -> list[dict]:
+    if _fast_ok():
+        return _fast.buttons()
     rc, out, err = _osa_js(_WALK_JS, APP)
     if rc != 0:
         raise RuntimeError("AX dump 失败: %s" % (err or out))
@@ -197,6 +213,8 @@ function run(argv) {
 
 def texts() -> list[str]:
     """当前界面所有可见文字（用于判断停在哪一页）。"""
+    if _fast_ok():
+        return _fast.texts()
     rc, out, err = _osa_js(_TEXT_JS, APP)
     if rc != 0:
         return []
@@ -211,11 +229,15 @@ def has_text(want: str) -> bool:
 
 
 def press_text(want: str) -> bool:
+    if _fast_ok() and _fast.press_text(want):
+        return True
     rc, out, _ = _osa_js(_PRESS_JS, APP, "text", want)
     return rc == 0 and out in ("pressed", "clicked")
 
 
 def press_desc(desc: str) -> bool:
+    if _fast_ok() and _fast.press_desc(desc):
+        return True
     rc, out, _ = _osa_js(_PRESS_JS, APP, "desc", desc)
     return rc == 0 and out in ("pressed", "clicked")
 
@@ -264,6 +286,8 @@ function run(argv) {
 
 def press_at(x: float, y: float) -> bool:
     """点「包含 (x,y)」的按钮（屏幕坐标，含 3px 容差）。"""
+    if _fast_ok() and _fast.press_at(x, y):
+        return True
     rc, out, _ = _osa_js(_PRESS_AT_JS, APP, str(x), str(y))
     return rc == 0 and out in ("pressed", "clicked")
 
@@ -315,6 +339,8 @@ function run(argv) {
 
 def press_at_any(x: float, y: float) -> bool:
     """点「包含 (x,y)」的任意可点元素（屏幕坐标，取最深）。"""
+    if _fast_ok() and _fast.press_at_any(x, y):
+        return True
     rc, out, _ = _osa_js(_PRESS_ANY_AT_JS, APP, str(x), str(y))
     return rc == 0 and out in ("pressed", "clicked")
 
@@ -361,6 +387,8 @@ function run(argv) {
 
 def click_desc(want: str) -> bool:
     """按 description/name 点任意可点元素（用于 AXLink 导航）。"""
+    if _fast_ok() and _fast.press_desc_any(want):
+        return True
     rc, out, _ = _osa_js(_PRESS_DESC_JS, APP, want)
     return rc == 0 and out in ("pressed", "clicked")
 
@@ -422,6 +450,8 @@ def probe(texts: list[str] | None = None, buttons: list[str] | None = None) -> d
 
     返回 {"texts": {want: 命中文字}, "buttons": {want: {label,pos,size}}}。
     找不到的 want 不出现在对应 dict 里。"""
+    if _fast_ok():
+        return _fast.probe(list(texts or []), list(buttons or []))
     spec = json.dumps({"texts": texts or [], "buttons": buttons or []})
     rc, out, err = _osa_js(_PROBE_JS, APP, spec)
     if rc != 0 or out in ("no_windows", ""):
@@ -430,6 +460,149 @@ def probe(texts: list[str] | None = None, buttons: list[str] | None = None) -> d
         return json.loads(out)
     except ValueError:
         return {"texts": {}, "buttons": {}}
+
+
+# 发送页目标机名：设备选择器 AXGroup 的 description 形如「{名} chevron_down」。
+# 读它来确定打印/换盘实际会派到哪台（2026-10-23 一键换盘误派：之前从不选机，
+# 派单目标全看 Connect 当前选中的机器）。
+_SEND_TARGET_JS = r"""
+function run(argv) {
+  var se = Application("System Events");
+  var proc = se.processes.byName(argv[0]);
+  var hit = "";
+  function s(v){ if(v===null||v===undefined) return ""; try{return String(v);}catch(e){return "";} }
+  function walk(el, d) {
+    if (hit || d > 18) return;
+    var kids;
+    try { kids = el.uiElements(); } catch(e){ return; }
+    for (var i=0;i<kids.length;i++){
+      if (hit) return;
+      var k = kids[i], role="", desc="";
+      try{ role=s(k.role()); }catch(e){}
+      try{ desc=s(k.description()); }catch(e){}
+      if (role === "AXGroup" && desc.indexOf("chevron_down") >= 0) {
+        hit = desc.replace("chevron_down", "").trim();
+        return;
+      }
+      walk(k, d+1);
+    }
+  }
+  var ws;
+  try { ws = proc.windows(); } catch(e){ return ""; }
+  for (var w=0; w<ws.length && !hit; w++) walk(ws[w], 0);
+  return hit;
+}
+"""
+
+
+def send_target_device() -> str:
+    """发送页当前目标打印机名；不在发送页/读不到时返回空串。"""
+    if _fast_ok():
+        return _fast.send_target_device()
+    rc, out, _ = _osa_js(_SEND_TARGET_JS, APP)
+    if rc != 0:
+        return ""
+    return (out or "").strip()
+
+
+# 发送页设备选择器（下拉）的几何信息 + 真实鼠标点击。
+# 下拉选项不暴露在 macOS AX 树（AXShowMenu/AXRows/children 都读不到选项），
+# 只能靠「真实鼠标点击像素坐标」选机。这里读两个锚：
+#   group  = 含 chevron_down 的 AXGroup 的 {x,y,w,h}（用于算下拉项坐标）
+#   chevron = 下拉箭头 AXImage 的中心 (x,y)（用于展开下拉）
+_SELECTOR_JS = r"""
+function run(argv) {
+  var se = Application("System Events");
+  var proc = se.processes.byName(argv[0]);
+  var group = null, chevron = null;
+  function s(v){ if(v===null||v===undefined) return ""; try{return String(v);}catch(e){return "";} }
+  function walk(el, d) {
+    if ((group && chevron) || d > 18) return;
+    var kids;
+    try { kids = el.uiElements(); } catch(e){ return; }
+    for (var i=0;i<kids.length;i++){
+      if (group && chevron) return;
+      var k = kids[i], role="", desc="";
+      try{ role=s(k.role()); }catch(e){}
+      try{ desc=s(k.description()); }catch(e){}
+      if (!group && role === "AXGroup" && desc.indexOf("chevron_down") >= 0) {
+        var pos=[], size=[];
+        try{ pos=k.position(); }catch(e){}
+        try{ size=k.size(); }catch(e){}
+        group = {x:pos[0], y:pos[1], w:size[0], h:size[1]};
+      } else if (!chevron && role === "AXImage" && desc === "chevron_down") {
+        var p=[], sz=[];
+        try{ p=k.position(); }catch(e){}
+        try{ sz=k.size(); }catch(e){}
+        chevron = {x:p[0]+sz[0]/2, y:p[1]+sz[1]/2};
+      }
+      walk(k, d+1);
+    }
+  }
+  var ws; try{ ws=proc.windows(); }catch(e){ return "null"; }
+  for(var w=0; w<ws.length && !(group && chevron); w++) walk(ws[w], 0);
+  return JSON.stringify({group: group, chevron: chevron});
+}
+"""
+
+
+def fast_available() -> bool:
+    return _fast_ok()
+
+
+def app_ready() -> bool:
+    """Connect 在最前且窗口已拿到键盘焦点（能接收合成点击）。"""
+    if _fast_ok():
+        return _fast.frontmost() and _fast.app_focused()
+    return True
+
+
+def selector_frame() -> dict | None:
+    """发送页设备选择器的几何信息 {group:{x,y,w,h}, chevron:{x,y}}；读不到返回 None。"""
+    if _fast_ok():
+        info = _fast.send_info()
+        if not info:
+            return None
+        return {"group": info["group"], "chevron": info.get("chevron")}
+    rc, out, _ = _osa_js(_SELECTOR_JS, APP)
+    if rc != 0 or out in ("null", ""):
+        return None
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return None
+    if not data.get("group"):
+        return None
+    return {"group": data["group"], "chevron": data["chevron"]}
+
+
+_CLICK_JS = r"""
+ObjC.import('CoreGraphics');
+function run(argv) {
+  var x = parseFloat(argv[0]);
+  var y = parseFloat(argv[1]);
+  var pt = $.CGPointMake(x, y);
+  var down = $.CGEventCreateMouseEvent($(), $.kCGEventLeftMouseDown, pt, $.kCGMouseButtonLeft);
+  var up = $.CGEventCreateMouseEvent($(), $.kCGEventLeftMouseUp, pt, $.kCGMouseButtonLeft);
+  $.CGEventPost($.kCGHIDEventTap, down);
+  $.CGEventPost($.kCGHIDEventTap, up);
+  return "ok";
+}
+"""
+
+
+def click_at(x: float, y: float, timeout: int = 15) -> bool:
+    """真实鼠标点击屏幕坐标。
+
+    下拉选项不暴露在 AX 树（AX 点不动），也不能用 System Events 的 `click at`
+    —— 它要先把屏幕坐标反解成前台 app 的 UI 元素再点，遇到 Chrome 等复杂内容会挂死。
+    这里改用 CoreGraphics CGEvent 直接注入鼠标按下/抬起，不经过 AX 解析，快且稳。
+    注意：点的是「该坐标上最顶层窗口」，所以调用前需确保 Connect 窗口在最前。
+    """
+    if _fast_ok():
+        return _fast.click_at(x, y)
+    rc, _out, _err = _osa_js(_CLICK_JS, str(x), str(y), timeout=timeout)
+    return rc == 0
 
 
 # 控制按钮：一次遍历同时「确认在 name 详情页 + 找跳过锚 + 找图标按钮 + 点」。
@@ -489,11 +662,22 @@ function run(argv) {
 """
 
 
-def press_control(name: str, command: str) -> dict:
+def press_control(name: str, command: str, slow: bool = False) -> dict:
     """一次遍历：确认在 name 详情页 + 定位并点击控制按钮（pause/resume/stop）。
 
     返回 {"pressed": bool, "coord": [x,y], "reason": str}。reason 供上层决定是否导航：
-      not_on_detail（不在详情页）/ wrong_printer（别的打印机详情）/ idle_no_skip（空闲无跳过）。"""
+      not_on_detail（不在详情页）/ wrong_printer（别的打印机详情）/ idle_no_skip（空闲无跳过）。
+
+    快路径（ctypes 直读 AX）一次遍历 ~0.3s；osascript 版本同样一次遍历要 8s 左右
+    （每个属性一次 AppleEvent 往返），只有快路径不可用、或调用方要求 slow 时才走慢路径。
+    """
+    if _fast_ok() and not slow:
+        try:
+            r = _fast.press_control(name, command)
+        except Exception:  # noqa: BLE001  快路径异常不影响功能，回退慢路径
+            r = None
+        if r and not str(r.get("reason", "")).startswith("err:"):
+            return r
     rc, out, err = _osa_js(_PRESS_CONTROL_JS, APP, name, command)
     if rc != 0 or out in ("", "no_windows"):
         return {"pressed": False, "reason": "err:%s" % (err or out)}

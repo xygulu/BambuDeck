@@ -42,6 +42,8 @@ class AppSettings {
     this.hubEnabled = false,
     this.hubPort = 8787,
     this.hubToken = '',
+    this.helperUrl = '',
+    this.helperToken = '',
   });
 
   final bool notifyOnFinish;
@@ -85,6 +87,14 @@ class AppSettings {
   final int hubPort;
   final String hubToken;
 
+  /// 打印/控制服务（bconnect_service.py）的网络地址与令牌。
+  ///
+  /// 留空 = 用本机 `~/.bambudeck/helper.json`（Mac 上跑的 app 默认就这样）。
+  /// 手机/平板没有这个文件，填 `http://<Mac 的 IP>:8799` + 服务令牌即可：
+  /// 自动化仍然在那台 Mac 上执行，App 只是通过网络调用它。
+  final String helperUrl;
+  final String helperToken;
+
   AppSettings copyWith({
     bool? notifyOnFinish,
     bool? notifyOnError,
@@ -103,6 +113,8 @@ class AppSettings {
     bool? hubEnabled,
     int? hubPort,
     String? hubToken,
+    String? helperUrl,
+    String? helperToken,
   }) =>
       AppSettings(
         notifyOnFinish: notifyOnFinish ?? this.notifyOnFinish,
@@ -122,6 +134,8 @@ class AppSettings {
         hubEnabled: hubEnabled ?? this.hubEnabled,
         hubPort: hubPort ?? this.hubPort,
         hubToken: hubToken ?? this.hubToken,
+        helperUrl: helperUrl ?? this.helperUrl,
+        helperToken: helperToken ?? this.helperToken,
       );
 
   Map<String, dynamic> toJson() => {
@@ -142,6 +156,8 @@ class AppSettings {
         'hubEnabled': hubEnabled,
         'hubPort': hubPort,
         'hubToken': hubToken,
+        'helperUrl': helperUrl,
+        'helperToken': helperToken,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -164,6 +180,8 @@ class AppSettings {
         hubEnabled: j['hubEnabled'] as bool? ?? false,
         hubPort: j['hubPort'] as int? ?? 8787,
         hubToken: j['hubToken'] as String? ?? '',
+        helperUrl: j['helperUrl'] as String? ?? '',
+        helperToken: j['helperToken'] as String? ?? '',
       );
 }
 

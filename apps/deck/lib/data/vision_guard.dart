@@ -1,63 +1,18 @@
 import 'dart:async';
 import 'dart:typed_data';
-import 'dart:ui' as ui;
 
 import 'package:bambu_protocol/bambu_protocol.dart';
-import 'package:flutter/rendering.dart';
-import 'package:flutter/widgets.dart';
 
 import 'app_settings.dart';
+import 'camera_grabber.dart';
 import 'camera_profile.dart';
 import 'log_buffer.dart';
 import 'print_events.dart' show deckNotifier;
 import 'printer_profile.dart';
 import 'vision_llm.dart';
 
-/// RepaintBoundary keys that let the vision guard snapshot a live camera
-/// tile without touching its decoder (works for MJPEG and RTSP alike).
-///
-/// One camera can be mounted in several places at once (dashboard section,
-/// monitor pane, camera wall - IndexedStack keeps them all alive), and a
-/// GlobalKey may sit in only one place, so every mount site registers its
-/// own [slot]; [grab] tries each and uses the first that is laid out and
-/// visible (offstage pages have zero-size render objects).
-class CameraFrameRegistry {
-  final _keys = <String, GlobalKey>{};
-
-  GlobalKey keyFor(String cameraId, String slot) =>
-      _keys.putIfAbsent('$cameraId|$slot', () => GlobalKey());
-
-  /// PNG bytes of the camera's current picture, or null when no mounted
-  /// boundary could be rasterized (page hidden / camera off the screen).
-  Future<Uint8List?> grab(String cameraId,
-      {double pixelRatio = 0.75}) async {
-    for (final entry in _keys.entries) {
-      if (!entry.key.startsWith('$cameraId|')) continue;
-      final ctx = entry.value.currentContext;
-      if (ctx == null) continue;
-      // Not a widget-mount context - it lives for the render tree's life,
-      // and the attached/size checks below guard every use.
-      // ignore: use_build_context_synchronously
-      final ro = ctx.findRenderObject();
-      if (ro is! RenderRepaintBoundary || !ro.attached) continue;
-      if (ro.size.isEmpty || ro.debugNeedsLayout) continue;
-      try {
-        final image = await ro.toImage(pixelRatio: pixelRatio);
-        final data =
-            await image.toByteData(format: ui.ImageByteFormat.png);
-        image.dispose();
-        if (data != null && data.lengthInBytes > 0) {
-          return data.buffer.asUint8List();
-        }
-      } catch (_) {
-        // frame gone mid-capture - try the next slot
-      }
-    }
-    return null;
-  }
-}
-
-final frameRegistry = CameraFrameRegistry();
+export 'camera_grabber.dart'
+    show CameraFrameRegistry, frameRegistry, CameraGrabber, cameraGrabber;
 
 /// One completed analysis per printer, kept for the UI/log surface.
 class VisionReport {
@@ -86,11 +41,23 @@ class VisionGuard {
     Future<Uint8List?> Function(String cameraId)? grab,
     Future<bool> Function(String printerId)? pauseCommand,
     Future<VisionVerdict?> Function(Uint8List frame, AppSettings s)? analyze,
+    Future<Uint8List?> Function(CameraProfile camera)? grabSource,
   })  : _grab = grab ?? frameRegistry.grab,
+        _grabSourceOverride = grabSource,
         pauseCommand = pauseCommand ?? ((String _) async => false),
         _analyzeOverride = analyze;
 
+  /// Mounted-tile snapshot (cheap, no extra stream).
   final Future<Uint8List?> Function(String cameraId) _grab;
+
+  /// Headless fallback for when no tile is showing the camera; tests inject
+  /// this so they never open a real RTSP/bmjpeg connection.
+  final Future<Uint8List?> Function(CameraProfile camera)? _grabSourceOverride;
+
+  Future<Uint8List?> _grabSource(CameraProfile c) =>
+      (_grabSourceOverride ??
+          (camera) => cameraGrabber.grab(camera,
+              printers: printers, preferMounted: false))(c);
 
   /// Test/local-model seam: when set, replaces the HTTP vision client.
   final Future<VisionVerdict?> Function(Uint8List frame, AppSettings s)?
@@ -105,6 +72,10 @@ class VisionGuard {
 
   /// Synced from camerasProvider by the app shell.
   List<CameraProfile> cameras = const [];
+
+  /// Synced from printersProvider; the headless grab needs a Bambu camera's
+  /// bound printer for its IP / access code.
+  List<PrinterProfile> printers = const [];
 
   /// Latest verdict per printer id (null verdict = inconclusive run).
   final reports = <String, VisionReport>{};
@@ -169,19 +140,20 @@ class VisionGuard {
     }
   }
 
-  String? _cameraIdFor(String printerId) {
+  /// RTSP first (usually the better picture), then the machine's own camera.
+  CameraProfile? _cameraFor(String printerId) {
     for (final c in cameras) {
       if (c.sourceType == CameraSourceType.rtsp &&
           c.enabled &&
           c.printerIds.contains(printerId)) {
-        return c.id;
+        return c;
       }
     }
     for (final c in cameras) {
       if (c.sourceType == CameraSourceType.bambu &&
           c.enabled &&
           c.printerIds.contains(printerId)) {
-        return c.id;
+        return c;
       }
     }
     return null;
@@ -201,11 +173,18 @@ class VisionGuard {
 
   Future<void> _analyzeInner(PrinterProfile profile) async {
     final log = LogBuffer.instance.add;
-    final cameraId = _cameraIdFor(profile.id);
-    if (cameraId == null) return;
-    final png = await _grab(cameraId);
+    final camera = _cameraFor(profile.id);
+    if (camera == null) return;
+    // 界面正显示就走截图（不占视频流）；否则直连拉一帧 —— 后台判读时
+    // 摄像头卡通常根本没挂载，只有截图这一条路会永远失败。
+    var png = await _grab(camera.id);
     if (png == null) {
-      log('[视觉] ${profile.name}: 画面不可抓取(对应摄像头未显示?)');
+      log('[视觉] ${profile.name}: 界面未显示摄像头，改用直连视频源抓帧');
+      png = await _grabSource(camera);
+    }
+    if (png == null) {
+      log('[视觉] ${profile.name}: 画面不可抓取'
+          '(摄像头未显示，直连 ${camera.sourceType.name} 源也没取到帧)');
       _reports(profile.id,
           VisionReport(at: DateTime.now(), inconclusive: true));
       return;

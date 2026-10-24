@@ -320,9 +320,9 @@ const _vtTrayReport = '''
     "gcode_state": "RUNNING",
     "ams": {
       "tray_now": "254",
-      "vt_tray": {"tray_type": "PLA", "tray_color": "ABCDEF01", "remain": 66},
       "ams": []
-    }
+    },
+    "vt_tray": {"tray_type": "PLA", "tray_color": "ABCDEF01", "remain": 66}
   }
 }
 ''';

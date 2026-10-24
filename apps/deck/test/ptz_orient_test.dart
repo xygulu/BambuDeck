@@ -1,9 +1,14 @@
 import 'package:deck/data/ptz_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The pad convention: pan>0 = right, tilt>0 = up. `orientPanTilt` must undo
-/// the picture transform so a held key moves the view the way the flipped /
-/// rotated image shows it.
+/// The pad convention: pan>0 = right, tilt>0 = up.
+///
+/// Only the picture's horizontal mirror takes part in the mapping. The
+/// picture's rotation is intentionally not a parameter: rotation corrects how
+/// the camera is mounted, while the motors turn the camera in room space, so
+/// remapping through it would compensate the mounting twice (竖装/倒装 实测
+/// 2026-10-24: 90°/270° sent pan from the up/down keys, 180° sent tilt from the
+/// left/right keys).
 void main() {
   // direction -> (pan, tilt)
   const up = (0.0, 1.0);
@@ -11,55 +16,41 @@ void main() {
   const left = (-1.0, 0.0);
   const right = (1.0, 0.0);
 
-  (double, double) map(bool flipH, int deg, (double, double) d) =>
-      orientPanTilt(flipH: flipH, rotationDeg: deg, pan: d.$1, tilt: d.$2);
+  (double, double) map(bool flipH, (double, double) d) =>
+      orientPanTilt(flipH: flipH, pan: d.$1, tilt: d.$2);
 
   void expectVec((double, double) actual, (double, double) expected) {
     expect(actual.$1, closeTo(expected.$1, 1e-9));
     expect(actual.$2, closeTo(expected.$2, 1e-9));
   }
 
-  test('identity when no flip/rotation', () {
-    expectVec(map(false, 0, up), up);
-    expectVec(map(false, 0, down), down);
-    expectVec(map(false, 0, left), left);
-    expectVec(map(false, 0, right), right);
+  test('identity without a mirror', () {
+    expectVec(map(false, up), up);
+    expectVec(map(false, down), down);
+    expectVec(map(false, left), left);
+    expectVec(map(false, right), right);
   });
 
   test('horizontal mirror swaps left/right only', () {
-    expectVec(map(true, 0, up), up);
-    expectVec(map(true, 0, down), down);
-    expectVec(map(true, 0, left), right);
-    expectVec(map(true, 0, right), left);
+    expectVec(map(true, up), up);
+    expectVec(map(true, down), down);
+    expectVec(map(true, left), right);
+    expectVec(map(true, right), left);
   });
 
-  test('90° clockwise turns the compass one step', () {
-    expectVec(map(false, 90, up), left);
-    expectVec(map(false, 90, left), down);
-    expectVec(map(false, 90, down), right);
-    expectVec(map(false, 90, right), up);
+  test('up/down never leave the tilt axis', () {
+    for (final flip in [false, true]) {
+      expect(map(flip, up).$1, 0, reason: 'flip=$flip');
+      expect(map(flip, up).$2, 1, reason: 'flip=$flip');
+      expect(map(flip, down).$1, 0, reason: 'flip=$flip');
+      expect(map(flip, down).$2, -1, reason: 'flip=$flip');
+    }
   });
 
-  test('180° inverts both axes', () {
-    expectVec(map(false, 180, up), down);
-    expectVec(map(false, 180, down), up);
-    expectVec(map(false, 180, left), right);
-    expectVec(map(false, 180, right), left);
-  });
-
-  test('270° clockwise (90° counter-clockwise)', () {
-    expectVec(map(false, 270, up), right);
-    expectVec(map(false, 270, right), down);
-    expectVec(map(false, 270, down), left);
-    expectVec(map(false, 270, left), up);
-  });
-
-  test('flip + 90°: mirror left/right first, then rotate', () {
-    // Mirrored picture: up stays up-then-rotated, but left/right swap relative
-    // to the unflipped 90° case.
-    expectVec(map(true, 90, up), left);
-    expectVec(map(true, 90, left), up);
-    expectVec(map(true, 90, down), right);
-    expectVec(map(true, 90, right), down);
+  test('left/right never leave the pan axis', () {
+    for (final flip in [false, true]) {
+      expect(map(flip, left).$2, 0, reason: 'flip=$flip');
+      expect(map(flip, right).$2, 0, reason: 'flip=$flip');
+    }
   });
 }

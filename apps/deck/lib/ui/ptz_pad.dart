@@ -14,18 +14,16 @@ class PtzPad extends StatefulWidget {
     super.key,
     required this.client,
     this.flipH = false,
-    this.rotationDeg = 0,
     this.invertPan = false,
     this.invertTilt = false,
   });
 
   final PtzClient client;
 
-  /// Horizontal mirror / clockwise rotation applied to the picture; the pad
-  /// re-maps its keys through the inverse so the arrow always moves the view
-  /// the way the (flipped/rotated) image shows it.
+  /// Horizontal mirror applied to the picture; the pad mirrors its left/right
+  /// keys to match. The picture's rotation is deliberately not passed down -
+  /// see [orientPanTilt] for why the motors must not be re-rotated.
   final bool flipH;
-  final int rotationDeg;
 
   /// Per-camera axis calibration (云台方向校准 2026-10-21): flips applied
   /// after the orientation inverse for cameras whose physical pan/tilt runs
@@ -81,8 +79,7 @@ class _PtzPadState extends State<PtzPad> {
   }
 
   void _issue(double pan, double tilt) {
-    var (p, t) = orientPanTilt(
-        flipH: widget.flipH, rotationDeg: widget.rotationDeg, pan: pan, tilt: tilt);
+    var (p, t) = orientPanTilt(flipH: widget.flipH, pan: pan, tilt: tilt);
     if (widget.invertPan) p = -p;
     if (widget.invertTilt) t = -t;
     widget.client.move(pan: p, tilt: t).catchError((Object _) {});
