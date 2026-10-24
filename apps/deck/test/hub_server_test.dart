@@ -127,9 +127,7 @@ void main() {
 
     // 带账号密码 + 主/子码流标记: 云台和码流切换都要求这一种地址。
     CameraProfile ptzCamera(
-            {bool flipH = false,
-            int rotationDeg = 0,
-            String ptzCalibration = ''}) =>
+            {bool flipH = false, int rotationDeg = 0}) =>
         CameraProfile(
           id: 'c1',
           name: '工位相机',
@@ -138,7 +136,6 @@ void main() {
           printerIds: const ['p1'],
           flipH: flipH,
           rotationDeg: rotationDeg,
-          ptzCalibration: ptzCalibration,
         );
 
     Future<HttpClientResponse> get(String path,
@@ -529,11 +526,12 @@ void main() {
       expect(res.statusCode, 400);
     });
 
-    test('POST /api/ptz maps a held key through the flip', () async {
+    test('POST /api/ptz keeps the initial-view action under a flip',
+        () async {
       final fake = _FakePtz();
       hub.ptz = HubPtz(clientFactory: (_) => fake);
       hub.settings = hubSettings();
-      // 画面翻转后, 屏幕上的「向右」要变成机身的「向左」。
+      // 画面翻转由网页把云台盘一起镜像来完成, 命令本身保持初始画面语义。
       hub.cameras = [ptzCamera(flipH: true)];
       await hub.start();
 
@@ -543,27 +541,12 @@ void main() {
       final body = jsonDecode(await res.transform(utf8.decoder).join()) as Map;
       expect(body['ok'], isTrue);
       expect(fake.moves, hasLength(1));
-      expect(fake.moves.single.$1, -0.5);
+      expect(fake.moves.single.$1, 0.5);
       expect(fake.moves.single.$2, 0);
 
       final stop = await post('/api/ptz', {'camera': 'c1', 'action': 'stop'});
       expect(stop.statusCode, 200);
       expect(fake.stops, 1);
-    });
-
-    test('POST /api/ptz honours a measured key map', () async {
-      final fake = _FakePtz();
-      hub.ptz = HubPtz(clientFactory: (_) => fake);
-      hub.settings = hubSettings();
-      // 实测: 这台的「上」键让画面往左走, 所以按「上」要发左(pure pan-left).
-      hub.cameras = [ptzCamera(ptzCalibration: 'RLUD')];
-      await hub.start();
-
-      final res =
-          await post('/api/ptz', {'camera': 'c1', 'action': 'up', 'speed': 0.5});
-      expect(res.statusCode, 200);
-      expect(fake.moves.single.$1, -0.5);
-      expect(fake.moves.single.$2, 0);
     });
 
     test('POST /api/ptz reports an unreachable camera as unavailable', () async {

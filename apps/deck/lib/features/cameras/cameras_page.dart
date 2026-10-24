@@ -144,8 +144,6 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
               rotationDeg: camera.rotationDeg,
               ptzInvertPan: camera.ptzInvertPan,
               ptzInvertTilt: camera.ptzInvertTilt,
-              ptzCalibration: camera.ptzCalibration,
-              onSetPtzCalibration: ptzCalibrationSetter(ref, camera),
             )
           else
             Container(
@@ -218,8 +216,6 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                         rotationDeg: camera.rotationDeg,
                         ptzInvertPan: camera.ptzInvertPan,
                         ptzInvertTilt: camera.ptzInvertTilt,
-                        ptzCalibration: camera.ptzCalibration,
-                        onSetPtzCalibration: ptzCalibrationSetter(ref, camera),
                       )
                     : Center(
                         child: Text(

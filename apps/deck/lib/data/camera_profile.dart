@@ -44,7 +44,6 @@ class CameraProfile {
     this.rotationDeg = 0,
     this.ptzInvertPan = false,
     this.ptzInvertTilt = false,
-    this.ptzCalibration = '',
   });
 
   final String id;
@@ -74,19 +73,11 @@ class CameraProfile {
   /// PTZ direction calibration (云台方向校准 2026-10-21): some cameras -
   /// ceiling mounts, certain EZVIZ firmware - physically invert one axis
   /// against the HIK/ONVIF command semantics, so two arrows track the
-  /// picture and the other two move the wrong way. These flips the pad's
-  /// pan / tilt after the picture-orientation inverse.
+  /// picture and the other two move the wrong way. These flip the pad's
+  /// pan / tilt in the picture's initial view; the picture's own
+  /// flip/rotation is carried by the pad widget instead.
   final bool ptzInvertPan;
   final bool ptzInvertTilt;
-
-  /// Measured key map from the 云台方向校准 wizard (2026-10-24): four letters,
-  /// one per key in `UDLR` order, each the direction the picture was seen to
-  /// move when that key was pressed. Empty = not calibrated.
-  ///
-  /// A mount + rotation combination can bend the keys in ways no formula
-  /// predicted reliably (90°/270° sent pan from the up/down keys, 180° sent
-  /// tilt from left/right), so the pad trusts what was actually observed.
-  final String ptzCalibration;
 
   CameraProfile copyWith({
     String? name,
@@ -98,7 +89,6 @@ class CameraProfile {
     int? rotationDeg,
     bool? ptzInvertPan,
     bool? ptzInvertTilt,
-    String? ptzCalibration,
   }) =>
       CameraProfile(
         id: id,
@@ -112,7 +102,6 @@ class CameraProfile {
         rotationDeg: rotationDeg ?? this.rotationDeg,
         ptzInvertPan: ptzInvertPan ?? this.ptzInvertPan,
         ptzInvertTilt: ptzInvertTilt ?? this.ptzInvertTilt,
-        ptzCalibration: ptzCalibration ?? this.ptzCalibration,
       );
 
   /// Playback URL, resolving the bambu type against the printer profile
@@ -164,7 +153,6 @@ class CameraProfile {
         'rotationDeg': rotationDeg,
         'ptzInvertPan': ptzInvertPan,
         'ptzInvertTilt': ptzInvertTilt,
-        'ptzCalibration': ptzCalibration,
       };
 
   factory CameraProfile.fromJson(Map<String, dynamic> j) {
@@ -187,7 +175,6 @@ class CameraProfile {
       rotationDeg: j['rotationDeg'] as int? ?? 0,
       ptzInvertPan: j['ptzInvertPan'] as bool? ?? false,
       ptzInvertTilt: j['ptzInvertTilt'] as bool? ?? false,
-      ptzCalibration: j['ptzCalibration'] as String? ?? '',
     );
   }
 }

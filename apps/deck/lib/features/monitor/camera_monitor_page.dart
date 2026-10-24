@@ -306,10 +306,8 @@ class _CameraPane extends ConsumerWidget {
                         rotationDeg: c.rotationDeg,
                         ptzInvertPan: c.ptzInvertPan,
                         ptzInvertTilt: c.ptzInvertTilt,
-                        ptzCalibration: c.ptzCalibration,
                         onToggleFlip: flipToggler(ref, c),
                         onSetRotation: rotationSetter(ref, c),
-                        onSetPtzCalibration: ptzCalibrationSetter(ref, c),
                       ),
                     )
                   : _unavailableBox(c, url),
@@ -458,10 +456,8 @@ class _CameraGridCard extends ConsumerWidget {
                       rotationDeg: c.rotationDeg,
                       ptzInvertPan: c.ptzInvertPan,
                       ptzInvertTilt: c.ptzInvertTilt,
-                      ptzCalibration: c.ptzCalibration,
                       onToggleFlip: flipToggler(ref, c),
                       onSetRotation: rotationSetter(ref, c),
-                      onSetPtzCalibration: ptzCalibrationSetter(ref, c),
                     ),
                   )
                 : Container(

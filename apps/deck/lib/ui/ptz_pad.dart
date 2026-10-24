@@ -13,34 +13,17 @@ class PtzPad extends StatefulWidget {
   const PtzPad({
     super.key,
     required this.client,
-    this.flipH = false,
-    this.rotationDeg = 0,
     this.invertPan = false,
     this.invertTilt = false,
-    this.calibration = '',
-    this.onCalibrate,
   });
 
   final PtzClient client;
 
-  /// Horizontal mirror / clockwise rotation applied to the picture; the pad
-  /// re-maps its keys through the inverse so the arrow always moves the view
-  /// the way the (flipped/rotated) image shows it.
-  final bool flipH;
-  final int rotationDeg;
-
-  /// Measured key map from the calibration wizard; supersedes every other
-  /// correction when present (see [applyPtzCalibration]).
-  final String calibration;
-
-  /// Opens the calibration wizard; when set, the pad's centre becomes the
-  /// entry point (方向键不对时一眼能找到, 用户反馈 2026-10-24).
-  final VoidCallback? onCalibrate;
-
-  /// Per-camera axis calibration (云台方向校准 2026-10-21): flips applied
-  /// after the orientation inverse for cameras whose physical pan/tilt runs
-  /// opposite to the HIK/ONVIF command semantics (one pair of arrows wrong
-  /// in every orientation is the tell).
+  /// Per-camera axis calibration (云台方向校准 2026-10-21): flips applied to
+  /// the base (rotation-0) key actions for cameras whose physical pan/tilt
+  /// runs opposite to the HIK/ONVIF command semantics. The picture's own
+  /// flip/rotation is handled by drawing this pad through the same transform
+  /// as the video, never by remapping commands.
   final bool invertPan;
   final bool invertTilt;
 
@@ -91,10 +74,7 @@ class _PtzPadState extends State<PtzPad> {
   }
 
   void _issue(double pan, double tilt) {
-    final (p, t) = resolvedPtzMove(
-      calibration: widget.calibration,
-      flipH: widget.flipH,
-      rotationDeg: widget.rotationDeg,
+    final (p, t) = ptzMove(
       invertPan: widget.invertPan,
       invertTilt: widget.invertTilt,
       pan: pan,
@@ -139,28 +119,6 @@ class _PtzPadState extends State<PtzPad> {
                     width: 16,
                     height: 16,
                     child: CircularProgressIndicator(strokeWidth: 2)))
-          else if (widget.onCalibrate != null)
-            Center(
-              child: Tooltip(
-                message:
-                    widget.calibration.isEmpty ? '云台方向校准' : '云台方向已校准,可重新校准',
-                child: IconButton(
-                  onPressed: widget.onCalibrate,
-                  icon: Icon(
-                      widget.calibration.isEmpty
-                          ? Icons.tune
-                          : Icons.check_circle_outline,
-                      size: 18,
-                      color: widget.calibration.isEmpty
-                          ? Colors.white70
-                          : Colors.greenAccent),
-                  style: IconButton.styleFrom(
-                    minimumSize: const Size(28, 28),
-                    visualDensity: VisualDensity.compact,
-                  ),
-                ),
-              ),
-            )
           else
             const Center(
                 child: Icon(Icons.videocam_rounded,

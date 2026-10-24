@@ -1008,7 +1008,8 @@ const CAM_ICON = {
 
 const byCam = id => lastCameras.find(c => c.id === id) || null;
 
-// App 的 _orient(): 先水平翻转再顺时针旋转, 只转画面不动按钮。
+// App 的 _orient(): 先水平翻转再顺时针旋转。画面和云台盘用同一个变换,
+// 云台键跟着画面一起转/翻, 命令本身保持初始画面的语义。
 function camTransform(c) {
   const parts = [];
   if (c.flipH) parts.push('scaleX(-1)');
@@ -1033,7 +1034,8 @@ function camChipsHtml(c) {
 // 云台盘: 常显 (不可用时变淡), 按住方向键每 250ms 重发, 松手发 stop。
 function camPadHtml(c) {
   if (!c.ptz) return '';
-  return `<div class="ptz" data-cam="${esc(c.id)}" title="云台">
+  return `<div class="ptz" data-cam="${esc(c.id)}" title="云台"
+      style="transform:${camTransform(c)}">
     <div class="mid">${CAM_ICON.cam}</div>
     <button class="up" data-ptz="up" aria-label="上" title="上">${CAM_ICON.up}</button>
     <button class="down" data-ptz="down" aria-label="下" title="下">${CAM_ICON.down}</button>
@@ -1154,6 +1156,11 @@ function paintCam() {
     if (!c) continue;
     img.style.transform = camTransform(c);
     img.classList.toggle('rot', c.rotation === 90 || c.rotation === 270);
+  }
+  // 云台盘和画面用同一个变换: 方向键跟着画面一起旋转/翻转。
+  for (const pad of document.querySelectorAll('.ptz[data-cam]')) {
+    const c = byCam(pad.dataset.cam);
+    if (c) pad.style.transform = camTransform(c);
   }
 }
 

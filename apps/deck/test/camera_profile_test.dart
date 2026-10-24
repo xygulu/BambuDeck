@@ -33,24 +33,6 @@ void main() {
     expect(back.enabled, isTrue);
   });
 
-  test('camera profile JSON keeps a measured PTZ key map', () {
-    final cam = CameraProfile(
-      id: 'c1',
-      name: '竖装',
-      sourceType: CameraSourceType.rtsp,
-      url: 'rtsp://u:p@10.0.0.3:554/1',
-      ptzCalibration: 'RLUD',
-    );
-    final back = CameraProfile.fromJson(
-        jsonDecode(jsonEncode(cam.toJson())) as Map<String, dynamic>);
-    expect(back.ptzCalibration, 'RLUD');
-    // Profiles written before calibration existed read as uncalibrated.
-    final legacyJson = jsonDecode(jsonEncode(cam.toJson())) as Map;
-    legacyJson.remove('ptzCalibration');
-    expect(CameraProfile.fromJson(legacyJson.cast<String, dynamic>())
-        .ptzCalibration, '');
-  });
-
   test('legacy single printerId migrates into printerIds', () {
     final back = CameraProfile.fromJson({
       'id': 'c9',

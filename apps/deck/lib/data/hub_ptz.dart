@@ -8,9 +8,10 @@ import 'ptz_client.dart';
 /// ONVIF SOAP round-trip plus, for EZVIZ, an HCNetSDK login).
 ///
 /// Directions arrive in screen space (right/up positive) exactly like the
-/// App's PtzPad; the camera's measured key map / orientation corrections are
-/// applied here ([resolvedPtzMove]), so the buffer-independent mapping stays
-/// in one place.
+/// App's PtzPad; the camera's axis flips are applied here ([ptzMove]). The
+/// picture's flip/rotation is not applied to commands at all - the web page
+/// draws the pad through the same transform as the video, so the keys follow
+/// the picture.
 class HubPtz {
   HubPtz({PtzClient Function(CameraProfile camera)? clientFactory})
       : _factory = clientFactory;
@@ -53,10 +54,7 @@ class HubPtz {
   Future<bool> move(CameraProfile c,
       {required double pan, required double tilt}) async {
     if (!await probe(c)) return false;
-    final (p, t) = resolvedPtzMove(
-      calibration: c.ptzCalibration,
-      flipH: c.flipH,
-      rotationDeg: c.rotationDeg,
+    final (p, t) = ptzMove(
       invertPan: c.ptzInvertPan,
       invertTilt: c.ptzInvertTilt,
       pan: pan,
