@@ -50,8 +50,10 @@ class CameraTileSpec {
     this.rotationDeg = 0,
     this.ptzInvertPan = false,
     this.ptzInvertTilt = false,
+    this.ptzCalibration = '',
     this.onToggleFlip,
     this.onSetRotation,
+    this.onSetPtzCalibration,
   });
 
   final String id;
@@ -69,8 +71,10 @@ class CameraTileSpec {
   /// PTZ axis calibration carried to [CameraTile] (云台方向校准).
   final bool ptzInvertPan;
   final bool ptzInvertTilt;
+  final String ptzCalibration;
   final VoidCallback? onToggleFlip;
   final ValueChanged<int>? onSetRotation;
+  final ValueChanged<String>? onSetPtzCalibration;
 }
 
 /// The camera tiles for one printer, in display order: built-in camera
@@ -105,8 +109,10 @@ List<CameraTileSpec> buildCameraSpecs(WidgetRef ref, PrinterProfile profile) {
       rotationDeg: c.rotationDeg,
       ptzInvertPan: c.ptzInvertPan,
       ptzInvertTilt: c.ptzInvertTilt,
+      ptzCalibration: c.ptzCalibration,
       onToggleFlip: flipToggler(ref, c),
       onSetRotation: rotationSetter(ref, c),
+      onSetPtzCalibration: ptzCalibrationSetter(ref, c),
     ));
   }
   return specs;
@@ -217,8 +223,10 @@ class PrinterCameraSection extends ConsumerWidget {
                   rotationDeg: spec.rotationDeg,
                   ptzInvertPan: spec.ptzInvertPan,
                   ptzInvertTilt: spec.ptzInvertTilt,
+                  ptzCalibration: spec.ptzCalibration,
                   onToggleFlip: spec.onToggleFlip,
                   onSetRotation: spec.onSetRotation,
+                  onSetPtzCalibration: spec.onSetPtzCalibration,
                 ),
               ),
             ),
@@ -539,8 +547,10 @@ class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
               rotationDeg: spec.rotationDeg,
               ptzInvertPan: spec.ptzInvertPan,
               ptzInvertTilt: spec.ptzInvertTilt,
+              ptzCalibration: spec.ptzCalibration,
               onToggleFlip: spec.onToggleFlip,
               onSetRotation: spec.onSetRotation,
+              onSetPtzCalibration: spec.onSetPtzCalibration,
             ),
           ),
           Positioned(
@@ -572,8 +582,12 @@ class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
             onToggleQuality: spec.onToggleQuality,
             flipH: spec.flipH,
             rotationDeg: spec.rotationDeg,
+            ptzInvertPan: spec.ptzInvertPan,
+            ptzInvertTilt: spec.ptzInvertTilt,
+            ptzCalibration: spec.ptzCalibration,
             onToggleFlip: spec.onToggleFlip,
             onSetRotation: spec.onSetRotation,
+            onSetPtzCalibration: spec.onSetPtzCalibration,
           ),
         ),
         Positioned(

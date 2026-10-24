@@ -18,6 +18,7 @@ import '../data/ptz_client.dart';
 import '../data/rtsp_quality.dart';
 import '../data/vision_guard.dart';
 import 'mjpeg_tile.dart';
+import 'ptz_calibrate.dart';
 import 'ptz_pad.dart';
 
 /// Callback factory for the tiles' main/sub quality chip: null when the
@@ -36,8 +37,9 @@ VoidCallback? qualityToggler(WidgetRef ref, CameraProfile camera) =>
 
 /// Toggles the owning camera's horizontal mirror (画面翻转 2026-10-20).
 VoidCallback flipToggler(WidgetRef ref, CameraProfile camera) => () {
-      ref.read(camerasProvider.notifier).replace(
-          camera.copyWith(flipH: !camera.flipH));
+      ref
+          .read(camerasProvider.notifier)
+          .replace(camera.copyWith(flipH: !camera.flipH));
     };
 
 /// Sets the owning camera's clockwise rotation (画面旋转 2026-10-20).
@@ -45,6 +47,13 @@ ValueChanged<int> rotationSetter(WidgetRef ref, CameraProfile camera) =>
     (deg) => ref
         .read(camerasProvider.notifier)
         .replace(camera.copyWith(rotationDeg: deg));
+
+/// Persists a measured PTZ key map (云台方向校准 2026-10-24).
+ValueChanged<String> ptzCalibrationSetter(
+        WidgetRef ref, CameraProfile camera) =>
+    (map) => ref
+        .read(camerasProvider.notifier)
+        .replace(camera.copyWith(ptzCalibration: map));
 
 /// Live video tile for one stream URL (PRD FR-3). Wraps a media_kit
 /// player with connect/error states and a manual retry; RTSP streams get
@@ -68,8 +77,10 @@ class CameraTile extends ConsumerStatefulWidget {
     this.rotationDeg = 0,
     this.ptzInvertPan = false,
     this.ptzInvertTilt = false,
+    this.ptzCalibration = '',
     this.onToggleFlip,
     this.onSetRotation,
+    this.onSetPtzCalibration,
     this.cameraId,
     this.frameSlot = 'main',
   });
@@ -98,6 +109,13 @@ class CameraTile extends ConsumerStatefulWidget {
   final bool ptzInvertPan;
   final bool ptzInvertTilt;
 
+  /// Measured key map passed through to [PtzPad]; '' = not calibrated.
+  final String ptzCalibration;
+
+  /// Persists a measured key map from the calibration dialog; null hides that
+  /// menu entry.
+  final ValueChanged<String>? onSetPtzCalibration;
+
   /// Toggles [flipH] on the owning camera; null hides the orientation menu.
   final VoidCallback? onToggleFlip;
 
@@ -114,8 +132,11 @@ class CameraTile extends ConsumerStatefulWidget {
   /// Mount-site discriminator for the frame boundary registry.
   final String frameSlot;
 
-  /// Whether the orientation menu is shown (either callback present).
-  bool get _showOrientation => onToggleFlip != null || onSetRotation != null;
+  /// Whether the orientation menu is shown (any of its actions present).
+  bool get _showOrientation =>
+      onToggleFlip != null ||
+      onSetRotation != null ||
+      onSetPtzCalibration != null;
 
   @override
   ConsumerState<CameraTile> createState() => _CameraTileState();
@@ -381,29 +402,45 @@ class _CameraTileState extends ConsumerState<CameraTile> {
   /// ONVIF is enabled in its own app. The pad stays visible (dimmed) when no
   /// transport is reachable.
   Widget _ptzPadFor(String url) {
-    final u = Uri.tryParse(url);
+    final client = _ptzClient();
+    if (client == null) return const SizedBox.shrink();
+    return PtzPad(
+      client: client,
+      flipH: widget.flipH,
+      rotationDeg: widget.rotationDeg,
+      invertPan: widget.ptzInvertPan,
+      invertTilt: widget.ptzInvertTilt,
+      calibration: widget.ptzCalibration,
+    );
+  }
+
+  /// Parsed stream URL when it can carry PTZ credentials, else null.
+  Uri? _ptzUri() {
+    final u = Uri.tryParse(widget.streamUrl);
     if (u == null ||
         (u.scheme != 'rtsp' && u.scheme != 'rtsps') ||
         u.userInfo.isEmpty ||
         u.host.isEmpty) {
-      return const SizedBox.shrink();
+      return null;
     }
-    if (_ptz == null) {
+    return u;
+  }
+
+  /// Lazy PTZ client for this tile (probe-once, shared by the pad and the
+  /// calibration dialog); null for URLs that cannot carry credentials.
+  PtzClient? _ptzClient() {
+    final u = _ptzUri();
+    if (u == null) return null;
+    return _ptz ??= () {
       final sep = u.userInfo.indexOf(':');
       final user = sep < 0 ? u.userInfo : u.userInfo.substring(0, sep);
       final pass =
           sep < 0 ? '' : Uri.decodeComponent(u.userInfo.substring(sep + 1));
-      _ptz = FallbackPtz([
+      return FallbackPtz([
         OnvifPtz(host: u.host, port: 8899, username: user, password: pass),
         HcNetSdkPtz(host: u.host, username: user, password: pass),
       ]);
-    }
-    return PtzPad(
-      client: _ptz!,
-      flipH: widget.flipH,
-      invertPan: widget.ptzInvertPan,
-      invertTilt: widget.ptzInvertTilt,
-    );
+    }();
   }
 
   /// Registers the video picture for the vision guard's snapshots when a
@@ -411,7 +448,8 @@ class _CameraTileState extends ConsumerState<CameraTile> {
   Widget _frameBoundary(Widget child) {
     final id = widget.cameraId;
     if (id == null) return child;
-    return RepaintBoundary(key: frameRegistry.keyFor(id, widget.frameSlot), child: child);
+    return RepaintBoundary(
+        key: frameRegistry.keyFor(id, widget.frameSlot), child: child);
   }
 
   /// Applies the persisted flip/rotation to the video frame only (the
@@ -442,39 +480,71 @@ class _CameraTileState extends ConsumerState<CameraTile> {
       onSelected: (v) {
         if (v == 'flip') {
           widget.onToggleFlip?.call();
+        } else if (v == 'calibrate') {
+          _calibratePtz();
         } else {
           widget.onSetRotation?.call(int.parse(v));
         }
       },
       itemBuilder: (_) => [
-        PopupMenuItem(
-          value: 'flip',
-          child: Row(children: [
-            Icon(
-                widget.flipH
-                    ? Icons.check_box
-                    : Icons.check_box_outline_blank,
-                size: 16),
-            const SizedBox(width: 8),
-            const Text('水平翻转', style: TextStyle(fontSize: 13)),
-          ]),
-        ),
-        for (final deg in const [0, 90, 180, 270])
+        if (widget.onToggleFlip != null)
           PopupMenuItem(
-            value: '$deg',
+            value: 'flip',
             child: Row(children: [
               Icon(
-                  widget.rotationDeg == deg
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_unchecked,
+                  widget.flipH
+                      ? Icons.check_box
+                      : Icons.check_box_outline_blank,
                   size: 16),
               const SizedBox(width: 8),
-              Text('旋转 ${deg == 0 ? '0°(正常)' : '$deg°'}',
+              const Text('水平翻转', style: TextStyle(fontSize: 13)),
+            ]),
+          ),
+        if (widget.onSetRotation != null)
+          for (final deg in const [0, 90, 180, 270])
+            PopupMenuItem(
+              value: '$deg',
+              child: Row(children: [
+                Icon(
+                    widget.rotationDeg == deg
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_unchecked,
+                    size: 16),
+                const SizedBox(width: 8),
+                Text('旋转 ${deg == 0 ? '0°(正常)' : '$deg°'}',
+                    style: const TextStyle(fontSize: 13)),
+              ]),
+            ),
+        if (_ptzUri() != null && widget.onSetPtzCalibration != null) ...[
+          const PopupMenuDivider(),
+          PopupMenuItem(
+            value: 'calibrate',
+            child: Row(children: [
+              Icon(
+                  widget.ptzCalibration.isEmpty
+                      ? Icons.tune
+                      : Icons.check_circle,
+                  size: 16),
+              const SizedBox(width: 8),
+              Text(widget.ptzCalibration.isEmpty ? '云台方向校准' : '云台方向校准(已校准)',
                   style: const TextStyle(fontSize: 13)),
             ]),
           ),
+        ],
       ],
     );
+  }
+
+  /// Opens the measured-key-map wizard for this tile's posable camera.
+  Future<void> _calibratePtz() async {
+    final client = _ptzClient();
+    final save = widget.onSetPtzCalibration;
+    if (client == null || save == null) return;
+    final ok = await client.probe().catchError((Object _) => false);
+    if (!ok || !mounted) return;
+    final result = await showPtzCalibrateDialog(context,
+        client: client, current: widget.ptzCalibration);
+    if (result != null) save(result);
   }
 
   Widget _overlay(Widget indicator, String text) => Center(

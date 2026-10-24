@@ -8,9 +8,9 @@ import 'ptz_client.dart';
 /// ONVIF SOAP round-trip plus, for EZVIZ, an HCNetSDK login).
 ///
 /// Directions arrive in screen space (right/up positive) exactly like the
-/// App's PtzPad; the picture's mirror and the camera's per-camera axis
-/// calibration are applied here, so the buffer-independent mapping stays in
-/// one place ([orientPanTilt]).
+/// App's PtzPad; the camera's measured key map / orientation corrections are
+/// applied here ([resolvedPtzMove]), so the buffer-independent mapping stays
+/// in one place.
 class HubPtz {
   HubPtz({PtzClient Function(CameraProfile camera)? clientFactory})
       : _factory = clientFactory;
@@ -53,9 +53,15 @@ class HubPtz {
   Future<bool> move(CameraProfile c,
       {required double pan, required double tilt}) async {
     if (!await probe(c)) return false;
-    var (p, t) = orientPanTilt(flipH: c.flipH, pan: pan, tilt: tilt);
-    if (c.ptzInvertPan) p = -p;
-    if (c.ptzInvertTilt) t = -t;
+    final (p, t) = resolvedPtzMove(
+      calibration: c.ptzCalibration,
+      flipH: c.flipH,
+      rotationDeg: c.rotationDeg,
+      invertPan: c.ptzInvertPan,
+      invertTilt: c.ptzInvertTilt,
+      pan: pan,
+      tilt: tilt,
+    );
     await _clientFor(c).move(pan: p, tilt: t);
     return true;
   }

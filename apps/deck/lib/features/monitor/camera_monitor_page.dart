@@ -27,8 +27,7 @@ class CameraMonitorPage extends ConsumerStatefulWidget {
   final VoidCallback onAddCamera;
 
   @override
-  ConsumerState<CameraMonitorPage> createState() =>
-      _CameraMonitorPageState();
+  ConsumerState<CameraMonitorPage> createState() => _CameraMonitorPageState();
 }
 
 class _CameraMonitorPageState extends ConsumerState<CameraMonitorPage> {
@@ -115,8 +114,8 @@ class _CameraList extends ConsumerWidget {
           padding: const EdgeInsets.fromLTRB(14, 12, 8, 4),
           child: Row(children: [
             Text('摄像头 (${cameras.length})',
-                style: const TextStyle(
-                    fontSize: 14, fontWeight: FontWeight.w700)),
+                style:
+                    const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
             const Spacer(),
             IconButton(
               icon: const Icon(Icons.cloud_download_outlined, size: 20),
@@ -171,8 +170,7 @@ class _CameraListCard extends StatelessWidget {
     ];
     final subtitle = [
       c.sourceType.label,
-      if (c.sourceType == CameraSourceType.rtsp &&
-          rtspQualitySwappable(c.url))
+      if (c.sourceType == CameraSourceType.rtsp && rtspQualitySwappable(c.url))
         c.quality == RtspQuality.main ? '主码流' : '子码流',
     ].join(' · ');
 
@@ -274,14 +272,13 @@ class _CameraPane extends ConsumerWidget {
           padding: const EdgeInsets.fromLTRB(16, 10, 8, 0),
           child: Row(children: [
             Text(c.name,
-                style: const TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.w700)),
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
             const Spacer(),
             TextButton.icon(
               onPressed: () => bindPrintersDialog(context, ref, c),
               icon: const Icon(Icons.tune, size: 16),
-              label:
-                  const Text('绑定打印机', style: TextStyle(fontSize: 12)),
+              label: const Text('绑定打印机', style: TextStyle(fontSize: 12)),
             ),
             IconButton(
               icon: const Icon(Icons.edit_outlined, size: 19),
@@ -309,28 +306,28 @@ class _CameraPane extends ConsumerWidget {
                         rotationDeg: c.rotationDeg,
                         ptzInvertPan: c.ptzInvertPan,
                         ptzInvertTilt: c.ptzInvertTilt,
+                        ptzCalibration: c.ptzCalibration,
                         onToggleFlip: flipToggler(ref, c),
                         onSetRotation: rotationSetter(ref, c),
+                        onSetPtzCalibration: ptzCalibrationSetter(ref, c),
                       ),
                     )
                   : _unavailableBox(c, url),
               const Padding(
                 padding: EdgeInsets.only(top: 14, bottom: 6),
                 child: Text('绑定的打印机',
-                    style: TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600)),
+                    style:
+                        TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
               ),
               for (final p in bound)
                 MonitorPrinterCard(
                   profile: p,
                   selected: false,
                   onTap: () {
-                    ref
-                        .read(monitorSelectedPrinterProvider.notifier)
-                        .state = p.id;
-                    ref
-                        .read(monitorPerspectiveProvider.notifier)
-                        .state = MonitorPerspective.printers;
+                    ref.read(monitorSelectedPrinterProvider.notifier).state =
+                        p.id;
+                    ref.read(monitorPerspectiveProvider.notifier).state =
+                        MonitorPerspective.printers;
                   },
                 ),
               if (bound.isEmpty)
@@ -361,8 +358,8 @@ class _CameraPane extends ConsumerWidget {
                 : url == null
                     ? '未配置视频源(机内摄像头需要局域网直连打印机)'
                     : '视频源地址为空',
-            style: const TextStyle(
-                fontSize: 13, color: DeckColors.textSecondary),
+            style:
+                const TextStyle(fontSize: 13, color: DeckColors.textSecondary),
           ),
         ),
       );
@@ -396,9 +393,7 @@ Future<void> bindPrintersDialog(
                     title: Text('${p.name}(${p.modeLabel})',
                         style: const TextStyle(fontSize: 13)),
                     onChanged: (v) => setState(() {
-                      v == true
-                          ? selected.add(p.id)
-                          : selected.remove(p.id);
+                      v == true ? selected.add(p.id) : selected.remove(p.id);
                     }),
                   ),
             ]),
@@ -463,17 +458,17 @@ class _CameraGridCard extends ConsumerWidget {
                       rotationDeg: c.rotationDeg,
                       ptzInvertPan: c.ptzInvertPan,
                       ptzInvertTilt: c.ptzInvertTilt,
+                      ptzCalibration: c.ptzCalibration,
                       onToggleFlip: flipToggler(ref, c),
                       onSetRotation: rotationSetter(ref, c),
+                      onSetPtzCalibration: ptzCalibrationSetter(ref, c),
                     ),
                   )
                 : Container(
                     color: Colors.black,
                     alignment: Alignment.center,
                     child: Text(
-                      !c.enabled
-                          ? '已停用'
-                          : '未配置视频源',
+                      !c.enabled ? '已停用' : '未配置视频源',
                       style: const TextStyle(
                           fontSize: 13, color: DeckColors.textSecondary),
                     ),
@@ -494,8 +489,7 @@ class _CameraGridCard extends ConsumerWidget {
                       Text(
                         c.sourceType.label,
                         style: const TextStyle(
-                            fontSize: 12,
-                            color: DeckColors.textSecondary),
+                            fontSize: 12, color: DeckColors.textSecondary),
                       ),
                     ]),
               ),
@@ -528,12 +522,10 @@ class _EmptyState extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(Icons.videocam_off_outlined,
-              size: 56,
-              color: DeckColors.textSecondary.withValues(alpha: 0.6)),
+              size: 56, color: DeckColors.textSecondary.withValues(alpha: 0.6)),
           const SizedBox(height: 12),
           const Text('还没有摄像头',
-              style: TextStyle(
-                  fontSize: 16, color: DeckColors.textSecondary)),
+              style: TextStyle(fontSize: 16, color: DeckColors.textSecondary)),
           const SizedBox(height: 6),
           const Text('RTSP/ONVIF 网络摄像头,或打印机自带摄像头',
               style: TextStyle(fontSize: 13, color: DeckColors.textSecondary)),

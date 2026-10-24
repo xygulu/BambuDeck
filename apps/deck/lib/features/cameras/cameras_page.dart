@@ -48,12 +48,12 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                   color: DeckColors.textSecondary.withValues(alpha: 0.6)),
               const SizedBox(height: 12),
               const Text('还没有摄像头',
-                  style: TextStyle(
-                      fontSize: 16, color: DeckColors.textSecondary)),
+                  style:
+                      TextStyle(fontSize: 16, color: DeckColors.textSecondary)),
               const SizedBox(height: 6),
               const Text('RTSP/ONVIF 网络摄像头,或打印机自带摄像头(X1/P1 系)',
-                  style: TextStyle(
-                      fontSize: 13, color: DeckColors.textSecondary)),
+                  style:
+                      TextStyle(fontSize: 13, color: DeckColors.textSecondary)),
               const SizedBox(height: 20),
               FilledButton.icon(
                 onPressed: widget.onAdd,
@@ -144,6 +144,8 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
               rotationDeg: camera.rotationDeg,
               ptzInvertPan: camera.ptzInvertPan,
               ptzInvertTilt: camera.ptzInvertTilt,
+              ptzCalibration: camera.ptzCalibration,
+              onSetPtzCalibration: ptzCalibrationSetter(ref, camera),
             )
           else
             Container(
@@ -216,6 +218,8 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                         rotationDeg: camera.rotationDeg,
                         ptzInvertPan: camera.ptzInvertPan,
                         ptzInvertTilt: camera.ptzInvertTilt,
+                        ptzCalibration: camera.ptzCalibration,
+                        onSetPtzCalibration: ptzCalibrationSetter(ref, camera),
                       )
                     : Center(
                         child: Text(
@@ -241,7 +245,6 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
   }
 }
 
-
 /// Add-camera dialog: RTSP/ONVIF URL (with LAN auto-scan) or the
 /// printer's own camera.
 /// 添加 / 编辑摄像头 ([editing] 传入既有条目即为编辑模式, 反馈 2026-10-20:
@@ -255,8 +258,9 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
   // after "admin:" so the password is the first thing typed. The hint
   // would vanish on first keystroke; this never does.
   final template = 'rtsp://admin:密码@${subnetCtrl.text}.10:554/stream1';
-  final initialUrl =
-      editing == null ? template : (editing.url.isEmpty ? template : editing.url);
+  final initialUrl = editing == null
+      ? template
+      : (editing.url.isEmpty ? template : editing.url);
   final urlCtrl = TextEditingController(text: initialUrl)
     ..value = TextEditingValue(
       text: initialUrl,
@@ -284,15 +288,13 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
   var hits = const <RtspHit>[];
 
   final printers = ref.read(printersProvider).valueOrNull ?? const [];
-  final lanPrinters =
-      printers.where((p) => p.mode == PrinterMode.lan).toList();
+  final lanPrinters = printers.where((p) => p.mode == PrinterMode.lan).toList();
 
   /// Fill the URL field from a scan hit; auth-only hits get an `admin:`
   /// placeholder so the password is the only thing left to type.
   void fillFromHit(RtspHit h) {
-    final text = h.needsAuth
-        ? 'rtsp://admin:@${h.ip}:${h.port}${h.path}'
-        : h.url;
+    final text =
+        h.needsAuth ? 'rtsp://admin:@${h.ip}:${h.port}${h.path}' : h.url;
     urlCtrl.value = TextEditingValue(
       text: text,
       selection: TextSelection.collapsed(
@@ -326,12 +328,10 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
         hits = report.hits;
         scanning = false;
         if (report.hits.isEmpty && report.openPorts == 0) {
-          scanError =
-              '该网段没有任何开放的视频端口——确认摄像头在这个网段、已上电联网,'
+          scanError = '该网段没有任何开放的视频端口——确认摄像头在这个网段、已上电联网,'
               '且路由器没开「终端/AP 隔离」';
         } else if (report.hits.isEmpty) {
-          scanError =
-              '发现 ${report.openPorts} 个开放端口,但没有端口用标准 RTSP 应答——'
+          scanError = '发现 ${report.openPorts} 个开放端口,但没有端口用标准 RTSP 应答——'
               '摄像头可能需要在自家 App 里开启局域网访问(萤石:App 设备设置里的本地直播),'
               '或流路径不在常见列表里';
         }
@@ -363,11 +363,9 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
               SegmentedButton<CameraSourceType>(
                 segments: const [
                   ButtonSegment(
-                      value: CameraSourceType.rtsp,
-                      label: Text('RTSP/ONVIF')),
+                      value: CameraSourceType.rtsp, label: Text('RTSP/ONVIF')),
                   ButtonSegment(
-                      value: CameraSourceType.bambu,
-                      label: Text('打印机自带')),
+                      value: CameraSourceType.bambu, label: Text('打印机自带')),
                 ],
                 selected: {type},
                 onSelectionChanged: (s) => setState(() => type = s.first),
@@ -412,8 +410,8 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                     selected: {rotationDeg},
                     onSelectionChanged: (s) =>
                         setState(() => rotationDeg = s.first),
-                    style: const ButtonStyle(
-                        visualDensity: VisualDensity.compact),
+                    style:
+                        const ButtonStyle(visualDensity: VisualDensity.compact),
                   ),
                 ]),
                 const SizedBox(height: 6),
@@ -449,8 +447,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                         controller: subnetCtrl,
                         keyboardType: TextInputType.number,
                         decoration: const InputDecoration(
-                            labelText: '扫描网段前缀',
-                            hintText: '192.168.100'),
+                            labelText: '扫描网段前缀', hintText: '192.168.100'),
                       ),
                     ),
                     const SizedBox(width: 8),
@@ -462,19 +459,18 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                 ],
                 if (scanning) ...[
                   const SizedBox(height: 8),
-                  LinearProgressIndicator(value: total == 0 ? null : done / total),
+                  LinearProgressIndicator(
+                      value: total == 0 ? null : done / total),
                   const SizedBox(height: 4),
                   Text('已探测 $done/$total',
                       style: const TextStyle(
-                          fontSize: 11,
-                          color: DeckColors.textSecondary)),
+                          fontSize: 11, color: DeckColors.textSecondary)),
                 ],
                 if (scanError.isNotEmpty) ...[
                   const SizedBox(height: 8),
                   Text(scanError,
                       style: const TextStyle(
-                          fontSize: 12,
-                          color: DeckColors.textSecondary)),
+                          fontSize: 12, color: DeckColors.textSecondary)),
                 ],
                 if (hits.isNotEmpty) ...[
                   const SizedBox(height: 8),
@@ -492,8 +488,8 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                         return ListTile(
                           dense: true,
                           leading: const Icon(Icons.videocam, size: 18),
-                          title: Text(h.url,
-                              style: const TextStyle(fontSize: 12)),
+                          title:
+                              Text(h.url, style: const TextStyle(fontSize: 12)),
                           subtitle: subtitle.isEmpty
                               ? null
                               : Text(subtitle,
@@ -501,10 +497,8 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                           onTap: () {
                             fillFromHit(h);
                             if (nameCtrl.text.trim().isEmpty) {
-                              final octet =
-                                  h.ip.split('.').last;
-                              nameCtrl.text =
-                                  '${h.vendor ?? "摄像头"} $octet';
+                              final octet = h.ip.split('.').last;
+                              nameCtrl.text = '${h.vendor ?? "摄像头"} $octet';
                             }
                           },
                         );
@@ -513,14 +507,13 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                   ),
                   const Text('点击结果填入地址(需要密码的话在地址里加 user:pass@)',
                       style: TextStyle(
-                          fontSize: 11,
-                          color: DeckColors.textSecondary)),
+                          fontSize: 11, color: DeckColors.textSecondary)),
                 ],
                 const SizedBox(height: 10),
                 DropdownButtonFormField<PrinterProfile>(
                   initialValue: linked,
-                  decoration: const InputDecoration(
-                      labelText: '关联打印机(可选,显示在其仪表盘)'),
+                  decoration:
+                      const InputDecoration(labelText: '关联打印机(可选,显示在其仪表盘)'),
                   items: [
                     for (final p in printers)
                       DropdownMenuItem(value: p, child: Text(p.name)),
@@ -530,8 +523,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
               ] else ...[
                 DropdownButtonFormField<PrinterProfile>(
                   initialValue: linked,
-                  decoration: const InputDecoration(
-                      labelText: '选择打印机(局域网直连)'),
+                  decoration: const InputDecoration(labelText: '选择打印机(局域网直连)'),
                   items: [
                     for (final p in lanPrinters)
                       DropdownMenuItem(value: p, child: Text(p.name)),
@@ -594,8 +586,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                   if (u == template ||
                       !u.startsWith('rtsp://') ||
                       RegExp(r'^rtsp://[^/]*$').hasMatch(u)) {
-                    setState(() => urlError =
-                        '地址没改过或不对——直接在预填模板上改,'
+                    setState(() => urlError = '地址没改过或不对——直接在预填模板上改,'
                         '或「自动扫描」后点结果');
                     return;
                   }
@@ -610,9 +601,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
   if (ok != true) return;
 
   final name = nameCtrl.text.trim().isEmpty
-      ? (type == CameraSourceType.bambu
-          ? (linked?.name ?? '打印机摄像头')
-          : '摄像头')
+      ? (type == CameraSourceType.bambu ? (linked?.name ?? '打印机摄像头') : '摄像头')
       : nameCtrl.text.trim();
   final printerIds = linked?.id == null ? const <String>[] : [linked!.id];
 

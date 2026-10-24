@@ -126,7 +126,10 @@ void main() {
         );
 
     // 带账号密码 + 主/子码流标记: 云台和码流切换都要求这一种地址。
-    CameraProfile ptzCamera({bool flipH = false, int rotationDeg = 0}) =>
+    CameraProfile ptzCamera(
+            {bool flipH = false,
+            int rotationDeg = 0,
+            String ptzCalibration = ''}) =>
         CameraProfile(
           id: 'c1',
           name: '工位相机',
@@ -135,6 +138,7 @@ void main() {
           printerIds: const ['p1'],
           flipH: flipH,
           rotationDeg: rotationDeg,
+          ptzCalibration: ptzCalibration,
         );
 
     Future<HttpClientResponse> get(String path,
@@ -545,6 +549,21 @@ void main() {
       final stop = await post('/api/ptz', {'camera': 'c1', 'action': 'stop'});
       expect(stop.statusCode, 200);
       expect(fake.stops, 1);
+    });
+
+    test('POST /api/ptz honours a measured key map', () async {
+      final fake = _FakePtz();
+      hub.ptz = HubPtz(clientFactory: (_) => fake);
+      hub.settings = hubSettings();
+      // 实测: 这台的「上」键让画面往左走, 所以按「上」要发左(pure pan-left).
+      hub.cameras = [ptzCamera(ptzCalibration: 'RLUD')];
+      await hub.start();
+
+      final res =
+          await post('/api/ptz', {'camera': 'c1', 'action': 'up', 'speed': 0.5});
+      expect(res.statusCode, 200);
+      expect(fake.moves.single.$1, -0.5);
+      expect(fake.moves.single.$2, 0);
     });
 
     test('POST /api/ptz reports an unreachable camera as unavailable', () async {

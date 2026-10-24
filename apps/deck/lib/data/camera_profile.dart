@@ -44,6 +44,7 @@ class CameraProfile {
     this.rotationDeg = 0,
     this.ptzInvertPan = false,
     this.ptzInvertTilt = false,
+    this.ptzCalibration = '',
   });
 
   final String id;
@@ -78,6 +79,15 @@ class CameraProfile {
   final bool ptzInvertPan;
   final bool ptzInvertTilt;
 
+  /// Measured key map from the 云台方向校准 wizard (2026-10-24): four letters,
+  /// one per key in `UDLR` order, each the direction the picture was seen to
+  /// move when that key was pressed. Empty = not calibrated.
+  ///
+  /// A mount + rotation combination can bend the keys in ways no formula
+  /// predicted reliably (90°/270° sent pan from the up/down keys, 180° sent
+  /// tilt from left/right), so the pad trusts what was actually observed.
+  final String ptzCalibration;
+
   CameraProfile copyWith({
     String? name,
     String? url,
@@ -88,6 +98,7 @@ class CameraProfile {
     int? rotationDeg,
     bool? ptzInvertPan,
     bool? ptzInvertTilt,
+    String? ptzCalibration,
   }) =>
       CameraProfile(
         id: id,
@@ -101,6 +112,7 @@ class CameraProfile {
         rotationDeg: rotationDeg ?? this.rotationDeg,
         ptzInvertPan: ptzInvertPan ?? this.ptzInvertPan,
         ptzInvertTilt: ptzInvertTilt ?? this.ptzInvertTilt,
+        ptzCalibration: ptzCalibration ?? this.ptzCalibration,
       );
 
   /// Playback URL, resolving the bambu type against the printer profile
@@ -131,10 +143,11 @@ class CameraProfile {
     return applyRtspQuality(url, quality);
   }
 
-  String _builtInUrl(PrinterProfile linked) =>
-      cameraSchemeForModel(linked.model) == BambuCameraScheme.rtsps
-          ? 'rtsps://bblp:${linked.accessCode}@${linked.ip}:322/streaming/live/1'
-          : 'bmjpeg://bblp:${linked.accessCode}@${linked.ip}';
+  String _builtInUrl(PrinterProfile linked) => cameraSchemeForModel(
+              linked.model) ==
+          BambuCameraScheme.rtsps
+      ? 'rtsps://bblp:${linked.accessCode}@${linked.ip}:322/streaming/live/1'
+      : 'bmjpeg://bblp:${linked.accessCode}@${linked.ip}';
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -151,12 +164,12 @@ class CameraProfile {
         'rotationDeg': rotationDeg,
         'ptzInvertPan': ptzInvertPan,
         'ptzInvertTilt': ptzInvertTilt,
+        'ptzCalibration': ptzCalibration,
       };
 
   factory CameraProfile.fromJson(Map<String, dynamic> j) {
     final ids = <String>[
-      ...((j['printerIds'] as List<dynamic>? ?? const [])
-              .whereType<String>()),
+      ...((j['printerIds'] as List<dynamic>? ?? const []).whereType<String>()),
       if (j['printerId'] is String && (j['printerId'] as String).isNotEmpty)
         j['printerId'] as String,
     ];
@@ -174,6 +187,7 @@ class CameraProfile {
       rotationDeg: j['rotationDeg'] as int? ?? 0,
       ptzInvertPan: j['ptzInvertPan'] as bool? ?? false,
       ptzInvertTilt: j['ptzInvertTilt'] as bool? ?? false,
+      ptzCalibration: j['ptzCalibration'] as String? ?? '',
     );
   }
 }
@@ -235,8 +249,8 @@ class CamerasNotifier extends AsyncNotifier<List<CameraProfile>> {
 
   Future<void> remove(String id) async {
     final store = ref.read(cameraStoreProvider);
-    state = AsyncData(
-        (state.valueOrNull ?? []).where((c) => c.id != id).toList());
+    state =
+        AsyncData((state.valueOrNull ?? []).where((c) => c.id != id).toList());
     await store.save(state.valueOrNull ?? []);
   }
 
