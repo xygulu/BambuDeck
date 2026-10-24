@@ -18,6 +18,7 @@ class PtzPad extends StatefulWidget {
     this.invertPan = false,
     this.invertTilt = false,
     this.calibration = '',
+    this.onCalibrate,
   });
 
   final PtzClient client;
@@ -31,6 +32,10 @@ class PtzPad extends StatefulWidget {
   /// Measured key map from the calibration wizard; supersedes every other
   /// correction when present (see [applyPtzCalibration]).
   final String calibration;
+
+  /// Opens the calibration wizard; when set, the pad's centre becomes the
+  /// entry point (方向键不对时一眼能找到, 用户反馈 2026-10-24).
+  final VoidCallback? onCalibrate;
 
   /// Per-camera axis calibration (云台方向校准 2026-10-21): flips applied
   /// after the orientation inverse for cameras whose physical pan/tilt runs
@@ -134,6 +139,28 @@ class _PtzPadState extends State<PtzPad> {
                     width: 16,
                     height: 16,
                     child: CircularProgressIndicator(strokeWidth: 2)))
+          else if (widget.onCalibrate != null)
+            Center(
+              child: Tooltip(
+                message:
+                    widget.calibration.isEmpty ? '云台方向校准' : '云台方向已校准,可重新校准',
+                child: IconButton(
+                  onPressed: widget.onCalibrate,
+                  icon: Icon(
+                      widget.calibration.isEmpty
+                          ? Icons.tune
+                          : Icons.check_circle_outline,
+                      size: 18,
+                      color: widget.calibration.isEmpty
+                          ? Colors.white70
+                          : Colors.greenAccent),
+                  style: IconButton.styleFrom(
+                    minimumSize: const Size(28, 28),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+              ),
+            )
           else
             const Center(
                 child: Icon(Icons.videocam_rounded,

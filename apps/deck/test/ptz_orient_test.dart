@@ -39,13 +39,14 @@ void main() {
       expectVec(map(true, 0, right), left);
     });
 
-    // The pad turns WITH the picture: at 90° the 上 key sends what 右 sent at
-    // 0°, at 270° what 左 sent (用户口径 2026-10-24).
-    test('90°: keys rotate clockwise with the picture', () {
-      expectVec(map(false, 90, up), right);
-      expectVec(map(false, 90, right), down);
-      expectVec(map(false, 90, down), left);
-      expectVec(map(false, 90, left), up);
+    // The keys rotate with the picture. Which way round the rotation goes is
+    // a measurement, not a derivation (see the calibration group below);
+    // this pins the starting guess only.
+    test('90° turns the compass one step', () {
+      expectVec(map(false, 90, up), left);
+      expectVec(map(false, 90, left), down);
+      expectVec(map(false, 90, down), right);
+      expectVec(map(false, 90, right), up);
     });
 
     test('180° inverts both axes', () {
@@ -55,18 +56,18 @@ void main() {
       expectVec(map(false, 180, right), left);
     });
 
-    test('270°: keys rotate the other way', () {
-      expectVec(map(false, 270, up), left);
-      expectVec(map(false, 270, left), down);
-      expectVec(map(false, 270, down), right);
-      expectVec(map(false, 270, right), up);
+    test('270° turns it the other way', () {
+      expectVec(map(false, 270, up), right);
+      expectVec(map(false, 270, right), down);
+      expectVec(map(false, 270, down), left);
+      expectVec(map(false, 270, left), up);
     });
 
-    test('flip + 90°: mirror the pad, then rotate it with the picture', () {
-      expectVec(map(true, 90, up), right);
-      expectVec(map(true, 90, left), down);
-      expectVec(map(true, 90, down), left);
-      expectVec(map(true, 90, right), up);
+    test('flip + 90°: mirror the pad, then rotate its keys', () {
+      expectVec(map(true, 90, up), left);
+      expectVec(map(true, 90, left), up);
+      expectVec(map(true, 90, down), right);
+      expectVec(map(true, 90, right), down);
     });
   });
 
@@ -142,7 +143,7 @@ void main() {
         pan: up.$1,
         tilt: up.$2,
       );
-      expectVec((p, t), right);
+      expectVec((p, t), left);
     });
   });
 }

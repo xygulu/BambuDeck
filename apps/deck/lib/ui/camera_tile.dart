@@ -411,6 +411,7 @@ class _CameraTileState extends ConsumerState<CameraTile> {
       invertPan: widget.ptzInvertPan,
       invertTilt: widget.ptzInvertTilt,
       calibration: widget.ptzCalibration,
+      onCalibrate: widget.onSetPtzCalibration == null ? null : _calibratePtz,
     );
   }
 
