@@ -1,16 +1,22 @@
 import 'dart:math' as math;
 
-/// Default key mapping: undoes the picture's mirror and rotation so a held key
-/// moves the view the way the displayed picture shows it.
+/// Default key mapping: the pad turns with the picture.
 ///
-/// The picture is drawn through `T = FlipX(flipH) · RotZ(rotationDeg)`, so the
-/// pad's screen-space directions are pushed through `T⁻¹` to reach the camera's
-/// pan/tilt. Both arguments use the pad convention (pan > 0 right, tilt > 0 up)
-/// and the result keeps it.
+/// The picture is drawn through `T = FlipX(flipH) · RotZ(rotationDeg)`. The pad
+/// is rotated the *same* way: rotating the picture 90° clockwise rotates the
+/// four keys 90° clockwise with it, so pressing 上 at 90° sends what 右 sent at
+/// 0° (用户口径 2026-10-24: 画面转 90°, 方向键的对应动作也转 90°).
 ///
-/// This is only the default. It assumes the camera turns the way the command
-/// names say; a mount that disagrees (ceiling 竖装 / 倒装 firmware) needs the
-/// measured mapping from [applyPtzCalibration] instead, which supersedes it.
+/// The earlier version pushed the keys through `T⁻¹` instead, i.e. counter to
+/// the picture; at 90°/270° that swapped the key pairs and is what the user
+/// kept reporting as 上是向右 / 下是向左 (实测 2026-10-24).
+///
+/// Both arguments use the pad convention (pan > 0 right, tilt > 0 up) and the
+/// result keeps it.
+///
+/// This is only the default. A mount whose motors disagree with the command
+/// names still needs the measured mapping from [applyPtzCalibration], which
+/// supersedes this one.
 (double, double) orientPanTilt({
   required bool flipH,
   required int rotationDeg,
@@ -21,13 +27,14 @@ import 'dart:math' as math;
   // Screen-space direction vector (x right, y down).
   var x = pan;
   final y = -tilt;
-  // T⁻¹ = RotZ(-rotationDeg) · FlipX.
+  // Mirror the pad horizontally first, then rotate it with the picture:
+  // same visual direction as RotZ(rotationDeg) in Flutter's y-down space.
   if (flipH) x = -x;
   final th = rotationDeg * math.pi / 180.0;
   final c = math.cos(th);
   final s = math.sin(th);
-  final nx = c * x + s * y;
-  final ny = -s * x + c * y;
+  final nx = c * x - s * y;
+  final ny = s * x + c * y;
   return (nx, -ny);
 }
 
