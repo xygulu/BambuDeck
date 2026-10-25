@@ -1696,6 +1696,9 @@ async function setOn(id, body, label) {
   try {
     const { j } = await post('/api/set', { printer: id, ...body });
     if (!j.ok) toast(`${label}失败：${j.error || '未知错误'}`, 'err');
+    // 打印机收下命令不等于改了档: 固件常常只在打印中才接受调速,
+    // 这时候如实告诉用户, 别让按钮看起来「点成功了」。
+    else if (j.note) toast(j.note, '');
   } catch (e) {
     toast(`${label}请求失败：${e}`, 'err');
   } finally {

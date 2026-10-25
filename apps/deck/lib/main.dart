@@ -214,18 +214,32 @@ class _DeckAppState extends ConsumerState<DeckApp> {
     hubServer.setHandler = (profile, {speed, light}) async {
       final n = ref.read(connectionProvider(profile.id).notifier);
       var ok = true;
-      if (speed != null) ok = await n.setSpeed(speed) && ok;
+      // 速度要打印机确认: 固件常常收下命令却不改档(不在打印中), publish
+      // 成功并不代表调速成功 —— 不确认就如实说, 别让网页显示「已发送」。
+      var speedConfirmed = true;
+      String? speedNote;
+      if (speed != null) {
+        final r = await n.setSpeedConfirmed(speed);
+        ok = r.sent && ok;
+        speedConfirmed = r.confirmed;
+        speedNote = r.note;
+      }
       if (light != null) ok = await n.setLight(light) && ok;
       LogBuffer.instance.add('[网页] 设置 ${profile.name}: '
-          '${speed == null ? '' : '速度$speed '}'
+          '${speed == null ? '' : '速度$speed${speedConfirmed ? '' : '(未确认)'} '}'
           '${light == null ? '' : '腔灯${light ? '开' : '关'} '}'
           '${ok ? '已发送' : '失败(打印机未连接?)'}');
       return <String, dynamic>{
         'ok': ok,
         'printer': profile.name,
         if (speed != null) 'speed': speed,
+        if (speed != null) 'confirmed': speedConfirmed,
         if (light != null) 'light': light,
         if (!ok) 'error': '局域网直发失败(打印机未连接或不在局域网)',
+        if (ok && speed != null && !speedConfirmed)
+          'note': speedNote ??
+              '速度已发给打印机，但打印机没有确认切档'
+                  '（不在打印中时通常不生效）',
       };
     };
     // 网页端摄像头按钮 (和 App 的 CameraTile 一一对应):

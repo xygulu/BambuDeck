@@ -40,6 +40,10 @@ abstract class PrinterLink {
   Future<bool> resume();
   Future<bool> stop();
   Future<bool> setSpeed(int level);
+
+  /// 调速 + 固件回执（accepted: true/false，null = 没回执）。
+  Future<({bool sent, bool? accepted, String? reason})> setSpeedChecked(
+      int level);
   Future<bool> setLight(bool on);
   Future<bool> refresh();
 
@@ -86,6 +90,11 @@ class MqttPrinterLink implements PrinterLink {
 
   @override
   Future<bool> setSpeed(int level) => _client.setSpeedLevel(level);
+
+  @override
+  Future<({bool sent, bool? accepted, String? reason})> setSpeedChecked(
+          int level) =>
+      _client.setSpeedChecked(level);
 
   @override
   Future<bool> setLight(bool on) => _client.setChamberLight(on);
@@ -274,8 +283,58 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
   Future<bool> pause() => _link?.pause() ?? Future.value(false);
   Future<bool> resume() => _link?.resume() ?? Future.value(false);
   Future<bool> stop() => _link?.stop() ?? Future.value(false);
-  Future<bool> setSpeed(int level) =>
-      _link?.setSpeed(level) ?? Future.value(false);
+  Future<bool> setSpeed(int level) => setSpeedConfirmed(level)
+      .then((r) => r.sent, onError: (_) => false);
+
+  /// 调速 + 等打印机确认。
+  ///
+  /// A1/P1 的 `print_speed` 常常只在**打印中**才真正生效，而且固件不一定
+  /// 主动回报 `spd_lvl`：publish 成功 ≠ 档位变了。旧写法据此返回 true，网页/App
+  /// 就表现成「点了运动还显示标准」(2026-10-25)。这里在 publish 之后看一眼
+  /// 状态，没变就发一次 pushall 逼打印机交出完整状态，再没变就如实报告
+  /// 没确认，让调用方提示用户，而不是假装成功。
+  Future<({bool sent, bool confirmed, String? note})> setSpeedConfirmed(
+      int level) async {
+    final link = _link;
+    if (link == null) return (sent: false, confirmed: false, note: null);
+    final r = await link.setSpeedChecked(level);
+    if (!r.sent) return (sent: false, confirmed: false, note: null);
+    // 固件明确拒收(84033543 开发者模式没开 / FAILED): 不用再等状态。
+    if (r.accepted == false) {
+      LogBuffer.instance.add('[速度] 打印机拒收 $level 档: ${r.reason ?? ''}');
+      return (
+        sent: true,
+        confirmed: false,
+        note: '打印机拒收了调速${r.reason == null ? '' : '：${r.reason}'}',
+      );
+    }
+    // 回执 success 也只说明命令被执行了, 状态里有没有新档位要自己看:
+    // 没变化就发一次 pushall 逼打印机交完整状态, 再没有就如实说没确认。
+    if (await _awaitSpeed(level, const Duration(milliseconds: 1200))) {
+      return (sent: true, confirmed: true, note: null);
+    }
+    await link.refresh();
+    final confirmed = await _awaitSpeed(level, const Duration(seconds: 2));
+    if (!confirmed) {
+      LogBuffer.instance.add('[速度] 打印机没有回报 $level 档'
+          '(当前 ${_current.state?.speedLevel ?? 0} 档) —— '
+          'Bambu 固件通常只在打印中接受调速');
+    }
+    return (
+      sent: true,
+      confirmed: confirmed,
+      note: confirmed ? null : '速度已发给打印机，但打印机没有确认切档（不在打印中时通常不生效）',
+    );
+  }
+
+  Future<bool> _awaitSpeed(int level, Duration within) async {
+    final end = DateTime.now().add(within);
+    while (DateTime.now().isBefore(end)) {
+      if (_current.state?.speedLevel == level) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
+    return _current.state?.speedLevel == level;
+  }
   Future<bool> setLight(bool on) =>
       _link?.setLight(on) ?? Future.value(false);
   Future<bool> refresh() => _link?.refresh() ?? Future.value(false);

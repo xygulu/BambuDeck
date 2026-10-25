@@ -484,7 +484,20 @@ class BambuMqttClient {
   ///
   /// 命令不需要回执时(超时)沿用 publish 结果，避免误报失败。
   Future<bool> _controlCommand(String command) async {
-    final node = _printNode(command, {'param': ''});
+    final r = await _commandChecked(_printNode(command, {'param': ''}));
+    return r.sent && r.accepted != false;
+  }
+
+  /// 发一条 print 命令并等固件回执，保留「回执有没有来」这层信息。
+  ///
+  /// `accepted` 三态：true = 固件回 result:success；false = 固件拒收
+  /// (err_code / FAILED)；null = 超时没回执（固件不一定 ack 每条命令，
+  /// 这时只能按 publish 成功处理，别误报失败）。
+  Future<({bool sent, bool? accepted, String? reason})> _commandChecked(
+    Map<String, dynamic> node, {
+    Duration ackTimeout = const Duration(seconds: 6),
+  }) async {
+    final command = node['command']?.toString() ?? '?';
     final seq = node['sequence_id']?.toString();
     final completer = Completer<BambuCommandAck>();
     if (seq != null) _pendingAcks[seq] = completer;
@@ -493,17 +506,18 @@ class BambuMqttClient {
     if (!published) {
       if (seq != null) _pendingAcks.remove(seq);
       _logLine('$command: publish 失败(MQTT 未连接)');
-      return false;
+      return (sent: false, accepted: null, reason: null);
     }
-    if (seq == null) return true;
+    if (seq == null) return (sent: true, accepted: null, reason: null);
 
     try {
-      final ack = await completer.future.timeout(const Duration(seconds: 6));
-      return ack.success;
+      final ack = await completer.future.timeout(ackTimeout);
+      return (sent: true, accepted: ack.success, reason: ack.describe);
     } on TimeoutException {
       _pendingAcks.remove(seq);
-      _logLine('$command: 6s 内无回执(固件不 ack 该命令)，按 publish 成功处理');
-      return true;
+      _logLine('$command: ${ackTimeout.inSeconds}s 内无回执'
+          '(固件不 ack 该命令)，按 publish 成功处理');
+      return (sent: true, accepted: null, reason: null);
     }
   }
 
@@ -551,8 +565,20 @@ class BambuMqttClient {
   }
 
   /// 1 silent, 2 standard, 3 sport, 4 ludicrous.
-  Future<bool> setSpeedLevel(int level) =>
-      _publishSigned(_printNode('print_speed', {'param': level.toString()}));
+  ///
+  /// 调速的成败看固件回执：publish 成功只说明 MQTT 送到了。开发者模式没开
+  /// 的机器会回 84033543，旧实现照样返回 true，网页/App 就表现成「点了运动
+  /// 还是显示标准」(2026-10-25)。回执 2s 内没来就退回 publish 结果 —— 有的
+  /// 固件不 ack 这条命令，不能让调速按钮卡 6 秒。
+  Future<({bool sent, bool? accepted, String? reason})> setSpeedChecked(
+          int level) =>
+      _commandChecked(_printNode('print_speed', {'param': level.toString()}),
+          ackTimeout: const Duration(seconds: 2));
+
+  Future<bool> setSpeedLevel(int level) async {
+    final r = await setSpeedChecked(level);
+    return r.sent && r.accepted != false;
+  }
 
   Future<bool> setChamberLight(bool on) {
     _logLine('ledctrl ${on ? 'on' : 'off'}');

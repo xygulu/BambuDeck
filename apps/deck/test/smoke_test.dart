@@ -66,6 +66,11 @@ class _FakeLink implements PrinterLink {
   Future<bool> setSpeed(int level) async => true;
 
   @override
+  Future<({bool sent, bool? accepted, String? reason})> setSpeedChecked(
+          int level) async =>
+      (sent: true, accepted: true, reason: null);
+
+  @override
   Future<bool> setLight(bool on) async => true;
 
   @override

@@ -495,8 +495,10 @@ class _ControlBar extends ConsumerWidget {
                     ButtonSegment(value: 4, label: Text('疯狂')),
                   ],
                   selected: {s.speedLevel > 0 ? s.speedLevel : 2},
-                  onSelectionChanged:
-                      enabled ? (sel) => notifier.setSpeed(sel.first) : null,
+                  onSelectionChanged: !canControl
+                      ? null
+                      : (sel) =>
+                          runSpeed(context, profile, notifier, sel.first),
                   style: const ButtonStyle(
                     visualDensity: VisualDensity.compact,
                   ),
@@ -538,6 +540,26 @@ Future<void> runControl(BuildContext context, PrinterProfile profile,
     return;
   }
   await runCloudControl(context, profile, command);
+}
+
+/// 调速: 固件常只在打印中才真正接受, 而且不一定回报 spd_lvl。没确认就弹一句,
+/// 免得用户以为「点了运动还是显示标准」是界面坏了 (反馈 2026-10-25)。
+Future<void> runSpeed(BuildContext context, PrinterProfile profile,
+    ConnectionNotifier notifier, int level) async {
+  final messenger = ScaffoldMessenger.of(context);
+  final r = await notifier.setSpeedConfirmed(level);
+  LogBuffer.instance.add('[速度] ${profile.name}: $level 档 '
+      '${!r.sent ? '发送失败' : r.confirmed ? '已确认' : '未确认'}');
+  if (!r.sent) {
+    messenger.showSnackBar(const SnackBar(
+        backgroundColor: DeckColors.error,
+        content: Text('调速失败: 打印机未连接')));
+  } else if (!r.confirmed) {
+    messenger.showSnackBar(SnackBar(
+        content: Text(r.note ??
+            '速度已发给打印机, 但打印机没有确认切档'
+                ' (不在打印中时通常不生效)')));
+  }
 }
 
 /// 通过本机 helper 服务(Bambu Connect 自动化)发送控制命令并落到 snackbar。
@@ -762,8 +784,10 @@ class _ControlCard extends ConsumerWidget {
                         ButtonSegment(value: 4, label: Text('疯狂')),
                       ],
                       selected: {s.speedLevel > 0 ? s.speedLevel : 2},
-                      onSelectionChanged:
-                          live ? (sel) => notifier.setSpeed(sel.first) : null,
+                      onSelectionChanged: !(live && profile != null)
+                          ? null
+                          : (sel) => runSpeed(
+                              context, profile, notifier, sel.first),
                       showSelectedIcon: false,
                       style: const ButtonStyle(
                         visualDensity:
