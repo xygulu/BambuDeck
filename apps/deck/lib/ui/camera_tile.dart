@@ -127,6 +127,10 @@ class _CameraTileState extends ConsumerState<CameraTile> {
   VideoController? _controller;
   String? _error;
   StreamSubscription<String>? _errSub;
+  StreamSubscription<bool>? _playSub;
+  StreamSubscription<Tracks>? _trackSub;
+  Timer? _retryTimer;
+  var _retries = 0;
   PtzClient? _ptz;
 
   /// The web console's mute toggle flips the same global setting; the bus
@@ -198,6 +202,23 @@ class _CameraTileState extends ConsumerState<CameraTile> {
     _errSub = player.stream.error.listen((e) {
       LogBuffer.instance.add('[${widget.label}] 视频流错误: $e');
       if (mounted) setState(() => _error = '视频流错误: $e');
+      // 摄像头偶发半开/断流: 先自己重连几次, 不用回 App 手动刷新。
+      _scheduleRetry();
+    });
+    // 真播起来了才算恢复: 清掉错误提示, 也把重连次数归零。
+    _playSub = player.stream.playing.listen((playing) {
+      if (!playing) return;
+      _retries = 0;
+      if (_error != null && mounted) setState(() => _error = null);
+    });
+    // 记下这条码流有没有音轨 —— 「有时候没有声音」时日志里能直接看出
+    // 是码流本身没声音还是播放器/静音的问题。
+    _trackSub = player.stream.tracks.listen((t) {
+      _trackSub?.cancel();
+      _trackSub = null;
+      final n = t.audio.length;
+      LogBuffer.instance.add('[${widget.label}] 音轨 $n 条'
+          '${n == 0 ? '（这条码流没有声音，可切主码流试试）' : ''}');
     });
 
     setState(() {
@@ -206,10 +227,29 @@ class _CameraTileState extends ConsumerState<CameraTile> {
     });
     try {
       await player.open(Media(url));
+      // 打开新流水后会重新应用一次音量: 静音设置可能刚被网页端改过,
+      // 而 volume 是播放器级状态, 不重设会沿用到旧值 (没声音的常见来源)。
+      final mutedAtOpen =
+          ref.read(appSettingsProvider).valueOrNull?.cameraMuted ?? false;
+      await player.setVolume(mutedAtOpen ? 0 : 100);
     } catch (e) {
       LogBuffer.instance.add('[${widget.label}] 无法连接视频源: $e');
       if (mounted) setState(() => _error = '无法连接视频源: $e');
+      _scheduleRetry();
     }
+  }
+
+  /// 断流后自动重连 (3 秒后, 最多 3 次)。重连会整条重建播放器,
+  /// 相当于用户手动刷新了一次画面。
+  void _scheduleRetry() {
+    if (!mounted || _retryTimer != null || _retries >= 3) return;
+    _retries++;
+    _retryTimer = Timer(const Duration(seconds: 3), () {
+      _retryTimer = null;
+      if (!mounted) return;
+      LogBuffer.instance.add('[${widget.label}] 自动重连 (第 $_retries 次)');
+      _open(widget.streamUrl);
+    });
   }
 
   /// Flip the global camera mute (persisted) and apply it to the live
@@ -226,8 +266,14 @@ class _CameraTileState extends ConsumerState<CameraTile> {
 
   Future<void> _teardown() async {
     cameraAudioBus.detach(_muteSink);
+    _retryTimer?.cancel();
+    _retryTimer = null;
     _errSub?.cancel();
     _errSub = null;
+    _playSub?.cancel();
+    _playSub = null;
+    _trackSub?.cancel();
+    _trackSub = null;
     final p = _player;
     _player = null;
     _controller = null;

@@ -247,6 +247,7 @@
   .ams-chip { display: none; }
   .ams-pop { display: none; }
   .lbl { font-size: 12px; color: var(--text2); }
+  audio.camaudio { display: none; }
   /* 「速度」跟着分段控件、「灯」跟着开关一起换行, 不拆散。 */
   .ctlgrp { display: inline-flex; align-items: center; gap: 8px; }
 
@@ -1369,6 +1370,8 @@ function camCard(c) {
       <div class="camview">
         <img class="shot" alt="${esc(c.name)}" data-cam="${esc(c.id)}"
           data-src="${esc(c.stream)}" style="transform:${camTransform(c)}">
+        ${c.audioStream ? `<audio class="camaudio" data-cam="${esc(c.id)}"
+          data-src="${esc(c.audioStream)}" preload="none" playsinline></audio>` : ''}
         ${camChipsHtml(c)}${camPadHtml(c)}
       </div>`;
     card.querySelector('img').addEventListener('click', () => zoomOn(c.id));
@@ -1387,8 +1390,9 @@ function paneCameras(p) {
 
 // 只在这些字段变了才重建卡片; 翻转/旋转/静音/码流走 paintCam，重画会把
 // 每条 MJPEG 流都断一次。
-const camSigOf = c => [c.id, c.name, c.type, c.stream || '', c.enabled,
-  c.canQuality ? 1 : 0, c.ptz ? 1 : 0, c.audio ? 1 : 0, c.rtsp ? 1 : 0].join('|');
+const camSigOf = c => [c.id, c.name, c.type, c.stream || '', c.audioStream || '',
+  c.enabled, c.canQuality ? 1 : 0, c.ptz ? 1 : 0, c.audio ? 1 : 0,
+  c.rtsp ? 1 : 0].join('|');
 
 function renderWall(p) {
   const el = $('camwall');
@@ -1419,16 +1423,114 @@ function syncWalls() {
     if (visible) mountStream(img);
     else unmountStream(img);
   }
+  syncAudio(document.querySelectorAll('#camwall audio.camaudio'), visible);
+}
+
+// 声音跟着画面一起挂/摘; 静音是全局开关, 关着就不占带宽。
+function syncAudio(list, visible) {
+  for (const a of list) {
+    if (visible) mountAudio(a);
+    else unmountAudio(a);
+  }
 }
 
 // 每次挂流都带一个时间戳, 码流切换后重挂才能绕开缓存。
 function mountStream(img) {
   const base = img.dataset.src;
   if (!base || img.hasAttribute('src')) return;
+  // 连接被服务端/网络掐掉时浏览器只会显示裂图, 3 秒后自己重挂。
+  img.onerror = () => {
+    if (!img.isConnected || !img.hasAttribute('src')) return;
+    img.removeAttribute('src');
+    setTimeout(() => { if (img.isConnected) mountStream(img); }, 3000);
+  };
   img.src = base + (base.includes('?') ? '&' : '?') + 'v=' + Date.now();
+  streamWatch.delete(img.dataset.cam); // 新连接重新计时
 }
 function unmountStream(img) {
   if (img.hasAttribute('src')) img.removeAttribute('src');
+}
+
+/* 锁屏/切后台再回来: iOS 会把 MJPEG 连接全掐掉, <img> 只剩一个问号,
+   而 src 属性还在 (浏览器不会自己重连)。回前台时整片重挂一遍,
+   顺手把断掉的 WebSocket 也接回来。 */
+function remountAll() {
+  for (const el of document.querySelectorAll('img[data-cam], audio.camaudio')) {
+    if (!el.isConnected) continue;
+    if (el.tagName === 'AUDIO') unmountAudio(el);
+    else unmountStream(el);
+  }
+  syncWalls();
+  syncCameras();
+  for (const img of document.querySelectorAll('#zoom img[data-src]')) {
+    mountStream(img);
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  remountAll();
+  if (!ws || ws.readyState > WebSocket.OPEN) {
+    try { ws && ws.close(); } catch (_) {}
+    ws = null;
+    connect();
+  }
+});
+window.addEventListener('pageshow', remountAll);
+
+/* 画面声音: RTSP 摄像头单独一路 MP3, 用 <audio> 播。
+   手机浏览器不许无声开场自动播, 第一次点屏幕时补一次 play()。 */
+function mountAudio(a) {
+  const base = a.dataset.src;
+  if (!base || cameraMuted) { unmountAudio(a); return; }
+  if (!a.hasAttribute('src')) {
+    // 转码进程退出/网络断了: <audio> 只会静静地停住, 5 秒后重新请求。
+    a.onerror = a.onended = () => {
+      setTimeout(() => {
+        if (!a.isConnected || cameraMuted) return;
+        unmountAudio(a);
+        mountAudio(a);
+      }, 5000);
+    };
+    a.src = base + (base.includes('?') ? '&' : '?') + 'v=' + Date.now();
+    a.load();
+  }
+  a.play().catch(() => { /* 等用户第一次触摸 */ });
+}
+function unmountAudio(a) {
+  if (!a.hasAttribute('src')) return;
+  try { a.pause(); } catch (_) {}
+  a.removeAttribute('src');
+  a.load();
+}
+['pointerdown', 'touchstart'].forEach(ev => document.addEventListener(ev, () => {
+  if (cameraMuted) return;
+  for (const a of document.querySelectorAll('audio.camaudio[src]')) {
+    if (a.paused) a.play().catch(() => {});
+  }
+}, true));
+
+/* 服务端每出一帧就加 1; 12 秒没变化说明这条流卡死了, 重挂连接。
+   (Mac 那边的 relay 也会在 10 秒无帧时自己重启 ffmpeg, 页面这一层
+   管的是浏览器到 Mac 之间那段断了没人发现的情况。) */
+const streamWatch = new Map();
+function checkStalls() {
+  const now = Date.now();
+  for (const img of document.querySelectorAll(
+      '#camwall img[data-cam], #cameras img[data-cam], #zoom img[data-cam]')) {
+    if (!img.hasAttribute('src')) continue;
+    const c = byCam(img.dataset.cam);
+    if (!c) continue;
+    const rec = streamWatch.get(c.id) || { seq: -1, movedAt: now };
+    if (c.seq !== rec.seq) {
+      rec.seq = c.seq;
+      rec.movedAt = now;
+    } else if (c.seq > 0 && now - rec.movedAt > 12000) {
+      rec.movedAt = now;
+      img.removeAttribute('src');
+      mountStream(img);
+    }
+    streamWatch.set(c.id, rec);
+  }
 }
 
 // 只重拉一台摄像头的画面 (换码流后服务端已经放掉旧 relay)。
@@ -1501,6 +1603,8 @@ async function toggleMute(c) {
     // 静音是全局设置 (和 App 同一个开关), 所有画面一起变。
     cameraMuted = next;
     paintCam();
+    syncWalls();
+    syncCameras();
     toast(next ? '摄像头已静音' : '摄像头声音已恢复', 'ok');
   } catch (e) {
     toast('声音切换请求失败：' + e, 'err');
@@ -1626,7 +1730,8 @@ function zoomOn(camId) {
   const c = byCam(camId);
   if (!c || !c.stream) return;
   const z = $('zoom');
-  z.innerHTML = `<img alt="${esc(c.name)}" data-cam="${esc(c.id)}" style="transform:${camTransform(c)}">
+  z.innerHTML = `<img alt="${esc(c.name)}" data-cam="${esc(c.id)}"
+      data-src="${esc(c.stream)}" style="transform:${camTransform(c)}">
     ${camChipsHtml(c)}${camPadHtml(c)}`;
   const img = z.querySelector('img');
   img.src = c.stream + (c.stream.includes('?') ? '&' : '?') + 'v=' + Date.now();
@@ -1771,6 +1876,7 @@ function syncCameras() {
     if (on) mountStream(img);
     else unmountStream(img);
   }
+  syncAudio(document.querySelectorAll('#cameras audio.camaudio'), on);
 }
 
 /* ---------------- 提示条 / 数据推送 ---------------- */
@@ -1803,26 +1909,37 @@ function renderAll() {
 function apply(data) {
   lastPrinters = data.printers || [];
   lastCameras = data.cameras || [];
+  const wasMuted = cameraMuted;
   cameraMuted = data.cameraMuted === true;
+  if (wasMuted !== cameraMuted) {
+    syncWalls();
+    syncCameras();
+  }
   renderAll();
   renderCameras(lastCameras);
   // 翻转/旋转/静音/码流/云台状态每秒都可能变, 但只改现有 DOM —— 重画
   // 摄像头卡片会把每条 MJPEG 流都断开重连。
   paintCam();
+  checkStalls();
   $('clock').textContent = '更新 ' + new Date().toLocaleTimeString('zh-CN');
 }
 
 let ws = null;
+let lastMsgAt = Date.now();
 function connect() {
   if (!TOKEN) return;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
   ws.onopen = () => {
+    lastMsgAt = Date.now();
     const c = $('conn');
     c.className = 'conn ok';
     c.querySelector('.txt').textContent = '已连接';
   };
-  ws.onmessage = e => { try { apply(JSON.parse(e.data)); } catch (_) {} };
+  ws.onmessage = e => {
+    lastMsgAt = Date.now();
+    try { apply(JSON.parse(e.data)); } catch (_) {}
+  };
   ws.onclose = ws.onerror = () => {
     const c = $('conn');
     c.className = 'conn bad';
@@ -1830,6 +1947,17 @@ function connect() {
     setTimeout(connect, 3000);
   };
 }
+
+// 服务端每 10 秒推一次心跳, 20 秒什么都没收到说明这条连接已经死了
+// (锁屏、换 Wi-Fi 之后很常见) —— 自己重连, 不用回列表再进来。
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return;
+  if (Date.now() - lastMsgAt < 20000) return;
+  lastMsgAt = Date.now();
+  try { ws && ws.close(); } catch (_) {}
+  ws = null;
+  connect();
+}, 5000);
 
 async function boot() {
   try {

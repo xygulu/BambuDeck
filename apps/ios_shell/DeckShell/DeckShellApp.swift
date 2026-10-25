@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 /// iOS 壳：整个 App 就是一个 WKWebView，显示 Mac 上 BambuDeck 的网页控制台。
@@ -11,6 +12,16 @@ import SwiftUI
 ///   4. 连不上时给一个能改地址的界面。
 @main
 struct DeckShellApp: App {
+    init() {
+        // 页面里摄像头的 `<audio>` 走这个音频会话。默认的 ambient 分类
+        // 会被手机侧面的静音开关静掉 —— 手机上「一直没声音」有一半是它。
+        // playback 分类不受静音开关影响, mixWithOthers 让它和别的 App
+        // (音乐、播客) 共存, 不会一开监控就把人家的声音打断。
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try? session.setActive(true)
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

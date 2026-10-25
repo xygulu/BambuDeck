@@ -110,12 +110,28 @@ class CameraRelay {
   var clients = 0;
   Uint8List? latest;
 
+  /// 递增帧号，网页端用它判断画面是不是停了 (见 hub_page.html 的看门狗)。
+  var seq = 0;
+
   Timer? _stopDelay;
   Timer? _retry;
+  Timer? _watchdog;
+  DateTime? _lastFrameAt;
   BambuMjpegStream? _bambu;
   Process? _proc;
   var _retryDelay = const Duration(seconds: 1);
   bool _disposed = false;
+
+  /// 连续这么久没有一帧就认为拉流卡死。萤石偶发 TCP 半开，ffmpeg 会一直
+  /// 等下去不再出帧，原来只有进程退出才重连，于是网页上一直停在最后一帧。
+  static const _stallAfter = Duration(seconds: 10);
+
+  void _publish(Uint8List frame) {
+    seq++;
+    _lastFrameAt = DateTime.now();
+    latest = frame;
+    _frames.add(frame);
+  }
 
   static const _maxClients = 4;
 
@@ -161,10 +177,7 @@ class CameraRelay {
         port: p.port,
         username: p.username,
         password: p.password,
-        onFrame: (f) {
-          latest = f;
-          _frames.add(f);
-        },
+        onFrame: _publish,
         onError: _log,
       );
       _bambu = s;
@@ -187,18 +200,22 @@ class CameraRelay {
       final proc = await Process.start(ffmpegPath, [
         '-loglevel', 'error',
         '-rtsp_transport', 'tcp',
+        // RTSP 读超时 (微秒): 网络半开时 ffmpeg 自己退出, 交给下面的重连,
+        // 不会一直挂着不出帧。MJPEG 只要画面, 不带音频。
+        '-rw_timeout', '5000000',
         '-i', url,
+        '-an',
         '-f', 'mjpeg',
         '-q:v', '5',
         '-',
       ]);
       _proc = proc;
+      _startWatchdog();
       final splitter = JpegSplitter();
       proc.stdout.listen(
         (chunk) {
           for (final f in splitter.add(chunk)) {
-            latest = f;
-            _frames.add(f);
+            _publish(f);
           }
         },
         onDone: _sourceDied,
@@ -231,6 +248,24 @@ class CameraRelay {
     }
   }
 
+  /// 有观众看着却连续 [_stallAfter] 没有新帧, 说明这条流已经死了。杀掉
+  /// ffmpeg 让 [_sourceDied] 走正常的退避重连 (重启后网页端不用刷新)。
+  void _startWatchdog() {
+    _watchdog?.cancel();
+    _watchdog = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (_disposed || _proc == null || clients == 0) return;
+      final at = _lastFrameAt;
+      if (at != null && DateTime.now().difference(at) < _stallAfter) return;
+      _log('[网页] ${camera.name}: 画面 ${_stallAfter.inSeconds}s 没有新帧, 重连');
+      _lastFrameAt = DateTime.now(); // 避免连发
+      try {
+        _proc?.kill();
+      } on ProcessException {
+        // already gone
+      }
+    });
+  }
+
   /// A ffmpeg process exited - retry with backoff while viewers remain.
   void _sourceDied() {
     _proc = null;
@@ -245,10 +280,189 @@ class CameraRelay {
   }
 
   void _stopSource() {
+    _watchdog?.cancel();
+    _watchdog = null;
+    _lastFrameAt = null;
     _retry?.cancel();
     _retry = null;
     _bambu?.dispose();
     _bambu = null;
+    try {
+      _proc?.kill();
+    } on ProcessException {
+      // already gone
+    }
+    _proc = null;
+    _retryDelay = const Duration(seconds: 1);
+  }
+}
+
+/// 网页端的声音: RTSP 转成 MP3, 用 `<audio>` 直接播 (手机浏览器都认)。
+///
+/// 画面那条流是 MJPEG, 装不了音频, 所以声音要单独再拉一路 RTSP —— 萤石
+/// 允许几条并发会话, 换来的是手机在外网也能听见打印机房里的动静。
+/// 生命周期和 [CameraRelay] 一样: 第一个观众接入才启动, 最后一个走开
+/// 宽限 10 秒后停, 免得刷新页面就重启 ffmpeg。
+class AudioRelay {
+  AudioRelay({
+    required this.camera,
+    required this.resolveUrl,
+    required this.ffmpegPath,
+    void Function(String message)? log,
+  }) : _log = log ?? _noopLog;
+
+  final CameraProfile camera;
+  final String? Function() resolveUrl;
+  final String ffmpegPath;
+  final void Function(String message) _log;
+
+  final _chunks = StreamController<Uint8List>.broadcast();
+  var clients = 0;
+
+  Timer? _stopDelay;
+  Timer? _retry;
+  Timer? _watchdog;
+  DateTime? _lastDataAt;
+  Process? _proc;
+  var _retryDelay = const Duration(seconds: 1);
+  var _failures = 0;
+  bool _disposed = false;
+
+  static const _maxClients = 2;
+  static const _stallAfter = Duration(seconds: 10);
+  static const _maxFailures = 3;
+
+  bool get saturated => clients >= _maxClients;
+
+  Stream<Uint8List> attach() {
+    clients++;
+    _stopDelay?.cancel();
+    _stopDelay = null;
+    _failures = 0; // 新观众再试一次 (上次可能只是摄像头没开)
+    _ensureSource();
+    return _chunks.stream;
+  }
+
+  void detach() {
+    clients = (clients - 1).clamp(0, 1 << 30);
+    if (clients == 0) {
+      _stopDelay ??= Timer(const Duration(seconds: 10), _stopSource);
+    }
+  }
+
+  void dispose() {
+    _disposed = true;
+    _retry?.cancel();
+    _stopSource();
+    _chunks.close();
+  }
+
+  void _ensureSource() {
+    if (_disposed || _proc != null || _retry != null) return;
+    final url = resolveUrl();
+    if (url == null || url.isEmpty) {
+      _log('[网页] ${camera.name}: 未配置视频源 (声音)');
+      return;
+    }
+    if (!url.startsWith('rtsp')) return; // 打印机自带画面没有音频
+    _log('[网页] ${camera.name}: 开始转码声音 (${CameraRelay._mask(url)})');
+    _runFfmpeg(url);
+  }
+
+  Future<void> _runFfmpeg(String url) async {
+    try {
+      final proc = await Process.start(ffmpegPath, [
+        '-loglevel', 'error',
+        '-rtsp_transport', 'tcp',
+        '-rw_timeout', '5000000',
+        '-i', url,
+        '-vn',
+        '-ac', '1',
+        '-ar', '44100',
+        '-c:a', 'libmp3lame',
+        '-b:a', '64k',
+        '-flush_packets', '1',
+        '-f', 'mp3',
+        '-',
+      ]);
+      _proc = proc;
+      _startWatchdog();
+      final errTail = <String>[];
+      proc.stderr.transform(utf8.decoder).listen((chunk) {
+        for (final line in chunk.split('\n')) {
+          final l = line.trim();
+          if (l.isNotEmpty && errTail.length < 3) errTail.add(l);
+        }
+      }, onDone: () {
+        // 摄像头这条码流没声音时 ffmpeg 会立刻退出, 把原因带进日志。
+        if (errTail.isNotEmpty) {
+          _log('[网页] ${camera.name}: 声音转码退出 - ${errTail.join(' | ')}');
+        }
+        errTail.clear();
+      });
+      proc.stdout.listen(
+        (chunk) {
+          _lastDataAt = DateTime.now();
+          if (!_chunks.isClosed) {
+            _chunks.add(chunk is Uint8List ? chunk : Uint8List.fromList(chunk));
+          }
+        },
+        onDone: _sourceDied,
+        onError: (_) => _sourceDied(),
+        cancelOnError: true,
+      );
+      proc.exitCode.then((_) {
+        if (_proc == proc) _sourceDied();
+      });
+    } catch (e) {
+      _log('[网页] ${camera.name}: 声音转码启动失败 $e');
+      _sourceDied();
+    }
+  }
+
+  void _startWatchdog() {
+    _watchdog?.cancel();
+    _watchdog = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (_disposed || _proc == null || clients == 0) return;
+      final at = _lastDataAt;
+      if (at != null && DateTime.now().difference(at) < _stallAfter) return;
+      _log('[网页] ${camera.name}: 声音 ${_stallAfter.inSeconds}s 没有数据, 重连');
+      _lastDataAt = DateTime.now();
+      try {
+        _proc?.kill();
+      } on ProcessException {
+        // already gone
+      }
+    });
+  }
+
+  void _sourceDied() {
+    _proc = null;
+    _watchdog?.cancel();
+    _watchdog = null;
+    if (_disposed || clients == 0) return;
+    _failures++;
+    if (_failures >= _maxFailures) {
+      // 连不上/没有音轨: 别无限重启, 等下一次有人重新点开再试。
+      _log('[网页] ${camera.name}: 连续 $_failures 次拿不到声音, 暂停重试');
+      return;
+    }
+    _retry ??= Timer(_retryDelay, () {
+      _retry = null;
+      _retryDelay = _retryDelay * 2 > const Duration(seconds: 10)
+          ? const Duration(seconds: 10)
+          : _retryDelay * 2;
+      _ensureSource();
+    });
+  }
+
+  void _stopSource() {
+    _watchdog?.cancel();
+    _watchdog = null;
+    _retry?.cancel();
+    _retry = null;
+    _lastDataAt = null;
+    _failures = 0;
     try {
       _proc?.kill();
     } on ProcessException {
@@ -325,8 +539,8 @@ class HubServer {
   Future<Map<String, dynamic>> Function(String cameraId,
       {bool? flipH, int? rotationDeg, RtspQuality? quality})? cameraHandler;
 
-  /// 网页静音开关: 写 App 的全局「摄像头静音」(RTSP 音频由 Mac 端播放,
-  /// 网页的 MJPEG 本身没有声音)。
+  /// 网页静音开关: 写 App 的全局「摄像头静音」。App 里正在播的画面音量
+  /// 立刻跟着变; 网页端自己那一路 `<audio>` 也按这个开关启停。
   Future<void> Function(bool muted)? muteHandler;
 
   /// 云台: 网页方向键经这里驱动 ONVIF / HCNetSDK。可注入假客户端测试。
@@ -335,7 +549,9 @@ class HubServer {
   final _states = <String, (PrinterProfile, BambuState)>{};
   final _clients = <WebSocket>{};
   final _relays = <String, CameraRelay>{};
+  final _audioRelays = <String, AudioRelay>{};
   HttpServer? _server;
+  Timer? _heartbeat;
 
   /// 控制串行化：Connect 是 UI 自动化，两个网页同时点会互相踩。
   var _busy = false;
@@ -364,15 +580,26 @@ class HubServer {
     _log('[网页] 网页访问已开启: http://0.0.0.0:${srv.port}'
         ' (token 见设置)');
     srv.listen(_handle, onError: (Object e) => _log('[网页] $e'));
+    // 没有打印机在推送时也要有消息: 页面的卡流看门狗靠它拿到新的帧号,
+    // 空闲的 WebSocket 也容易被系统/路由悄悄掐掉。
+    _heartbeat ??= Timer.periodic(const Duration(seconds: 10), (_) {
+      if (_clients.isNotEmpty) _broadcast();
+    });
   }
 
   Future<void> stop() async {
+    _heartbeat?.cancel();
+    _heartbeat = null;
     final srv = _server;
     _server = null;
     for (final r in _relays.values) {
       r.dispose();
     }
     _relays.clear();
+    for (final r in _audioRelays.values) {
+      r.dispose();
+    }
+    _audioRelays.clear();
     ptz.dispose();
     for (final ws in _clients) {
       await ws.close().catchError((_) {});
@@ -422,8 +649,11 @@ class HubServer {
           await _handlePtz(req);
         default:
           final m = RegExp(r'^/stream/([^/]+)$').firstMatch(path);
+          final am = RegExp(r'^/audio/([^/]+)$').firstMatch(path);
           if (m != null) {
             await _serveMjpeg(req, m.group(1)!);
+          } else if (am != null) {
+            await _serveAudio(req, am.group(1)!);
           } else {
             req.response.statusCode = HttpStatus.notFound;
             await req.response.close();
@@ -641,6 +871,7 @@ class HubServer {
           // Drop the ffmpeg/bmjpeg relay so the next attach re-resolves the
           // URL. Attached viewers see their stream end; the page reloads it.
           _relays.remove(cam.id)?.dispose();
+          _audioRelays.remove(cam.id)?.dispose();
           _log('[网页] ${cam.name}: 码流切到${quality == RtspQuality.sub ? '子' : '主'}码流');
         }
       }
@@ -861,6 +1092,11 @@ class HubServer {
       'printers': c.printerIds,
       if (hasStream && settings.hubToken.isNotEmpty)
         'stream': '/stream/${c.id}?token=${settings.hubToken}',
+      // RTSP 摄像头的声音单独一路 (MP3), 网页用 <audio> 播。
+      if (hasStream && isRtsp && settings.hubToken.isNotEmpty)
+        'audioStream': '/audio/${c.id}?token=${settings.hubToken}',
+      // 已拉流时带上帧号: 网页据此判断画面是不是卡住了。
+      'seq': _relays[c.id]?.seq ?? 0,
       // 画面朝向 (App 的 CameraTile 用同一对字段做 Transform)。
       'flipH': c.flipH,
       'rotation': c.rotationDeg,
@@ -926,14 +1162,27 @@ class HubServer {
     final blankLine = ascii.encode('\r\n\r\n');
     final tail = ascii.encode('\r\n');
 
-    // First paint from the cached frame, then live ones.
+    // First paint from the cached frame, then live ones. The `busy` flag is
+    // backpressure: a phone that locked the screen often keeps the socket
+    // open without reading, and writing every frame would balloon the
+    // response buffer and hand the client minutes of stale video when it
+    // comes back. Drop frames while the last flush is still pending.
+    var busy = false;
+    void push(Uint8List frame) {
+      if (!open || busy) return;
+      busy = true;
+      _emit(req.response, boundaryHead, frame, blankLine, tail);
+      req.response.flush().then((_) {
+        busy = false;
+      }).catchError((_) {
+        busy = false;
+      });
+    }
+
     final first = managed?.latest;
-    if (first != null) _emit(req.response, boundaryHead, first, blankLine, tail);
+    if (first != null) push(first);
     final sub = frames.listen(
-      (frame) {
-        if (!open) return;
-        _emit(req.response, boundaryHead, frame, blankLine, tail);
-      },
+      push,
       onDone: close,
       onError: (_) => close(),
     );
@@ -968,6 +1217,85 @@ class HubServer {
             }
           }
           final url = cur.enabled ? cur.resolveUrl(linked) : null;
+          return url != null && url.isNotEmpty ? url : null;
+        },
+        ffmpegPath: ffmpegPath,
+        log: _log,
+      ),
+    );
+  }
+
+  /// `GET /audio/{cameraId}` — 摄像头声音, MP3 长流。
+  ///
+  /// 浏览器拿 `<audio src>` 直接播; 手机锁屏/切后台时连接会被系统掐掉,
+  /// 页面回到前台会重新挂 (见 hub_page.html 的 syncWalls)。
+  Future<void> _serveAudio(HttpRequest req, String cameraId) async {
+    final cam = _findCamera(cameraId);
+    if (cam == null || !cam.enabled) {
+      req.response.statusCode = HttpStatus.notFound;
+      req.response.write('摄像头不存在或已停用');
+      await req.response.close();
+      return;
+    }
+    if (cam.sourceType != CameraSourceType.rtsp) {
+      req.response.statusCode = HttpStatus.notFound;
+      req.response.write('这台摄像头没有声音');
+      await req.response.close();
+      return;
+    }
+    final relay = _audioRelayFor(cam);
+    if (relay.saturated) {
+      req.response.statusCode = HttpStatus.serviceUnavailable;
+      req.response.write('该画面声音连接数已达上限');
+      await req.response.close();
+      return;
+    }
+    final chunks = relay.attach();
+    req.response.headers.set('Content-Type', 'audio/mpeg');
+    req.response.headers.set('Cache-Control', 'no-cache');
+    req.response.headers.set('Accept-Ranges', 'none');
+    req.response.bufferOutput = false;
+
+    var open = true;
+    var busy = false;
+    void close() {
+      if (!open) return;
+      open = false;
+      relay.detach();
+      req.response.close().catchError((_) => req.response);
+    }
+
+    req.response.done.then((_) => close());
+    final sub = chunks.listen(
+      (chunk) {
+        if (!open || busy) return; // 读得慢就丢一小段, 别让延迟越积越大
+        busy = true;
+        try {
+          req.response.add(chunk);
+          req.response.flush().then((_) {
+            busy = false;
+          }).catchError((_) {
+            busy = false;
+          });
+        } catch (_) {
+          busy = false; // client gone - response.done triggers close
+        }
+      },
+      onDone: close,
+      onError: (_) => close(),
+    );
+    await req.response.done.then((_) => sub.cancel());
+  }
+
+  AudioRelay _audioRelayFor(CameraProfile c) {
+    return _audioRelays.putIfAbsent(
+      c.id,
+      () => AudioRelay(
+        camera: c,
+        // 和画面一样: 每次重连都重新解析 (码流/地址可能被改过)。
+        resolveUrl: () {
+          final cur = _findCamera(c.id) ?? c;
+          final url = cur.enabled ? cur.resolveUrl(null) : null;
           return url != null && url.isNotEmpty ? url : null;
         },
         ffmpegPath: ffmpegPath,
