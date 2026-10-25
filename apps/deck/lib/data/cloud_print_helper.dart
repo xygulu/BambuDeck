@@ -51,6 +51,16 @@ class CloudPrintStep {
         sincePrev: (j['since_prev'] as num?)?.toDouble(),
       );
 
+  /// Same shape as the helper's JSON, so a step list can be forwarded
+  /// verbatim through the web API (jsonEncode can't take the object itself).
+  Map<String, dynamic> toJson() => {
+        'step': step,
+        'ok': ok,
+        if (detail != null) 'detail': detail,
+        if (elapsed != null) 'elapsed': elapsed,
+        if (sincePrev != null) 'since_prev': sincePrev,
+      };
+
   @override
   String toString() {
     final t = elapsed == null ? '' : ' +${elapsed!.toStringAsFixed(1)}s';

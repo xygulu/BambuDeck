@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:deck/data/app_settings.dart';
 import 'package:deck/data/camera_profile.dart';
+import 'package:deck/data/cloud_print_helper.dart';
 import 'package:deck/data/hub_ptz.dart';
 import 'package:deck/data/hub_server.dart';
 import 'package:deck/data/printer_profile.dart';
@@ -306,6 +307,29 @@ void main() {
       expect(body['ok'], isTrue);
       expect(body['printer'], '车间 A1');
       expect(calls, ['p1:pause']);
+    });
+
+    // 换盘成功却被报成失败 (2026-10-25): 响应里直接塞了 List<CloudPrintStep>,
+    // jsonEncode 编不动, 整个请求变 500 —— 网页看到成功日志却弹失败。
+    test('POST /api/plate-swap returns the handler result with its steps',
+        () async {
+      hub.settings = hubSettings();
+      hub.printers = [printer(autoPlateSwap: true)];
+      hub.plateSwapHandler = (profile) async => <String, dynamic>{
+            'ok': true,
+            'printer': profile.name,
+            'steps': const [CloudPrintStep(step: 'send', ok: true, elapsed: 1.2)]
+                .map((s) => s.toJson())
+                .toList(),
+          };
+      await hub.start();
+
+      final res = await post('/api/plate-swap', {'printer': 'p1'});
+      expect(res.statusCode, 200);
+      final body = jsonDecode(await res.transform(utf8.decoder).join()) as Map;
+      expect(body['ok'], isTrue);
+      expect((body['steps'] as List).single,
+          containsPair('step', 'send'));
     });
 
     test('POST /api/control validates token, printer and command', () async {

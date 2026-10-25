@@ -205,7 +205,9 @@ class _DeckAppState extends ConsumerState<DeckApp> {
         if (r.taskStatus != null) 'taskStatus': r.taskStatus,
         if (r.elapsedTotal != null) 'elapsed': r.elapsedTotal,
         if (r.error != null) 'error': r.error,
-        'steps': r.steps,
+        // CloudPrintStep 不是 JSON 原生类型；直接塞进去会让整个响应编码失败，
+        // 换盘明明成功了网页却收到 500。
+        'steps': r.steps.map((s) => s.toJson()).toList(),
       };
     };
     // 网页端速度档位 / 腔灯：和 App 控制卡一样只发到本机 MQTT 连接。
