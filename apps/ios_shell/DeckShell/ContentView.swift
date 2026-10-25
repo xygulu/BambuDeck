@@ -42,7 +42,7 @@ struct ContentView: View {
 
     private func console(_ cfg: ServerConfig, _ base: String) -> some View {
         ZStack(alignment: .topTrailing) {
-            page(cfg, base)
+            page(base)
             // 选路那 2 秒里别闪错误页。
             if let text = failure, !router.resolving {
                 FailureView(message: text,
@@ -52,74 +52,9 @@ struct ContentView: View {
                             onEdit: { editing = true })
             }
         }
-        // 服务器入口放在页面之上的一条窄栏里, 不浮在画面上 —— 之前浮在
-        // 右下角会压住摄像头和监控画面。
-        .safeAreaInset(edge: .top, spacing: 0) {
-            serverBar(cfg, base)
-        }
         .background(Palette.bg)
-    }
-
-    private func serverBar(_ cfg: ServerConfig, _ base: String) -> some View {
-        HStack(spacing: 0) {
-            Spacer(minLength: 0)
-            serverCapsule(cfg, base)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 3)
-        .frame(maxWidth: .infinity)
-        .background(Palette.surface)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Palette.line).frame(height: 0.5)
-        }
-    }
-
-    @ViewBuilder
-    private func page(_ cfg: ServerConfig, _ base: String) -> some View {
-        if let url = cfg.consoleURL(base: base) {
-            WebView(url: url,
-                    reloadSignal: reload,
-                    onFailure: { msg in
-                        failure = msg
-                        // 可能只是离开了家里的 Wi-Fi：让 router 试另一条线路。
-                        router.notePageFailure()
-                    },
-                    onLoaded: { failure = nil })
-                .ignoresSafeArea(edges: .bottom)
-        }
-    }
-
-    private func retry() {
-        failure = nil
-        reload += 1
-        router.resolve()
-    }
-
-    /// 右下角胶囊 = 当前线路 + 地址，点开改地址/令牌。
-    private func serverCapsule(_ cfg: ServerConfig, _ base: String) -> some View {
-        let route = router.route
-        return Button {
-            editing = true
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: route?.symbol ?? "gearshape.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                Text(route?.title ?? "服务器")
-                    .font(.system(size: 10.5, weight: .medium))
-                Text(ServerConfig.displayAddress(base))
-                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .foregroundStyle(.white.opacity(0.92))
-            .padding(.horizontal, 10)
-            .frame(height: 26)
-            .frame(maxWidth: 210)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
-        }
-        .accessibilityLabel("服务器：\(route?.title ?? "") \(ServerConfig.displayAddress(base))")
-        .accessibilityHint("修改局域网和外网地址、访问令牌")
+        // 入口是网页顶栏里连接状态左边那个齿轮: 页面只在检测到消息桥时
+        // 才显示它, 点了从这边弹设置页。页面上不再盖任何东西。
         .sheet(isPresented: $editing) {
             SetupView(initial: cfg, isSheet: true) { next in
                 failure = nil
@@ -132,6 +67,28 @@ struct ContentView: View {
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
         }
+    }
+
+    @ViewBuilder
+    private func page(_ base: String) -> some View {
+        if let url = router.config?.consoleURL(base: base) {
+            WebView(url: url,
+                    reloadSignal: reload,
+                    onFailure: { msg in
+                        failure = msg
+                        // 可能只是离开了家里的 Wi-Fi：让 router 试另一条线路。
+                        router.notePageFailure()
+                    },
+                    onLoaded: { failure = nil },
+                    onServerTap: { editing = true })
+                .ignoresSafeArea(edges: .bottom)
+        }
+    }
+
+    private func retry() {
+        failure = nil
+        reload += 1
+        router.resolve()
     }
 
     private var routeLine: String {

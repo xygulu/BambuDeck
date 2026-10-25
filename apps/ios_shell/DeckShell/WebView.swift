@@ -8,6 +8,9 @@ struct WebView: UIViewRepresentable {
     let reloadSignal: Int
     let onFailure: (String) -> Void
     let onLoaded: () -> Void
+    /// 页面顶栏的齿轮（`#srv`）被点了。页面只在检测到 `deckServer`
+    /// 消息桥时才显示那个齿轮，所以这段代码只在壳里有意义。
+    let onServerTap: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -17,6 +20,8 @@ struct WebView: UIViewRepresentable {
         conf.allowsInlineMediaPlayback = true
         conf.mediaTypesRequiringUserActionForPlayback = []
         conf.websiteDataStore = .default()
+        // 页面里的齿轮 → 打开「服务器」设置页。
+        conf.userContentController.add(context.coordinator, name: Coordinator.serverBridge)
         let view = WKWebView(frame: .zero, configuration: conf)
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
@@ -43,13 +48,29 @@ struct WebView: UIViewRepresentable {
         view.load(URLRequest(url: url))
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    /// WKWebView 不弱引用消息处理器，拆掉视图时得自己摘，否则连同
+    /// Coordinator 一起留在配置里。
+    static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
+        view.configuration.userContentController
+            .removeScriptMessageHandler(forName: Coordinator.serverBridge)
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate,
+                             WKScriptMessageHandler {
+        static let serverBridge = "deckServer"
+
         var parent: WebView
         var lastReload = 0
         var lastURL: URL?
 
         init(_ parent: WebView) {
             self.parent = parent
+        }
+
+        func userContentController(_ controller: WKUserContentController,
+                                   didReceive message: WKScriptMessage) {
+            guard message.name == Self.serverBridge else { return }
+            DispatchQueue.main.async { self.parent.onServerTap() }
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

@@ -57,6 +57,22 @@
   .seg button.on { background: rgba(74, 222, 128, .14); color: var(--running); }
   .seg svg { width: 14px; height: 14px; }
 
+  /* 服务器地址/令牌入口, 挨着连接状态放在它左边。只有 iPhone 壳里能用
+     (壳注入了 deckServer 消息桥, 见文件末尾); 浏览器和 Mac App 的设置
+     在 App 自己那儿, 这里隐藏。 */
+  .srv {
+    display: none; margin-left: auto; flex: 0 0 auto;
+    width: 28px; height: 28px; padding: 0; border: 0; border-radius: 8px;
+    background: transparent; color: var(--text2); cursor: pointer;
+    align-items: center; justify-content: center;
+  }
+  .srv.on { display: inline-flex; }
+  .srv:hover, .srv:active { background: rgba(255, 255, 255, .07); color: var(--text); }
+  .srv:focus-visible { outline: 2px solid var(--running); outline-offset: 1px; }
+  .srv svg { width: 17px; height: 17px; }
+  /* 齿轮出现时由它撑开左侧空隙, 连接状态不用自己再顶到右边。 */
+  .srv.on + .conn { margin-left: 0; }
+
   .conn {
     margin-left: auto; display: flex; align-items: center; gap: 6px;
     font-size: 12px; color: var(--text2); white-space: nowrap;
@@ -513,6 +529,8 @@
     .conn { gap: 5px; font-size: 12px; min-width: 0; }
     .conn .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 78px; }
     .conn i { width: 8px; height: 8px; }
+    .srv { width: 26px; height: 26px; }
+    .srv svg { width: 16px; height: 16px; }
 
     /* 列表 */
     .rail-head { padding: 10px 14px 2px; }
@@ -569,38 +587,40 @@
     .sw span.track::after { width: 14px; height: 14px; }
     .sw input:checked + span.track::after { transform: translateX(14px); }
 
-    /* AMS: 一行。色块缩成 12px 圆点, 型号和余量并排, 外部料卷接在同一行;
-       多台 AMS / 超长型号时横向滑动。 */
+    /* AMS: 每台 AMS 是一个整体, 一行放不下就整台换到下一行
+       (AMS1 一行、AMS2 一行), 不横向滑动。只有单台自己都超宽时,
+       才在它内部把料盘折行。 */
     .toprow .amscard { padding: 8px 10px; }
     .ams-row {
-      flex-wrap: nowrap; align-items: center; gap: 8px; width: 100%;
-      overflow-x: auto; scrollbar-width: none;
+      flex-wrap: wrap; align-items: center; gap: 5px 8px; width: 100%;
     }
-    .ams-row::-webkit-scrollbar { display: none; }
     .ams-unit {
-      flex: 0 0 auto; display: flex; align-items: center; gap: 5px;
-      padding: 0; background: none; border: 0; border-radius: 0;
+      flex: 0 0 auto; max-width: 100%;
+      display: flex; align-items: center; gap: 2px;
+      padding: 2px 4px; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 8px;
     }
-    .ams-unit + .ams-unit { padding-left: 9px; border-left: 1px solid var(--border); }
-    .ams-unit .uh { margin: 0; gap: 3px; flex: 0 0 auto; }
-    .ams-unit .uh b { font-size: 11px; }
-    .hum, .dry { font-size: 10px; }
-    .dry { padding: 0 4px; }
-    .trays { gap: 5px; }
-    .tray { flex-direction: row; align-items: center; gap: 4px; width: auto; }
-    .tray .c { width: 12px; height: 12px; border-width: 1px; }
+    .ams-unit .uh { margin: 0; gap: 2px; flex: 0 0 auto; }
+    .ams-unit .uh b { font-size: 10.5px; }
+    .hum, .dry { font-size: 9px; }
+    .hum { gap: 2px; }
+    .hum i { width: 5px; height: 5px; }
+    .dry { padding: 0 3px; }
+    .trays { gap: 3px; flex-wrap: wrap; }
+    .tray { flex-direction: row; align-items: center; gap: 3px; width: auto; }
+    .tray .c { width: 11px; height: 11px; border-width: 1px; }
     .tray.active .c { border-width: 2px; }
-    .tray .t { margin: 0; font-size: 10.5px; max-width: 46px; }
-    .tray .p { font-size: 10px; }
+    .tray .t { margin: 0; font-size: 10px; max-width: 42px; }
+    .tray .p { font-size: 9px; }
     .tray .play { width: 9px; height: 9px; font-size: 6px; right: -3px; top: -3px; bottom: auto; }
     /* IN/OUT 从色块里挪出来, 跟在余量后面, 12px 的圆点里塞不下。 */
     .tray .flow {
       position: static; transform: none; width: auto; height: auto;
-      background: none; color: var(--running); font-size: 9px;
+      background: none; color: var(--running); font-size: 8.5px;
     }
-    /* 一行放不下时 (4 个料盘 + 外部料卷), 右边缘渐隐提示还能往左滑;
-       滑到底由 JS 摘掉 .more。 */
-    .ams-row.more, .ctl-row.more {
+    /* 控制行一行放不下时右边缘渐隐提示还能继续滑, 滑到底由 JS 摘掉 .more。
+       AMS 不给这个提示: 它是整台换行, 不横向滑动。 */
+    .ctl-row.more {
       -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
       mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
     }
@@ -673,6 +693,9 @@
       摄像头
     </button>
   </div>
+  <button class="srv" id="srv" type="button" aria-label="服务器地址和令牌" title="服务器地址和令牌">
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
+  </button>
   <span class="conn" id="conn"><i></i><span class="txt">连接中…</span></span>
   <span id="clock"></span>
 </header>
@@ -1005,11 +1028,12 @@ function buildPane(p) {
   markScrollables($('pane-body'));
 }
 
-/* 手机上一行放不下时给个渐隐提示 (见 .ams-row.more)。 */
+/* 手机上一行放不下时给个渐隐提示 (见 .ctl-row.more)。
+   AMS 行不滑动: 整台 AMS 换行, 不需要提示。 */
 function markScrollables(root) {
   if (!root) return;
   requestAnimationFrame(() => {
-    for (const row of root.querySelectorAll('.ams-row, .ctl-row')) {
+    for (const row of root.querySelectorAll('.ctl-row')) {
       const overflow = () => row.scrollWidth - row.clientWidth > 2;
       const sync = () => {
         const atEnd = row.scrollLeft + row.clientWidth >= row.scrollWidth - 2;
@@ -1679,6 +1703,19 @@ async function boot() {
   } catch (_) { /* ws 重连会给出连接状态 */ }
   if (!ws) connect();
 }
+/* iPhone 壳 (DeckShell) 会注入 deckServer 消息桥。只有桥在的时候才露出
+   齿轮 —— 浏览器和 Mac App 没有这个桥, 改服务器地址走 App 自己的设置。 */
+(function () {
+  const btn = $('srv');
+  const bridge = window.webkit && window.webkit.messageHandlers
+    && window.webkit.messageHandlers.deckServer;
+  if (!btn || !bridge) return;
+  btn.classList.add('on');
+  btn.addEventListener('click', () => {
+    try { bridge.postMessage('open'); } catch (_) {}
+  });
+})();
+
 if (TOKEN) boot();
 </script>
 </body>
