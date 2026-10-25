@@ -240,6 +240,12 @@
   .ctl { display: flex; flex-direction: column; justify-content: center; gap: 8px; }
   .ctl-title { font-size: 13px; font-weight: 600; }
   .ctl-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  /* 手机上按钮装在 .ctl-scroll 里自己横滑, AMS 芯片固定在行尾 (见 ≤700px)。
+     桌面端这层壳不参与布局, 按钮还是直接排在 .ctl-row 里。 */
+  .ctl-scroll { display: contents; }
+  /* AMS 芯片和弹出层只在手机上出现; 桌面端 AMS 是单独一张卡。 */
+  .ams-chip { display: none; }
+  .ams-pop { display: none; }
   .lbl { font-size: 12px; color: var(--text2); }
   /* 「速度」跟着分段控件、「灯」跟着开关一起换行, 不拆散。 */
   .ctlgrp { display: inline-flex; align-items: center; gap: 8px; }
@@ -273,24 +279,12 @@
   .speed button.on { background: rgba(74,222,128,.18); color: var(--running); }
   .speed button:disabled { opacity: .35; cursor: default; }
 
-  .lamp { display: inline-flex; color: var(--text2); }
-  .lamp.on { color: #FFC107; }
+  /* 腔灯就是一个图标按钮: 点一下开关, 亮的时候琥珀色、灭的时候灰。 */
+  .lamp { color: var(--text2); }
+  .lamp.on { color: #FFC107; background: rgba(255,193,7,.14); }
   .lamp svg { width: 17px; height: 17px; }
-  .sw { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
-  .sw input { position: absolute; opacity: 0; width: 0; height: 0; }
-  .sw span.track {
-    width: 36px; height: 20px; border-radius: 999px;
-    background: rgba(148,163,184,.35); position: relative;
-    transition: background .15s;
-  }
-  .sw span.track::after {
-    content: ""; position: absolute; top: 2px; left: 2px;
-    width: 16px; height: 16px; border-radius: 50%;
-    background: #fff; transition: transform .15s;
-  }
-  .sw input:checked + span.track { background: var(--running); }
-  .sw input:checked + span.track::after { transform: translateX(16px); }
-  .sw input:disabled + span.track { opacity: .35; }
+  /* 灯的按钮外框和速度分段控件一样高。 */
+  .btn.icon.lamp { height: 31px; }
 
   /* AMS 卡 */
   .amscard { display: flex; align-items: center; }
@@ -575,10 +569,43 @@
     .ctl-title { display: none; }
     .ctl-row {
       flex-wrap: nowrap; gap: 4px; align-items: center;
+      width: 100%;
+    }
+    /* 按钮自己横滑, 右边的 AMS 芯片始终留在行尾, 不会被滑出去。 */
+    .ctl-scroll {
+      display: flex; gap: 4px; align-items: center;
+      flex: 1 1 auto; min-width: 0;
       overflow-x: auto; scrollbar-width: none;
     }
-    .ctl-row::-webkit-scrollbar { display: none; }
-    .ctl-row > *, .ctlgrp { flex: 0 0 auto; }
+    .ctl-scroll::-webkit-scrollbar { display: none; }
+    .ctl-scroll > *, .ctlgrp { flex: 0 0 auto; }
+    /* AMS: 只显示当前进料的那一个通道, 点开在芯片旁边弹出全部料盘。 */
+    .toprow .amscard { display: none; }
+    /* 通道芯片: 色圈在上、编号 (A1F3) 在下, 横向只占一个按钮宽。 */
+    .ams-chip {
+      display: inline-flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 2px;
+      flex: 0 0 auto; height: 36px; min-width: 38px; padding: 0 6px;
+      border: 1px solid var(--border); border-radius: 10px;
+      background: var(--card); color: var(--text);
+      font: inherit; font-size: 11.5px; cursor: pointer;
+    }
+    .ams-chip[hidden] { display: none; }
+    .ams-chip .c {
+      width: 12px; height: 12px; border-radius: 50%;
+      border: 1px solid rgba(255, 255, 255, .6);
+    }
+    .ams-chip .t { font-size: 9.5px; font-weight: 700; line-height: 1; letter-spacing: .2px; }
+    .ams-pop { position: fixed; inset: 0; z-index: 30; display: none; }
+    .ams-pop.open { display: block; }
+    .ams-pop-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .38); }
+    .ams-pop-card {
+      position: fixed; max-height: 62vh; overflow-y: auto;
+      padding: 10px; border-radius: 12px;
+      background: var(--card); border: 1px solid var(--border);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, .5);
+    }
+    .ams-pop-body .ams-row { gap: 4px 8px; }
     .btn { height: 36px; font-size: 13px; padding: 0 10px; gap: 5px; }
     .btn .btn-txt { display: none; }
     .btn.icon { width: 36px; }
@@ -587,12 +614,10 @@
     .lbl { display: none; }
     .ctlgrp { gap: 6px; }
     .speed { padding: 2px; }
-    .speed button { padding: 4px 6px; font-size: 11px; }
-    .lamp svg { width: 15px; height: 15px; }
-    .sw { padding: 0; }
-    .sw span.track { width: 32px; height: 18px; }
-    .sw span.track::after { width: 14px; height: 14px; }
-    .sw input:checked + span.track::after { transform: translateX(14px); }
+    .speed button { padding: 4px 8px; font-size: 11px; }
+    /* 灯: 外框和速度分段控件一样高, 图标大一点更好点。 */
+    .btn.icon.lamp { border-radius: 8px; }
+    .lamp svg { width: 19px; height: 19px; }
 
     /* AMS: 每台 AMS 是一个整体, 一行放不下就整台换到下一行
        (AMS1 一行、AMS2 一行), 不横向滑动。只有单台自己都超宽时,
@@ -629,9 +654,9 @@
     }
     /* 控制行一行放不下时右边缘渐隐提示还能继续滑, 滑到底由 JS 摘掉 .more。
        AMS 不给这个提示: 它是整台换行, 不横向滑动。 */
-    .ctl-row.more {
-      -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
-      mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+    .ctl-scroll.more {
+      -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 30px), transparent);
+      mask-image: linear-gradient(90deg, #000 calc(100% - 30px), transparent);
     }
     .ams-none { font-size: 13px; }
 
@@ -1020,35 +1045,51 @@ function buildPane(p) {
       <div class="card ctl">
         <div class="ctl-title">控制</div>
         <div class="ctl-row">
+          <div class="ctl-scroll">
           <button class="btn primary" id="b-pause" data-act="pause" aria-label="暂停" title="暂停">${ICON.pause}<span class="btn-txt">暂停</span></button>
           <button class="btn primary" id="b-resume" data-act="resume" aria-label="恢复" title="恢复">${ICON.play}<span class="btn-txt">恢复</span></button>
           <button class="btn icon danger" id="b-stop" data-act="stop" aria-label="停止" title="停止">${ICON.stop}</button>
           <span class="ctlgrp"><span class="lbl">速度</span>
             <div class="speed" id="speed">
-              <button data-speed="1">静音</button><button data-speed="2">标准</button>
-              <button data-speed="3">运动</button><button data-speed="4">疯狂</button>
+              <button data-speed="1" title="静音" aria-label="静音">静</button>
+              <button data-speed="2" title="标准" aria-label="标准">标</button>
+              <button data-speed="3" title="运动" aria-label="运动">运</button>
+              <button data-speed="4" title="疯狂" aria-label="疯狂">狂</button>
             </div>
           </span>
-          <span class="ctlgrp"><span class="lamp" id="lamp">${ICON.bulbOff}</span>
-            <label class="sw"><input type="checkbox" id="light"><span class="track"></span></label>
-          </span>
+          <button class="btn icon lamp" id="lamp" type="button" aria-label="腔灯" title="开灯">${ICON.bulbOff}</button>
           ${p.plateSwap
             ? `<button class="btn outline" id="b-swap" data-act="plate-swap" aria-label="一键换盘" title="一键换盘">${ICON.swap}<span class="btn-txt">一键换盘</span></button>`
             : ''}
+          </div>
+          <button class="ams-chip" id="ams-chip" type="button" aria-label="AMS 状态" title="AMS 状态" hidden>
+            <span class="t">AMS</span>
+          </button>
         </div>
       </div>
       <div class="card amscard" id="ams"></div>
     </div>
-    <div class="wall" id="camwall"></div>`;
+    <div class="wall" id="camwall"></div>
+    <div class="ams-pop" id="ams-pop">
+      <div class="ams-pop-backdrop"></div>
+      <div class="ams-pop-card" role="dialog" aria-label="AMS 状态">
+        <div class="ams-pop-body" id="ams-pop-body"></div>
+      </div>
+    </div>`;
+  // 手机上 AMS 只留一个「当前进料通道」的小芯片, 点开在旁边弹出全部信息。
+  const chip = $('ams-chip');
+  if (chip) chip.onclick = e => { e.stopPropagation(); openAmsPop(); };
+  const pop = $('ams-pop');
+  if (pop) pop.querySelector('.ams-pop-backdrop').onclick = closeAmsPop;
   markScrollables($('pane-body'));
 }
 
-/* 手机上一行放不下时给个渐隐提示 (见 .ctl-row.more)。
+/* 手机上一行放不下时给个渐隐提示 (见 .ctl-scroll.more)。
    AMS 行不滑动: 整台 AMS 换行, 不需要提示。 */
 function markScrollables(root) {
   if (!root) return;
   requestAnimationFrame(() => {
-    for (const row of root.querySelectorAll('.ctl-row')) {
+    for (const row of root.querySelectorAll('.ctl-scroll')) {
       const overflow = () => row.scrollWidth - row.clientWidth > 2;
       const sync = () => {
         const atEnd = row.scrollLeft + row.clientWidth >= row.scrollWidth - 2;
@@ -1056,6 +1097,12 @@ function markScrollables(root) {
       };
       sync();
       row.onscroll = sync;
+      // 骨架可能是在「列表」状态下建的 (#pane 隐藏, 宽度 0), 等它显示出来
+      // 宽度变了得重新判断一次, 否则渐隐提示一直不出现。
+      if (window.ResizeObserver && !row._ro) {
+        row._ro = new ResizeObserver(sync);
+        row._ro.observe(row);
+      }
     }
   });
 }
@@ -1102,11 +1149,12 @@ function updatePane(p) {
   }
   const lamp = $('lamp');
   if (lamp) {
-    lamp.className = 'lamp' + (s.light ? ' on' : '');
+    lamp.classList.toggle('on', !!s.light);
     lamp.innerHTML = s.light ? ICON.bulbOn : ICON.bulbOff;
+    lamp.disabled = busy;
+    lamp.title = s.light ? '关灯' : '开灯';
+    lamp.setAttribute('aria-label', s.light ? '腔灯已开' : '腔灯已关');
   }
-  const light = $('light');
-  if (light) { light.checked = !!s.light; light.disabled = busy; }
 
   if (busy) {
     const t = $('ptitle');
@@ -1158,6 +1206,59 @@ function humColor(u) {
     : u.humidity <= 1 ? 'var(--error)' : 'var(--warning)';
 }
 
+/* 手机控制行最右边那颗芯片: 只显示当前进料的那一个通道。 */
+function renderAmsChip(ams) {
+  const chip = $('ams-chip');
+  if (!chip) return;
+  if (!ams) { chip.hidden = true; return; }
+  // 通道编号: AMS1 的第 3 个料盘 = A1F3, 外部料卷 = EXT, AMS HT = H1F2。
+  let t = null, unit = '', code = '';
+  if (ams.activeId === 254 && ams.vt) {
+    t = ams.vt; unit = '外部料卷'; code = 'EXT';
+  } else {
+    const u = (ams.units || []).find(x => x.id === ams.activeId);
+    if (u) {
+      t = (u.trays || [])[ams.activeIndex];
+      const n = u.id >= 128 ? u.id - 127 : u.id + 1;
+      unit = u.id >= 128 ? `AMS HT${n}` : `AMS${n}`;
+      code = (u.id >= 128 ? 'H' : 'A') + n + 'F' + (ams.activeIndex + 1);
+    }
+  }
+  chip.hidden = false;
+  if (!t || !t.present || !code) {
+    // 没在进料 (空闲/刚开机): 芯片只是个入口。
+    chip.innerHTML = '<span class="t">AMS</span>';
+    chip.title = 'AMS 状态';
+    return;
+  }
+  const pct = t.remain >= 0 ? t.remain + '%' : '';
+  chip.innerHTML = `<span class="c" style="background:${esc(t.color || '#262E37')}"></span>` +
+    `<span class="t">${code}</span>`;
+  chip.title = `${unit} 第${ams.activeIndex + 1}盘 · ${t.type || ''} ${pct}`.trim();
+}
+
+/* 弹层贴在芯片右下: 右边缘对齐, 下方展开, 不跳页。 */
+function openAmsPop() {
+  const pop = $('ams-pop'), chip = $('ams-chip');
+  if (!pop || !chip || chip.hidden) return;
+  const card = pop.querySelector('.ams-pop-card');
+  const r = chip.getBoundingClientRect();
+  const w = Math.min(360, window.innerWidth - 24);
+  card.style.width = w + 'px';
+  // 右边缘对齐芯片; 屏幕太窄时至少离左边 12px。
+  card.style.right = Math.max(12, Math.min(window.innerWidth - r.right,
+                                           window.innerWidth - w - 12)) + 'px';
+  card.style.left = 'auto';
+  card.style.top = (r.bottom + 6) + 'px';
+  card.style.maxHeight = Math.max(120, window.innerHeight - r.bottom - 20) + 'px';
+  pop.classList.add('open');
+}
+
+function closeAmsPop() {
+  const pop = $('ams-pop');
+  if (pop) pop.classList.remove('open');
+}
+
 function renderAms(p) {
   const el = $('ams');
   if (!el) return;
@@ -1166,8 +1267,11 @@ function renderAms(p) {
   const sig = JSON.stringify([p.id, ams || null, s ? s.stgCur : null]);
   if (sig === amsSig) return;
   amsSig = sig;
+  renderAmsChip(ams);
   if (!ams) {
     el.innerHTML = '<span class="ams-none">未检测到 AMS</span>';
+    const body = $('ams-pop-body');
+    if (body) body.innerHTML = '<span class="ams-none">未检测到 AMS</span>';
     return;
   }
   // 进料/退料方向来自打印子阶段 stg_cur (24 进料 / 22 退料)。
@@ -1180,9 +1284,13 @@ function renderAms(p) {
       <div class="trays">${trayHtml(ams.vt, ams.activeId === 254, flow)}</div>
     </div>`);
   }
-  el.innerHTML = parts.length
+  const html = parts.length
     ? `<div class="ams-row">${parts.join('')}</div>`
     : '<span class="ams-none">AMS 未连接</span>';
+  el.innerHTML = html;
+  // 桌面端是那张卡; 手机端同一份内容放进弹层里。
+  const body = $('ams-pop-body');
+  if (body) body.innerHTML = html;
   markScrollables(el);
 }
 
@@ -1591,12 +1699,9 @@ $('pane').addEventListener('click', e => {
   if (b && !b.hidden) { sendAction(p.id, b.dataset.act); return; }
   const sb = e.target.closest('button[data-speed]');
   if (sb) { setOn(p.id, { speed: Number(sb.dataset.speed) }, '速度'); return; }
-});
-$('pane').addEventListener('change', e => {
-  const p = selected();
-  if (!p) return;
-  if (e.target.id === 'light') {
-    setOn(p.id, { light: e.target.checked }, '腔灯');
+  const lamp = e.target.closest('#lamp');
+  if (lamp && !lamp.disabled) {
+    setOn(p.id, { light: !(p.state && p.state.light) }, '腔灯');
   }
 });
 
