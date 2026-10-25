@@ -79,6 +79,11 @@ Future<void> showEditPrinterDialog(
           ]),
         ),
       ),
+      // AlertDialog.actions 由 OverflowBar 布局, 只接受按钮: 放 Spacer
+      // (Flexible) 会抛 "Incorrect use of ParentDataWidget", 整个对话框
+      // 构建失败, 用户只看到一片灰 (反馈 2026-10-25)。删除靠左用
+      // spaceBetween + 右侧按钮组实现。
+      actionsAlignment: MainAxisAlignment.spaceBetween,
       actions: [
         // 删除收进编辑对话框 (2026-10-21: 显眼位置易误触), 二次确认后执行。
         TextButton(
@@ -109,13 +114,15 @@ Future<void> showEditPrinterDialog(
           },
           child: const Text('删除打印机'),
         ),
-        const Spacer(),
-        TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消')),
-        FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('保存')),
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          const SizedBox(width: 4),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ]),
       ],
     ),
   );
