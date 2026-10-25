@@ -159,13 +159,25 @@ class CameraRelay {
     _frames.close();
   }
 
+  /// 视频源暂时取不到 (打印机离线 / 刚建好还没配) 时多久再试。
+  ///
+  /// 不重试的话, 页面会一直挂着一条没有帧的连接, 服务端也永远不再解析源:
+  /// 打印机回来以后画面还是黑的, 只能退出重进页面 (反馈 2026-10-25)。
+  Duration sourceRetryInterval = const Duration(seconds: 5);
+  var _loggedNoSource = false;
+
   void _ensureSource() {
     if (_disposed || _bambu != null || _proc != null || _retry != null) return;
     final url = resolveUrl();
     if (url == null || url.isEmpty) {
-      _log('[网页] ${camera.name}: 未配置视频源');
+      if (!_loggedNoSource) {
+        _loggedNoSource = true;
+        _log('[网页] ${camera.name}: 还没有可用的视频源, 后台继续重试');
+      }
+      _retrySource();
       return;
     }
+    _loggedNoSource = false;
     if (url.startsWith('bmjpeg://')) {
       final p = parseBambuMjpegUrl(url);
       if (p == null) {
@@ -263,6 +275,16 @@ class CameraRelay {
       } on ProcessException {
         // already gone
       }
+    });
+  }
+
+  /// 源暂时不可用时排一次重试 (只在还有观众时)。不碰 [_retryDelay] ——
+  /// 那是 ffmpeg 退出后的退避, 两条路径互不干扰。
+  void _retrySource() {
+    if (_disposed || clients == 0 || _retry != null) return;
+    _retry = Timer(sourceRetryInterval, () {
+      _retry = null;
+      if (clients > 0) _ensureSource();
     });
   }
 

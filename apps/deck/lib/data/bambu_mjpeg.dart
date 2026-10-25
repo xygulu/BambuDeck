@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 /// The A1 / A1 mini / P1 / P1P camera does not speak RTSP: it serves
@@ -146,6 +147,8 @@ class BambuMjpegStream {
     required this.password,
     this.onFrame,
     this.onError,
+    this.idleTimeout = const Duration(seconds: 10),
+    this.connect,
   });
 
   final String host;
@@ -155,12 +158,30 @@ class BambuMjpegStream {
   final void Function(Uint8List jpeg)? onFrame;
   final void Function(String message)? onError;
 
+  /// 打印机/网络上这么久一个字节都没送来就自己断开重连。
+  ///
+  /// TCP 半开时 socket 既不报错也不关闭, `await for` 会永远等下去 —— 画面
+  /// 就此定格, 而且只有重启 App 才能好。A1 的机内摄像头走的是这条链路。
+  final Duration idleTimeout;
+
+  /// 测试注入: 默认 TLS 连接 (打印机自签证书)。
+  final Future<Socket> Function(String host, int port)? connect;
+
   bool _disposed = false;
-  SecureSocket? _socket;
+  Socket? _socket;
   Timer? _retry;
+  Timer? _idleWatch;
+  DateTime? _lastDataAt;
 
   static const _connectTimeout = Duration(seconds: 5);
   var _retryDelay = const Duration(milliseconds: 800);
+
+  Future<Socket> _tlsConnect(String host, int port) => SecureSocket.connect(
+        host,
+        port,
+        onBadCertificate: (_) => true,
+        timeout: _connectTimeout,
+      );
 
   void start() {
     _disposed = false;
@@ -171,8 +192,7 @@ class BambuMjpegStream {
     if (_disposed) return;
     var ok = false;
     try {
-      final socket = await SecureSocket.connect(host, port,
-          onBadCertificate: (_) => true, timeout: _connectTimeout);
+      final socket = await (connect ?? _tlsConnect)(host, port);
       _socket = socket;
       socket.add(buildMjpegAuthPacket(username, password));
       await _pump(socket);
@@ -184,6 +204,8 @@ class BambuMjpegStream {
     } catch (e) {
       onError?.call('$e');
     }
+    _idleWatch?.cancel();
+    _idleWatch = null;
     if (_disposed) return;
     if (ok) _retryDelay = const Duration(milliseconds: 800);
     _retry = Timer(_retryDelay, _run);
@@ -195,18 +217,47 @@ class BambuMjpegStream {
 
   /// Reads framed JPEGs until the socket dies. Returns normally on close;
   /// errors propagate to _run's catch.
-  Future<void> _pump(SecureSocket socket) async {
+  Future<void> _pump(Socket socket) async {
     final framer = MjpegFramer();
+    _startIdleWatch(socket);
     await for (final chunk in socket) {
+      _lastDataAt = DateTime.now();
       for (final frame in framer.add(chunk)) {
         onFrame?.call(frame);
       }
     }
   }
 
+  void _startIdleWatch(Socket socket) {
+    _lastDataAt = DateTime.now();
+    _idleWatch?.cancel();
+    // 超时很短 (测试) 时轮询也要跟着变短。
+    final tick = idleTimeout > const Duration(seconds: 2)
+        ? const Duration(seconds: 1)
+        : Duration(milliseconds: max(20, idleTimeout.inMilliseconds ~/ 4));
+    _idleWatch = Timer.periodic(tick, (_) {
+      final at = _lastDataAt;
+      if (_disposed || at == null) return;
+      if (DateTime.now().difference(at) < idleTimeout) return;
+      _lastDataAt = DateTime.now(); // 避免连发
+      onError?.call('${_fmt(idleTimeout)}没有收到画面数据, 重连');
+      try {
+        socket.destroy();
+      } on SocketException {
+        // already gone
+      }
+    });
+  }
+
+  static String _fmt(Duration d) => d.inMilliseconds >= 1000
+      ? '${d.inSeconds}s '
+      : '${d.inMilliseconds}ms ';
+
   void dispose() {
     _disposed = true;
     _retry?.cancel();
+    _idleWatch?.cancel();
+    _idleWatch = null;
     try {
       _socket?.destroy();
     } on SocketException {

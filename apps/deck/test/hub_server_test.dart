@@ -306,6 +306,26 @@ void main() {
       client.close(force: true);
     });
 
+    test('relay keeps retrying while the source is unavailable', () async {
+      var resolves = 0;
+      final relay = CameraRelay(
+        camera: camera(),
+        resolveUrl: () {
+          resolves++;
+          return null;
+        },
+        ffmpegPath: 'ffmpeg-not-installed',
+        log: (_) {},
+      );
+      relay.sourceRetryInterval = const Duration(milliseconds: 40);
+      addTearDown(relay.dispose);
+      relay.attach();
+      await Future<void>.delayed(const Duration(milliseconds: 160));
+      expect(resolves, greaterThanOrEqualTo(3),
+          reason: '打印机离线时要在后台继续解析源, 回来以后画面才能自己恢复');
+      relay.detach();
+    });
+
     test('stream for an unknown camera is 404', () async {
       hub.settings = hubSettings();
       await hub.start();

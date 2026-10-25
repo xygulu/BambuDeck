@@ -1445,6 +1445,7 @@ function mountStream(img) {
     setTimeout(() => { if (img.isConnected) mountStream(img); }, 3000);
   };
   img.src = base + (base.includes('?') ? '&' : '?') + 'v=' + Date.now();
+  img.dataset.since = String(Date.now()); // 第一次出帧的宽限期从这一刻算
   streamWatch.delete(img.dataset.cam); // 新连接重新计时
 }
 function unmountStream(img) {
@@ -1528,12 +1529,47 @@ function checkStalls() {
     if (c.seq !== rec.seq) {
       rec.seq = c.seq;
       rec.movedAt = now;
-    } else if (c.seq > 0 && now - rec.movedAt > 12000) {
+    }
+    if (c.seq > 0 && now - rec.movedAt > 12000) {
+      // 有帧号但 12 秒没动 = 这条流卡死了。
       rec.movedAt = now;
+      img.removeAttribute('src');
+      mountStream(img);
+    } else if (c.seq === 0 &&
+        now - Number(img.dataset.since || now) > 20000) {
+      // 服务端从来没出过一帧 (打印机离线 / 源还没就绪): 重挂一次, 让服务端
+      // 重新解析源。服务端自己也每 5 秒重试, 这里是双保险。
       img.removeAttribute('src');
       mountStream(img);
     }
     streamWatch.set(c.id, rec);
+  }
+  checkAudioStalls(now);
+}
+
+/* 声音死得更安静: RTSP 转码卡住时 <audio> 既不出错也不 ended, 只是不再
+   前进。看 currentTime 有没有在走, 15 秒不动就换一条 (iOS 上尤其常见)。 */
+const audioWatch = new Map();
+function checkAudioStalls(now) {
+  if (cameraMuted) return;
+  const seen = new Set();
+  for (const a of document.querySelectorAll('audio.camaudio[src]')) {
+    const id = a.dataset.cam;
+    seen.add(id);
+    if (a.paused) continue; // 自动播放还没被允许, 等用户点一下
+    const rec = audioWatch.get(id) || { t: -1, movedAt: now };
+    if (Math.abs(a.currentTime - rec.t) > 0.05) {
+      rec.t = a.currentTime;
+      rec.movedAt = now;
+    } else if (now - rec.movedAt > 15000) {
+      rec.movedAt = now;
+      unmountAudio(a);
+      mountAudio(a);
+    }
+    audioWatch.set(id, rec);
+  }
+  for (const id of [...audioWatch.keys()]) {
+    if (!seen.has(id)) audioWatch.delete(id);
   }
 }
 
@@ -1948,27 +1984,49 @@ function apply(data) {
 
 let ws = null;
 let lastMsgAt = Date.now();
+let wsRetry = 1000;
+let wsEverOpen = false;
 function connect() {
   if (!TOKEN) return;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
-  ws.onopen = () => {
+  const sock = new WebSocket(
+      `${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
+  ws = sock;
+  sock.onopen = () => {
     lastMsgAt = Date.now();
     const c = $('conn');
     c.className = 'conn ok';
     c.querySelector('.txt').textContent = '已连接';
+    // 断线这段时间画面/声音多半已经死在半路 (socket 还在, 数据早没了):
+    // 接回来就整片重挂一遍, 不用退出重进。
+    if (wsEverOpen) remountAll();
+    wsEverOpen = true;
+    wsRetry = 1000;
   };
-  ws.onmessage = e => {
+  sock.onmessage = e => {
+    if (ws !== sock) return;
     lastMsgAt = Date.now();
     try { apply(JSON.parse(e.data)); } catch (_) {}
   };
-  ws.onclose = ws.onerror = () => {
+  sock.onclose = sock.onerror = () => {
+    // onerror 后面往往还跟一个 onclose; 旧 socket 的收尾不能再排一次重连。
+    if (ws !== sock) return;
+    ws = null;
     const c = $('conn');
     c.className = 'conn bad';
     c.querySelector('.txt').textContent = '已断开，重连中…';
-    setTimeout(connect, 3000);
+    setTimeout(() => { if (!ws) connect(); }, wsRetry);
+    wsRetry = Math.min(wsRetry * 2, 10000); // 网络没回来时别每 3 秒猛撞
   };
 }
+// 换 Wi-Fi / 从飞行模式回来: 立刻重连, 不等退避。
+window.addEventListener('online', () => {
+  if (ws && ws.readyState <= WebSocket.OPEN) return;
+  try { ws && ws.close(); } catch (_) {}
+  ws = null;
+  wsRetry = 1000;
+  connect();
+});
 
 // 服务端每 10 秒推一次心跳, 20 秒什么都没收到说明这条连接已经死了
 // (锁屏、换 Wi-Fi 之后很常见) —— 自己重连, 不用回列表再进来。
