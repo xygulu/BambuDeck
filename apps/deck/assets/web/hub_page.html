@@ -592,8 +592,17 @@
     }
     .ams-chip[hidden] { display: none; }
     .ams-chip .c {
-      width: 12px; height: 12px; border-radius: 50%;
+      position: relative; width: 14px; height: 14px; border-radius: 50%;
       border: 1px solid rgba(255, 255, 255, .6);
+    }
+    /* 正在进料/退料时, 色圈右上角挂一个小绿点 + 方向箭头 (和料盘上的一致)。 */
+    .ams-chip .play {
+      position: absolute; right: -4px; top: -4px;
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--running); color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 6px; line-height: 1;
+      box-shadow: 0 0 0 1.5px var(--card);
     }
     .ams-chip .t { font-size: 9.5px; font-weight: 700; line-height: 1; letter-spacing: .2px; }
     .ams-pop { position: fixed; inset: 0; z-index: 30; display: none; }
@@ -1207,7 +1216,7 @@ function humColor(u) {
 }
 
 /* 手机控制行最右边那颗芯片: 只显示当前进料的那一个通道。 */
-function renderAmsChip(ams) {
+function renderAmsChip(ams, stgCur) {
   const chip = $('ams-chip');
   if (!chip) return;
   if (!ams) { chip.hidden = true; return; }
@@ -1232,9 +1241,14 @@ function renderAmsChip(ams) {
     return;
   }
   const pct = t.remain >= 0 ? t.remain + '%' : '';
-  chip.innerHTML = `<span class="c" style="background:${esc(t.color || '#262E37')}"></span>` +
-    `<span class="t">${code}</span>`;
-  chip.title = `${unit} 第${ams.activeIndex + 1}盘 · ${t.type || ''} ${pct}`.trim();
+  // 进料状态来自打印子阶段 stg_cur (24 进料 / 22 退料); 其余时候只显示通道。
+  const flow = stgCur === 24 ? 'load' : stgCur === 22 ? 'unload' : 'none';
+  const badge = flow === 'none' ? ''
+    : `<span class="play">${flow === 'unload' ? '◀' : '▶'}</span>`;
+  chip.innerHTML = `<span class="c" style="background:${esc(t.color || '#262E37')}">` +
+    `${badge}</span><span class="t">${code}</span>`;
+  const doing = flow === 'load' ? ' · 进料中' : flow === 'unload' ? ' · 退料中' : '';
+  chip.title = `${unit} 第${ams.activeIndex + 1}盘 · ${t.type || ''} ${pct}`.trim() + doing;
 }
 
 /* 弹层贴在芯片右下: 右边缘对齐, 下方展开, 不跳页。 */
@@ -1267,7 +1281,7 @@ function renderAms(p) {
   const sig = JSON.stringify([p.id, ams || null, s ? s.stgCur : null]);
   if (sig === amsSig) return;
   amsSig = sig;
-  renderAmsChip(ams);
+  renderAmsChip(ams, s ? s.stgCur : -1);
   if (!ams) {
     el.innerHTML = '<span class="ams-none">未检测到 AMS</span>';
     const body = $('ams-pop-body');
