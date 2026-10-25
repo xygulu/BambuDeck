@@ -597,18 +597,20 @@
     /* AMS: 每台 AMS 是一个整体, 一行放不下就整台换到下一行
        (AMS1 一行、AMS2 一行), 不横向滑动。只有单台自己都超宽时,
        才在它内部把料盘折行。 */
-    .toprow .amscard { padding: 8px 10px; }
+    .toprow .amscard { padding: 6px 10px; }
     .ams-row {
-      flex-wrap: wrap; align-items: center; gap: 5px 8px; width: 100%;
+      flex-wrap: wrap; align-items: center; gap: 4px 8px; width: 100%;
     }
     .ams-unit {
       flex: 0 0 auto; max-width: 100%;
       display: flex; align-items: center; gap: 2px;
-      padding: 2px 4px; background: var(--surface);
+      padding: 1px 4px; background: var(--surface);
       border: 1px solid var(--border); border-radius: 8px;
     }
+    /* 空料位只留一个空心圈, 不写「-」; 「外部料卷」只写「外部」。 */
+    .tray .t.blank, .uh .rest { display: none; }
     .ams-unit .uh { margin: 0; gap: 2px; flex: 0 0 auto; }
-    .ams-unit .uh b { font-size: 10.5px; }
+    .ams-unit .uh b { font-size: 10.5px; margin-right: 1px; }
     .hum, .dry { font-size: 9px; }
     .hum { gap: 2px; }
     .hum i { width: 5px; height: 5px; }
@@ -1126,18 +1128,19 @@ function trayHtml(t, active, flow) {
   // 后面的一小截 IN/OUT 文字 (色块缩小后塞不下)。
   return `<div class="tray${active ? ' active' : ''}">
     <div class="c" style="background:${esc(color)}">${playTag}</div>
-    <div class="t">${esc(label)}</div>
+    <div class="t${label === '-' ? ' blank' : ''}">${esc(label)}</div>
     <div class="p">${pct}</div>
     ${flowTag}
   </div>`;
 }
 
 function unitHtml(u, ams, flow) {
-  const label = u.id >= 128 ? `AMS HT ${u.id - 127}` : `AMS ${u.id + 1}`;
+  const label = u.id >= 128 ? `AMS HT ${u.id - 127}` : `AMS${u.id + 1}`;
+  // 手机上一行放不下, 湿度只留那个颜色点 + 数字, "RH" 前缀省掉。
   const hum = u.dry
     ? '<span class="dry">烘干中</span>'
-    : `<span class="hum"><i style="background:${humColor(u)}"></i>${
-        u.humidityRaw > 0 ? 'RH ' + u.humidityRaw + '%' : '湿度 ' + u.humidity}</span>`;
+    : `<span class="hum" title="湿度"><i style="background:${humColor(u)}"></i>${
+        u.humidityRaw > 0 ? u.humidityRaw + '%' : '湿度 ' + u.humidity}</span>`;
   const trays = (u.trays || []).map((t, i) =>
     trayHtml(t, ams.activeId === u.id && ams.activeIndex === i, flow)).join('');
   return `<div class="ams-unit">
@@ -1171,8 +1174,9 @@ function renderAms(p) {
   const flow = s.stgCur === 24 ? 'load' : s.stgCur === 22 ? 'unload' : 'none';
   const parts = (ams.units || []).map(u => unitHtml(u, ams, flow));
   if (ams.vt) {
+    // 「外部」就够认了, 手机上看不到「料卷」两个字 (见 .uh .rest)。
     parts.push(`<div class="ams-unit">
-      <div class="uh"><b>外部料卷</b></div>
+      <div class="uh"><b>外部<span class="rest">料卷</span></b></div>
       <div class="trays">${trayHtml(ams.vt, ams.activeId === 254, flow)}</div>
     </div>`);
   }
