@@ -139,11 +139,11 @@ void main() {
         );
 
     Future<HttpClientResponse> get(String path,
-        {bool auth = true}) async {
+        {bool auth = true, String? token}) async {
       final client = HttpClient();
-      final req = await client
-          .getUrl(Uri.parse('http://127.0.0.1:${bound.port}$path'
-              '${auth ? '?token=sekrit' : '?token=wrong'}'));
+      final t = token ?? (auth ? 'sekrit' : 'wrong');
+      final req = await client.getUrl(
+          Uri.parse('http://127.0.0.1:${bound.port}$path?token=$t'));
       final res = await req.close();
       addTearDown(client.close);
       return res;
@@ -160,6 +160,19 @@ void main() {
 
       final bad = await get('/api/state', auth: false);
       expect(bad.statusCode, 401);
+    });
+
+    // 令牌由用户在设置里自定义: hub 每个请求都读 settings, 改完不用重启服务。
+    test('a user-defined token applies without restarting the server',
+        () async {
+      hub.settings = hubSettings();
+      await hub.start();
+      expect((await get('/api/state')).statusCode, 200);
+
+      hub.settings = const AppSettings(hubPort: 0, hubToken: 'my.own~token-1');
+      expect((await get('/api/state')).statusCode, 401);
+      expect((await get('/api/state', token: 'my.own~token-1')).statusCode,
+          200);
     });
 
     test('/api/state carries printers, live state and camera streams',

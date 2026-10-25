@@ -357,10 +357,29 @@ class SettingsPage extends ConsumerWidget {
   /// 网页访问 (服务端和网页端 2026-10-20): serves the monitoring page on the
   /// LAN; the shareable URL carries the access token once, the web page
   /// keeps it in localStorage and strips it from the address bar.
+  ///
+  /// The token is user-definable: the hub reads it from settings on every
+  /// request, so a new value takes effect immediately without a restart. It
+  /// is limited to URL-unreserved characters so it can travel as `?token=`
+  /// without encoding.
   Widget _hubSection(BuildContext context, WidgetRef ref,
       AppSettings settings, AppSettingsNotifier notifier) {
     Future<void> save(AppSettings s) => notifier.set(s);
     final portCtrl = TextEditingController(text: '${settings.hubPort}');
+    final tokenCtrl = TextEditingController(text: settings.hubToken);
+
+    void syncToken(String raw) {
+      final t = raw.trim();
+      if (t == settings.hubToken) return;
+      if (t.length < 3) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('令牌至少 3 位，未保存')));
+        return;
+      }
+      save(settings.copyWith(hubToken: t));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('令牌已更新，已打开的网页需用新地址重新打开')));
+    }
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const SizedBox(height: 18),
       _sectionLabel('网页访问'),
@@ -406,8 +425,39 @@ class SettingsPage extends ConsumerWidget {
               ),
             ]),
             const SizedBox(height: 8),
-            Row(children: [
-              OutlinedButton.icon(
+            TextField(
+              controller: tokenCtrl,
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9._~-]')),
+                LengthLimitingTextInputFormatter(64),
+              ],
+              decoration: InputDecoration(
+                labelText: '访问令牌',
+                helperText: '字母、数字和 . _ ~ - 组成，至少 3 位；回车或点 ✓ 保存',
+                helperMaxLines: 2,
+                suffixIcon: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    tooltip: '随机生成',
+                    icon: const Icon(Icons.casino_outlined, size: 20),
+                    onPressed: () {
+                      final t = generateHubToken();
+                      tokenCtrl.text = t;
+                      save(settings.copyWith(hubToken: t));
+                    },
+                  ),
+                  IconButton(
+                    tooltip: '保存令牌',
+                    icon: const Icon(Icons.check, size: 20),
+                    onPressed: () => syncToken(tokenCtrl.text),
+                  ),
+                ]),
+              ),
+              onSubmitted: syncToken,
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
                 icon: const Icon(Icons.copy, size: 16),
                 label: const Text('复制访问地址'),
                 onPressed: () async {
@@ -421,16 +471,7 @@ class SettingsPage extends ConsumerWidget {
                   }
                 },
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  '令牌 ${settings.hubToken.isEmpty ? "(生成中)" : settings.hubToken}',
-                  style: const TextStyle(
-                      fontSize: 11, color: DeckColors.textSecondary),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ]),
+            ),
           ]),
         ),
       ],
