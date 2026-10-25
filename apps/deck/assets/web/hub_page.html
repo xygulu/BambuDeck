@@ -1044,6 +1044,9 @@ function renderPane() {
 }
 
 function buildPane(p) {
+  // 换机器会整块重画 pane-body, 旧的 <img> 连同流一起丢掉 —— 先明确摘掉,
+  // 否则 MJPEG 请求会挂在那份被丢弃的 DOM 上继续占连接名额。
+  dropStreams($('pane-body'));
   const s = p.state;
   if (!s) {
     $('pane-body').innerHTML = `<div class="placeholder">
@@ -1401,6 +1404,7 @@ function renderWall(p) {
   const sig = p.id + '#' + cams.map(camSigOf).join('#');
   if (sig === wallSig) { syncWalls(); return; }
   wallSig = sig;
+  dropStreams(el);
   if (!cams.length) {
     el.innerHTML = '<div class="wall-empty">这台打印机没有绑定摄像头。在 Mac 的 BambuDeck → 摄像头里可以绑定。</div>';
     return;
@@ -1423,6 +1427,52 @@ function zoomedCam() {
   return img ? img.dataset.cam : null;
 }
 
+/* 只挂「真的在屏幕上」的画面。
+   iOS/Chrome 对同一个站点只给 6 条 HTTP 连接: 一面墙 5 台摄像头全挂,
+   再加 WebSocket 和一路声音就正好 7 条 —— 超了以后新的 <img> 一直排队,
+   一条帧也收不到, 表现是「切几次打印机、用一会儿就整页全黑, 杀掉 App
+   重开才好」(反馈 2026-10-26)。手机一屏就一两张卡, 其余挂上去也没人看,
+   白占名额, 所以按可见性挂: 滚进来才连, 滚出去就断。 */
+const NEAR_MARGIN = 160; // 提前 160px 开始连, 滚动时不至于看到黑块
+let viewIO = null;
+
+function nearNow(img) {
+  const r = img.getBoundingClientRect();
+  const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+  return r.bottom > -NEAR_MARGIN && r.top < vh + NEAR_MARGIN;
+}
+
+// 第一次见到这张图时同步量一次几何 (IntersectionObserver 的回调要等下一帧,
+// 等它就等于开场先黑一下), 之后交给观察器跟滚动。
+function trackNear(img) {
+  if (!img.dataset.tracked) {
+    img.dataset.tracked = '1';
+    img.dataset.near = nearNow(img) ? '1' : '0';
+    if (typeof IntersectionObserver !== 'undefined') {
+      viewIO = viewIO || new IntersectionObserver(entries => {
+        let changed = false;
+        for (const e of entries) {
+          const on = e.isIntersecting ? '1' : '0';
+          if (e.target.dataset.near === on) continue;
+          e.target.dataset.near = on;
+          changed = true;
+        }
+        if (changed) { syncWalls(); syncCameras(); }
+      }, { rootMargin: `${NEAR_MARGIN}px 0px` });
+      viewIO.observe(img);
+    }
+  }
+  return img.dataset.near === '1';
+}
+
+// 换机器/换卡片前先摘流: 直接把旧 DOM 丢掉的话 <img> 的 MJPEG 请求没人去关,
+// 连接会一直挂在浏览器的名额里, 切几台机器就满了。
+function dropStreams(root) {
+  if (!root) return;
+  for (const img of root.querySelectorAll('img[data-cam]')) unmountStream(img);
+  for (const a of root.querySelectorAll('audio.camaudio')) unmountAudio(a);
+}
+
 // 摄像头墙的 <img> 只在看得见时挂 MJPEG, 切走/换机器就摘掉。
 // 放大中的那台墙上不再挂: 同一台机内摄像头第二条连接会把第一条踢掉。
 function syncWalls() {
@@ -1430,7 +1480,8 @@ function syncWalls() {
     (WIDE() || document.body.dataset.view === 'detail');
   const zc = zoomedCam();
   for (const img of document.querySelectorAll('#camwall img')) {
-    if (visible && !(zc && img.dataset.cam === zc)) attachStream(img);
+    const near = trackNear(img);
+    if (visible && near && !(zc && img.dataset.cam === zc)) attachStream(img);
     else unmountStream(img);
   }
   syncAudio(document.querySelectorAll('#camwall audio.camaudio'), visible);
@@ -1999,6 +2050,7 @@ function renderCameras(list) {
   const sig = list.map(camSigOf).join('#');
   if (sig === camSig) return;
   camSig = sig;
+  dropStreams(el);
   if (!list.length) {
     el.innerHTML = '<div class="empty"><b>还没有摄像头</b><span>在 Mac 的 BambuDeck 里添加摄像头</span></div>';
     return;
@@ -2017,7 +2069,8 @@ function syncCameras() {
   const on = document.body.dataset.tab === 'cameras';
   const zc = zoomedCam();
   for (const img of document.querySelectorAll('#cameras img')) {
-    if (on && !(zc && img.dataset.cam === zc)) attachStream(img);
+    const near = trackNear(img);
+    if (on && near && !(zc && img.dataset.cam === zc)) attachStream(img);
     else unmountStream(img);
   }
   syncAudio(document.querySelectorAll('#cameras audio.camaudio'), on);
