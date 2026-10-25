@@ -285,14 +285,15 @@
   .hum i { width: 7px; height: 7px; border-radius: 50%; }
   .dry { font-size: 10px; color: var(--warning); background: rgba(245,158,11,.15); border-radius: 6px; padding: 1px 6px; }
   .trays { display: flex; gap: 6px; }
-  .tray { display: flex; flex-direction: column; align-items: center; width: 56px; }
+  .tray { position: relative; display: flex; flex-direction: column; align-items: center; width: 56px; }
   .tray .c {
     position: relative; width: 34px; height: 34px; border-radius: 50%;
     border: 1.5px solid rgba(255,255,255,.7);
   }
   .tray.active .c { border: 3.5px solid var(--running); }
   .tray .flow {
-    position: absolute; inset: 0; margin: auto; width: 24px; height: 14px;
+    position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+    width: 24px; height: 14px;
     display: flex; align-items: center; justify-content: center;
     background: rgba(255,255,255,.82); border-radius: 6px;
     font-size: 9px; font-weight: 700; color: #0E1216; letter-spacing: .3px;
@@ -539,35 +540,71 @@
       display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
       overflow: hidden;
     }
-    body[data-view="detail"] .pnet { font-size: 12px; margin-top: 2px; }
+    /* 手机上监控页不显示 WiFi/IP：挤在一行里还抢画面, 想看网络去列表的
+       「局域网 · 已连接」。 */
+    body[data-view="detail"] .pnet { display: none; }
     .pane-body { padding: 8px 12px 20px; gap: 10px; }
-    .ctl-title { font-size: 14px; }
-    .lbl { font-size: 13px; }
-    .ctl-row { gap: 10px; }
-    .btn { height: 42px; font-size: 14px; padding: 0 14px; }
-    .btn.icon { width: 42px; }
-    .btn svg { width: 17px; height: 17px; }
-    .btn.outline { height: 40px; font-size: 13px; }
-    .speed button { padding: 7px 11px; font-size: 12.5px; }
-    .lamp svg { width: 19px; height: 19px; }
-    /* 开关的触控区撑到 40px 高, 轨道也放大一点。 */
-    .sw { padding: 9px 0; }
-    .sw span.track { width: 42px; height: 24px; }
-    .sw span.track::after { width: 20px; height: 20px; }
-    .sw input:checked + span.track::after { transform: translateX(18px); }
+    /* 控制: 压成一行。文字标签收起 (aria-label/title 保留), 速度、灯、换盘
+       都缩到 36px 高; 极窄屏横向滑动, 不换行。 */
+    .toprow .ctl { padding: 8px 10px; gap: 0; }
+    .ctl-title { display: none; }
+    .ctl-row {
+      flex-wrap: nowrap; gap: 4px; align-items: center;
+      overflow-x: auto; scrollbar-width: none;
+    }
+    .ctl-row::-webkit-scrollbar { display: none; }
+    .ctl-row > *, .ctlgrp { flex: 0 0 auto; }
+    .btn { height: 36px; font-size: 13px; padding: 0 10px; gap: 5px; }
+    .btn .btn-txt { display: none; }
+    .btn.icon { width: 36px; }
+    .btn svg { width: 16px; height: 16px; }
+    .btn.outline { height: 36px; padding: 0 11px; }
+    .lbl { display: none; }
+    .ctlgrp { gap: 6px; }
+    .speed { padding: 2px; }
+    .speed button { padding: 4px 6px; font-size: 11px; }
+    .lamp svg { width: 15px; height: 15px; }
+    .sw { padding: 0; }
+    .sw span.track { width: 32px; height: 18px; }
+    .sw span.track::after { width: 14px; height: 14px; }
+    .sw input:checked + span.track::after { transform: translateX(14px); }
 
-    /* AMS: 料盘均分整行宽度 */
-    .amscard { width: 100%; }
-    .ams-row { width: 100%; gap: 8px; }
-    .ams-unit { flex: 1 1 100%; padding: 10px 12px; }
-    .ams-unit .uh { margin-bottom: 8px; }
-    .ams-unit .uh b { font-size: 13px; }
-    .hum, .dry { font-size: 11px; }
-    .trays { gap: 4px; }
-    .tray { flex: 1; width: auto; }
-    .tray .c { width: 38px; height: 38px; }
-    .tray .t, .tray .p { font-size: 11px; }
-    .ams-none { font-size: 14px; }
+    /* AMS: 一行。色块缩成 12px 圆点, 型号和余量并排, 外部料卷接在同一行;
+       多台 AMS / 超长型号时横向滑动。 */
+    .toprow .amscard { padding: 8px 10px; }
+    .ams-row {
+      flex-wrap: nowrap; align-items: center; gap: 8px; width: 100%;
+      overflow-x: auto; scrollbar-width: none;
+    }
+    .ams-row::-webkit-scrollbar { display: none; }
+    .ams-unit {
+      flex: 0 0 auto; display: flex; align-items: center; gap: 5px;
+      padding: 0; background: none; border: 0; border-radius: 0;
+    }
+    .ams-unit + .ams-unit { padding-left: 9px; border-left: 1px solid var(--border); }
+    .ams-unit .uh { margin: 0; gap: 3px; flex: 0 0 auto; }
+    .ams-unit .uh b { font-size: 11px; }
+    .hum, .dry { font-size: 10px; }
+    .dry { padding: 0 4px; }
+    .trays { gap: 5px; }
+    .tray { flex-direction: row; align-items: center; gap: 4px; width: auto; }
+    .tray .c { width: 12px; height: 12px; border-width: 1px; }
+    .tray.active .c { border-width: 2px; }
+    .tray .t { margin: 0; font-size: 10.5px; max-width: 46px; }
+    .tray .p { font-size: 10px; }
+    .tray .play { width: 9px; height: 9px; font-size: 6px; right: -3px; top: -3px; bottom: auto; }
+    /* IN/OUT 从色块里挪出来, 跟在余量后面, 12px 的圆点里塞不下。 */
+    .tray .flow {
+      position: static; transform: none; width: auto; height: auto;
+      background: none; color: var(--running); font-size: 9px;
+    }
+    /* 一行放不下时 (4 个料盘 + 外部料卷), 右边缘渐隐提示还能往左滑;
+       滑到底由 JS 摘掉 .more。 */
+    .ams-row.more, .ctl-row.more {
+      -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+      mask-image: linear-gradient(90deg, #000 calc(100% - 22px), transparent);
+    }
+    .ams-none { font-size: 13px; }
 
     /* 摄像头: 控制条 + 云台放到画面下方 (画面 16:9 只有 ~200px 高,
        原来压在上面的按钮和云台盘占掉近一半)。 */
@@ -945,9 +982,9 @@ function buildPane(p) {
       <div class="card ctl">
         <div class="ctl-title">控制</div>
         <div class="ctl-row">
-          <button class="btn primary" id="b-pause" data-act="pause">${ICON.pause}暂停</button>
-          <button class="btn primary" id="b-resume" data-act="resume">${ICON.play}恢复</button>
-          <button class="btn icon danger" id="b-stop" data-act="stop" aria-label="停止">${ICON.stop}</button>
+          <button class="btn primary" id="b-pause" data-act="pause" aria-label="暂停" title="暂停">${ICON.pause}<span class="btn-txt">暂停</span></button>
+          <button class="btn primary" id="b-resume" data-act="resume" aria-label="恢复" title="恢复">${ICON.play}<span class="btn-txt">恢复</span></button>
+          <button class="btn icon danger" id="b-stop" data-act="stop" aria-label="停止" title="停止">${ICON.stop}</button>
           <span class="ctlgrp"><span class="lbl">速度</span>
             <div class="speed" id="speed">
               <button data-speed="1">静音</button><button data-speed="2">标准</button>
@@ -958,13 +995,30 @@ function buildPane(p) {
             <label class="sw"><input type="checkbox" id="light"><span class="track"></span></label>
           </span>
           ${p.plateSwap
-            ? `<button class="btn outline" id="b-swap" data-act="plate-swap">${ICON.swap}一键换盘</button>`
+            ? `<button class="btn outline" id="b-swap" data-act="plate-swap" aria-label="一键换盘" title="一键换盘">${ICON.swap}<span class="btn-txt">一键换盘</span></button>`
             : ''}
         </div>
       </div>
       <div class="card amscard" id="ams"></div>
     </div>
     <div class="wall" id="camwall"></div>`;
+  markScrollables($('pane-body'));
+}
+
+/* 手机上一行放不下时给个渐隐提示 (见 .ams-row.more)。 */
+function markScrollables(root) {
+  if (!root) return;
+  requestAnimationFrame(() => {
+    for (const row of root.querySelectorAll('.ams-row, .ctl-row')) {
+      const overflow = () => row.scrollWidth - row.clientWidth > 2;
+      const sync = () => {
+        const atEnd = row.scrollLeft + row.clientWidth >= row.scrollWidth - 2;
+        row.classList.toggle('more', overflow() && !atEnd);
+      };
+      sync();
+      row.onscroll = sync;
+    }
+  });
 }
 
 // 每秒刷新数值和控制态 (按钮 DOM 不重建)。
@@ -1029,10 +1083,13 @@ function trayHtml(t, active, flow) {
   const flowTag = active
     ? `<span class="flow">${flow === 'unload' ? 'OUT' : 'IN'}</span>` : '';
   const playTag = active ? '<span class="play">▶</span>' : '';
+  // flowTag 放在 .c 外面: 桌面端 absolute 盖在色块上, 手机端变成百分比
+  // 后面的一小截 IN/OUT 文字 (色块缩小后塞不下)。
   return `<div class="tray${active ? ' active' : ''}">
-    <div class="c" style="background:${esc(color)}">${flowTag}${playTag}</div>
+    <div class="c" style="background:${esc(color)}">${playTag}</div>
     <div class="t">${esc(label)}</div>
     <div class="p">${pct}</div>
+    ${flowTag}
   </div>`;
 }
 
@@ -1083,6 +1140,7 @@ function renderAms(p) {
   el.innerHTML = parts.length
     ? `<div class="ams-row">${parts.join('')}</div>`
     : '<span class="ams-none">AMS 未连接</span>';
+  markScrollables(el);
 }
 
 /* ---------------- 摄像头卡片 (App 的 CameraTile) ---------------- */

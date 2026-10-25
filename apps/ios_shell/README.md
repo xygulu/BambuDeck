@@ -36,8 +36,9 @@ iPhone (DeckShell)  ──http/ws──►  Mac: BambuDeck app (HubServer :8787)
 
    两个都填最省事，填一个就固定用它。第一次连接时系统会问「本地网络」权限，
    必须允许。
-6. 之后想换服务器/改令牌：点右下角那条带地址的胶囊（例如 `🌐 外网 deck.example.com`），
+6. 之后想换服务器/改令牌：点顶部那条窄栏里的地址胶囊（例如 `🌐 外网 deck.example.com`），
    两个地址和令牌都能改，点「保存并重连」立即生效；连不上时中间也会出现「改地址」。
+   入口放在页面之上的一条窄栏里、不浮在网页上，所以不会压住摄像头和监控画面。
 
 ### 局域网 / 外网自动切换
 
@@ -84,7 +85,7 @@ xcodebuild -exportArchive -archivePath /tmp/DeckShell.xcarchive \
 | 文件 | 职责 |
 | --- | --- |
 | `DeckShellApp.swift` | 入口 |
-| `ContentView.swift` | 连上后全屏网页；连不上给重试/改地址；右下角胶囊显示当前线路与地址 |
+| `ContentView.swift` | 连上后全屏网页；连不上给重试/改地址；顶部窄栏显示当前线路与地址 |
 | `WebView.swift` | WKWebView + 加载失败提示 + **JS confirm/alert/prompt 的宿主实现** |
 | `ServerConfig.swift` | UserDefaults 里存局域网地址、外网地址和令牌（兼容只有 `base` 的旧配置） |
 | `ServerRouter.swift` | 两条线路并行探测、局域网优先，换网络自动重选 |

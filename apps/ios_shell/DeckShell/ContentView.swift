@@ -41,7 +41,7 @@ struct ContentView: View {
     }
 
     private func console(_ cfg: ServerConfig, _ base: String) -> some View {
-        ZStack(alignment: .bottomTrailing) {
+        ZStack(alignment: .topTrailing) {
             page(cfg, base)
             // 选路那 2 秒里别闪错误页。
             if let text = failure, !router.resolving {
@@ -51,9 +51,27 @@ struct ContentView: View {
                             onRetry: retry,
                             onEdit: { editing = true })
             }
-            serverCapsule(cfg, base)
+        }
+        // 服务器入口放在页面之上的一条窄栏里, 不浮在画面上 —— 之前浮在
+        // 右下角会压住摄像头和监控画面。
+        .safeAreaInset(edge: .top, spacing: 0) {
+            serverBar(cfg, base)
         }
         .background(Palette.bg)
+    }
+
+    private func serverBar(_ cfg: ServerConfig, _ base: String) -> some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            serverCapsule(cfg, base)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 3)
+        .frame(maxWidth: .infinity)
+        .background(Palette.surface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Palette.line).frame(height: 0.5)
+        }
     }
 
     @ViewBuilder
@@ -87,24 +105,21 @@ struct ContentView: View {
                 Image(systemName: route?.symbol ?? "gearshape.fill")
                     .font(.system(size: 10, weight: .semibold))
                 Text(route?.title ?? "服务器")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 10.5, weight: .medium))
                 Text(ServerConfig.displayAddress(base))
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            .foregroundStyle(.white.opacity(0.9))
-            .padding(.horizontal, 12)
-            .frame(height: 34)
-            .frame(maxWidth: 240)
+            .foregroundStyle(.white.opacity(0.92))
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .frame(maxWidth: 210)
             .background(.ultraThinMaterial, in: Capsule())
             .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
         }
-        .opacity(0.8)
         .accessibilityLabel("服务器：\(route?.title ?? "") \(ServerConfig.displayAddress(base))")
         .accessibilityHint("修改局域网和外网地址、访问令牌")
-        .padding(.trailing, 14)
-        .padding(.bottom, 24)
         .sheet(isPresented: $editing) {
             SetupView(initial: cfg, isSheet: true) { next in
                 failure = nil
