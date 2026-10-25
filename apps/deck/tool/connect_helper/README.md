@@ -17,6 +17,7 @@ macOS 上的本机 Python 服务,驱动 **Bambu Connect**(拓竹官方客户端)
 | `bconnect_ax.py` | JXA 无障碍遍历(AX)底层:短路 `probe`、按文字/desc/坐标点击 |
 | `bconnect_cloud.py` | 云端共享层:登录态、设备注册表、云 MQTT 状态、任务匹配 |
 | `bconnect_vision.py` | 多供应商视觉/文本模型接入(Connect 控制按钮 AX 找不到时的兜底) |
+| `ocr_text.swift` | 本地 OCR 小工具(macOS Vision,截图不出本机);发送页下拉一次读出机名再点 |
 
 ## 安装
 
@@ -45,6 +46,11 @@ python3 -m venv .venv
 5. **视觉兜底**(可选,控制按钮 AX 找不到时):`~/.bambudeck/models.json` 配
    `{"vision": {"provider": "minimax", "base_url": "…", "api_key": "…", "model": "MiniMax-M3"}}`
    (key 只写本地、0600、不落仓库)。
+6. **屏幕录制权限**(系统设置 → 隐私与安全性 → 屏幕录制,允许运行 helper 的 python):
+   `screencapture` 用来判断设备下拉是否展开、并截下拉列表做本地 OCR。
+7. **本地 OCR**(可选):`ocr_text.swift` 首次使用时用 `swiftc` 编译到
+   `~/.bambudeck/bin/deck_ocr`(需要 Xcode 命令行工具),之后复用。没装命令行工具也能
+   跑,只是自动选机退回「逐行试」,打印机多时会慢一些。
 
 ## 运行
 

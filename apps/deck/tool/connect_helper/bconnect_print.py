@@ -269,7 +269,9 @@ _PAGE_LABEL = {SEND_PAGE: "发送页", IMPORT_PAGE: "导入弹窗"}
 # 下拉布局偏移（2026-10-24 实测标定，Bambu Connect 2.5.0-beta.15）。
 # 发送页设备选择器的下拉选项不暴露在 macOS AX 树（AXShowMenu/AXRows/children 都
 # 读不到选项），自动选机只能靠「真实鼠标点击像素坐标」。下拉从设备选择器下方展开，
-# 顺序按名称升序（123 < 嘉兴 < 拓竹A1宇树）；偏移相对选择器组算（不依赖绝对窗口位置）：
+# 但**行序没有保证**（2026-10-25 实测首项是「嘉兴」而不是名称升序该排最前的
+# 「123」，用户反馈顺序会变），所以只信「行高固定」，不按名字推位次——逐行点、
+# 点完读回机名验证。偏移相对选择器组算（不依赖绝对窗口位置）：
 #   第 0 项名字中心 ≈ 组下缘 +26px；行高 36px（2026-10-24 截图实测 473/509/545）。
 # 名字 x：三项文字都从「组左缘 +63px」起（实测 123/嘉兴/拓竹A1宇树 均 528 起）；
 # 取 +71 落在最短文字「123」(528~550) 中间，三项都点得中。带设备头像时文字会被
@@ -277,6 +279,8 @@ _PAGE_LABEL = {SEND_PAGE: "发送页", IMPORT_PAGE: "导入弹窗"}
 _DROP_FIRST_DY = 26
 _DROP_ROW = 36
 _DROP_NAME_X_OFF = (71, 85)
+# 浮层收起判定：亮度回到「展开前基线」附近（展开前后差 ~10，取 2.5 抗噪声）。
+_DROP_CLOSE_DELTA = 2.5
 # 下拉展开判定：检测矩形取「选择器正下方一整块面板区域」，展开前后亮度差
 # 实测约 10~12（闭合 ~50.8 / 展开 ~61.5），取 4 作阈值足够抗噪声。
 _DROP_PROBE_DX = 75
@@ -332,8 +336,8 @@ def _screen_mean(x: int, y: int, w: int, h: int) -> float | None:
     return total / cnt if cnt else None
 
 
-def _wait_target(want: str, timeout: float = 0.6) -> bool:
-    """点完下拉项后轮询读回目标机名（快速路径单次 ~20ms，命中即返回）。"""
+def _wait_target(want: str, timeout: float = 0.9) -> bool:
+    """轮询读回目标机名，直到等于 want 或超时。"""
     deadline = time.time() + timeout
     while True:
         if ax.send_target_device() == want:
@@ -341,6 +345,173 @@ def _wait_target(want: str, timeout: float = 0.6) -> bool:
         if time.time() >= deadline:
             return False
         time.sleep(0.05)
+
+
+def _settle_target(prev: str, timeout: float = 0.6) -> str:
+    """点完一行后读回目标机名：轮询到读数变化或超时，返回最后一次读数。"""
+    deadline = time.time() + timeout
+    last = ax.send_target_device()
+    while time.time() < deadline:
+        cur = ax.send_target_device()
+        if cur and cur != prev:
+            return cur
+        last = cur or last
+        time.sleep(0.05)
+    return last
+
+
+_OCR_BIN = os.path.expanduser("~/.bambudeck/bin/deck_ocr")
+_OCR_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ocr_text.swift")
+
+
+def _ocr_bin() -> str | None:
+    """本地 OCR 可执行文件；首次用时用 swiftc 编译到 ~/.bambudeck/bin（不进仓库）。
+
+    macOS 自带的 Vision 框架，纯本地识别，截图不出本机。没有 swiftc（未装 Xcode
+    命令行工具）时返回 None，调用方退回逐行试。
+    """
+    if os.path.exists(_OCR_BIN):
+        return _OCR_BIN
+    if not (os.path.exists("/usr/bin/swiftc") and os.path.exists(_OCR_SRC)):
+        return None
+    try:
+        os.makedirs(os.path.dirname(_OCR_BIN), exist_ok=True)
+        tmp = _OCR_BIN + ".tmp"
+        r = subprocess.run(["/usr/bin/swiftc", "-O", "-o", tmp, _OCR_SRC],
+                           capture_output=True, text=True, timeout=180)
+        if r.returncode != 0 or not os.path.exists(tmp):
+            return None
+        os.replace(tmp, _OCR_BIN)
+        return _OCR_BIN
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _png_size(path: str) -> tuple[int, int]:
+    """读 PNG 宽高（screencapture 产出）；读不出回 (0, 0)。"""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(24)
+        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            return (int.from_bytes(head[16:20], "big"),
+                    int.from_bytes(head[20:24], "big"))
+    except Exception:  # noqa: BLE001
+        pass
+    return 0, 0
+
+
+def _norm_name(s: str) -> str:
+    return "".join(s.split()).lower()
+
+
+def _match_row(rows: list[tuple[str, int, int]],
+               want: str) -> tuple[int, int] | None:
+    """从 OCR 出的下拉行里找目标机名，返回要点的屏幕坐标 (x, y)。"""
+    target = _norm_name(want)
+    if not target:
+        return None
+    for text, x, y in rows:
+        if _norm_name(text) == target:
+            return x, y
+    # 识别偶尔多/少一个标点；包含匹配必须唯一，避免「A1」误中「A1 mini」。
+    fuzzy = [(x, y) for text, x, y in rows if target in _norm_name(text)]
+    return fuzzy[0] if len(fuzzy) == 1 else None
+
+
+def _ocr_dropdown_rows(group: dict, row_limit: int) -> list[tuple[str, int, int]]:
+    """截图已展开的下拉浮层 + 本地 OCR，返回 [(文字, 屏幕 x, 屏幕 y)]。
+
+    读不到（截图没权限 / 没有 swiftc / 识别失败）返回空列表，调用方退回逐行试。
+    一次读取覆盖整个列表，打印机再多也只花一次 OCR 的时间（2026-10-25 用户反馈：
+    逐行试选在机器多时太慢）。
+    """
+    binary = _ocr_bin()
+    if binary is None:
+        return []
+    rx = int(group["x"] - 24)
+    ry = int(group["y"] + group["h"] - 4)
+    rw = int(group["w"] + 48)
+    rh = int(_DROP_FIRST_DY + max(3, row_limit) * _DROP_ROW + 10)
+    path = os.path.join(tempfile.gettempdir(), "bc_dropdown.png")
+    try:
+        subprocess.run(["screencapture", "-x", "-R",
+                        "%d,%d,%d,%d" % (rx, ry, rw, rh), "-t", "png", path],
+                       check=False, timeout=5,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        r = subprocess.run([binary, path], capture_output=True, text=True,
+                           timeout=15)
+    except Exception:  # noqa: BLE001
+        return []
+    if r.returncode != 0:
+        return []
+    # Retina：截图是 2x 像素，-R 是逻辑点，按「图片宽 / 区域宽」换算回屏幕坐标。
+    wpx, _hpx = _png_size(path)
+    scale = (wpx / rw) if wpx and rw else 1.0
+    rows: list[tuple[str, int, int]] = []
+    for line in r.stdout.splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        text = str(item.get("t") or "").strip()
+        if not text:
+            continue
+        cx = rx + int((item["x"] + item["w"] / 2) / scale)
+        cy = ry + int((item["y"] + item["h"] / 2) / scale)
+        rows.append((text, cx, cy))
+    return rows
+
+
+def _snap_row(group: dict, row_limit: int,
+              hit: tuple[int, int]) -> tuple[int, int] | None:
+    """把 OCR 命中点对到「第 k 行」的已知几何上；对不上就放弃这个命中。
+
+    OCR 区域比下拉本身高时（机器数少于 row_limit），区域底部会盖到页面其它内容，
+    OCR 可能读到下面的文字。这里只接受落在「选择器下方第 0..row_limit-1 行」且
+    偏离行中心不超过半行高的命中，点击一律落在行中心——绝不点到下拉以外（比如
+    「发送」按钮），这是防误派的硬保险。
+    """
+    x, y = hit
+    gx, gw = group["x"], group["w"]
+    if not (gx <= x <= gx + gw):
+        return None
+    origin = group["y"] + group["h"]
+    k = round((y - origin - _DROP_FIRST_DY) / _DROP_ROW)
+    if k < 0 or k >= row_limit:
+        return None
+    row_y = origin + _DROP_FIRST_DY + k * _DROP_ROW
+    if abs(row_y - y) > _DROP_ROW / 2:
+        return None
+    return int(x), int(row_y)
+
+
+def _dropdown_open(probe: tuple, base: float | None) -> bool | None:
+    """下拉浮层现在是否还开着；None = 判断不了（截图不可用）。"""
+    if base is None:
+        return None
+    cur = _screen_mean(*probe)
+    if cur is None:
+        return None
+    return abs(cur - base) > _DROP_CLOSE_DELTA
+
+
+def _click_row(group: dict, probe: tuple, base: float | None, idx: int,
+               before: str) -> str | None:
+    """点下拉第 idx 行的名字，返回这一下选中的目标机名；None = 没选中任何行。
+
+    只看「名字变没变」不够：点到当前已选中的那台时名字不会变，但下拉确实收起、
+    选择也确实生效了。所以用「浮层收起」当作选中信号，名字只用于返回结果。
+    """
+    ty = group["y"] + group["h"] + _DROP_FIRST_DY + idx * _DROP_ROW
+    for xoff in _DROP_NAME_X_OFF:
+        if not ax.click_at(group["x"] + xoff, ty):
+            continue
+        name = _settle_target(before)
+        if _dropdown_open(probe, base) is False:
+            return name
+        if name and name != before:
+            return name  # 读数已变，按选中处理（浮层状态读不准时的兜底）
+    return None
 
 
 def _open_dropdown(cx: float, cy: float, group: dict) -> bool:
@@ -421,36 +592,44 @@ def select_device(want_name: str, cur_target: str | None = None) -> bool:
     """在发送页把打印目标切到 want_name（自动选机）。
 
     纯 AX 读不到下拉选项（Electron 自定义下拉不映射成 AX 菜单项，AXShowMenu/AXRows/
-    children 全空），所以这里：
+    children 全空），而且**下拉行序不固定**（2026-10-25 实测首项是「嘉兴」，不是名称
+    升序该排最前的「123」；用户反馈顺序会变）。所以：
+
       1. AX 读当前目标机名——已匹配直接 True，零点击（cur_target 可传入省一次读）；
       2. 临时把 Connect 置前（CGEvent 点击注入的是「该坐标最顶层窗口」，必须 Connect 在最前）；
       3. 等弹窗进场动画结束、AX 几何读数稳定，点 chevron_down 展开下拉（并确认真的展开）；
-      4. 按「名称升序」算目标项 y，点名字（x 因「是否带头像」而异，逐个试 + 验证）；
-      5. AX 读回目标名验证，选完还原焦点。
-    全程零视觉（视觉慢、OCR 还不稳）。失败返回 False，调用方走 verify-and-abort（绝不误派）。
+      4. **快路径**：截图下拉浮层 + 本地 OCR（macOS Vision）一次性读出整列机名，
+         名字匹配到就直接点那一行；机器再多也只花一次读取；
+      5. **兜底**（OCR 不可用/没匹配上）：从第 0 行起逐行点，每点一次立即 AX 读回目标
+         机名，等于 want_name 即成功；选到别的机器就重新展开再试下一行，行数上限取
+         云端设备数，点回已见过的机器即视为列表到底；
+      6. 选完还原焦点。
+    全程不上传任何画面：OCR 是 macOS 自带框架，本地跑。浮层开合判断不了（截图不可用）
+    时直接放弃，绝不盲点——点空可能误触页面其它控件。失败返回 False，调用方走
+    verify-and-abort（绝不误派）。
     """
     if not want_name:
         return False
-    if (ax.send_target_device() if cur_target is None else cur_target) == want_name:
+    cur = ax.send_target_device() if cur_target is None else cur_target
+    if cur == want_name:
         return True
-    # 名称升序得目标位次（与下拉实际顺序一致：123 < 嘉兴 < 拓竹A1宇树）
+    # 云端设备清单只用来确认「目标机存在」和上行数上限，不决定下拉行序。
     names = sorted((d.get("name") or "").strip()
                    for d in cloud.device_list() if (d.get("name") or "").strip())
     if want_name not in names:
         return False
-    idx = names.index(want_name)
+    row_limit = max(1, len(names))
 
-    def _geom(frame: dict) -> tuple[dict, dict, float, float, float, tuple]:
-        """由选择器几何算出 (group, chevron, chevron 点击点, 目标项 y, 检测矩形)。"""
+    def _geom(frame: dict) -> tuple[dict, dict, float, float, tuple]:
+        """由选择器几何算出 (group, chevron, chevron 点击点, 检测矩形)。"""
         g = frame["group"]
         ch = frame.get("chevron")
         _cx = ch["x"] if ch else g["x"] + g["w"] - 24
         _cy = ch["y"] if ch else g["y"] + g["h"] / 2
-        _ty = g["y"] + g["h"] + _DROP_FIRST_DY + idx * _DROP_ROW
         pr = (int(g["x"] + _DROP_PROBE_DX),
               int(g["y"] + g["h"] + _DROP_PROBE_DY),
               _DROP_PROBE_W, _DROP_PROBE_H)
-        return g, ch, _cx, _cy, _ty, pr
+        return g, ch, _cx, _cy, pr
 
     # 坐标点击前临时置前 Connect（SILENT 下选完还原焦点）
     prev = _frontmost_app()
@@ -468,37 +647,65 @@ def select_device(want_name: str, cur_target: str | None = None) -> bool:
         frame = _stable_selector()
         if not frame:
             return False
-        group, chevron, cx, cy, ty, probe = _geom(frame)
+        group, chevron, cx, cy, probe = _geom(frame)
         # 展开下拉，并用「这块矩形亮度变没变」确认浮层真的出来了：页面刚就绪时
         # 注入的点击可能被吞，点完就探、没开就重点一次，不靠固定 sleep。
         opened, base = _open_dropdown(cx, cy, group)
         if not opened:
             # 坐标可能仍是动画中间态 → 重读稳定几何再来一轮
             frame = _stable_selector(0.5) or frame
-            group, chevron, cx, cy, ty, probe = _geom(frame)
+            group, chevron, cx, cy, probe = _geom(frame)
             opened, base = _open_dropdown(cx, cy, group)
             if not opened:
                 return False
-        # 逐个试名字 x（无头像 → 短名靠左，带头像 → 名字被挤右）。
-        # 关键：点「头像/空区」这类不可选项时，下拉不会收起（Electron 下拉只在点「项
-        # 名字」或「下拉外」才收），所以两次 x 之间不用重新展开、也不用任何复位动作——
-        # Esc 会关掉发送弹窗、点「中性区」会撞到返回按钮，两者都试过、都会误跳页。
-        for _cycle in range(2):
-            for xoff in _DROP_NAME_X_OFF:
-                tx = group["x"] + xoff
-                if not ax.click_at(tx, ty):  # 点目标项名字（先无头像 x，后带头像 x）
-                    continue
-                if _wait_target(want_name, 0.6):  # 点完立刻轮询读回（~20ms 一次）
-                    return True
-            # 两次都没选中：若亮度回到展开前（浮层已被点掉），重开再试一轮
-            if _cycle:
-                break
-            cur = _screen_mean(*probe) if base is not None else None
-            if cur is None or abs(cur - base) > 2.5:
-                break  # 浮层还开着 → 换个 x 也无意义，放弃（调用方 verify-and-abort）
-            opened, base = _open_dropdown(cx, cy, group)
-            if not opened:
+        # 快路径：一次截图 + 本地 OCR 读出整个下拉列表，直接点匹配的那一行。
+        # 打印机多时也只花一次读取，不用逐行试（2026-10-25 用户反馈）。
+        rows = _ocr_dropdown_rows(group, row_limit)
+        hit = _match_row(rows, want_name) if rows else None
+        snap = _snap_row(group, row_limit, hit) if hit is not None else None
+        if snap is not None:
+            if ax.click_at(snap[0], snap[1]) and _wait_target(want_name, 0.9):
+                return True
+            # 没点中（识别偏差/点击被吞）：按浮层状态决定是否重开，再走逐行兜底。
+            state = _dropdown_open(probe, base)
+            if state is None:
                 return False
+            if state is False:
+                frame = _stable_selector(1.0) or frame
+                group, chevron, cx, cy, probe = _geom(frame)
+                opened, base = _open_dropdown(cx, cy, group)
+                if not opened:
+                    return False
+
+        # 兜底：逐行试。点「头像/空区」这类不可选项时下拉不会收起（Electron 下拉只在
+        # 点项名字或下拉外才收），所以同一次展开内可以往后换 x 或换行；只有真的选中
+        # （浮层收起）才需要重新展开。Esc 会关掉发送弹窗、点中性区会撞到返回按钮，
+        # 两者都不能用来复位。
+        seen: list[str] = []
+        need_open = False
+        for idx in range(row_limit):
+            if need_open:
+                frame = _stable_selector(1.0) or frame
+                group, chevron, cx, cy, probe = _geom(frame)
+                opened, base = _open_dropdown(cx, cy, group)
+                if not opened:
+                    return False
+            picked = _click_row(group, probe, base, idx, cur)
+            if picked == want_name:
+                return True
+            if picked is not None:
+                if picked in seen:
+                    return False  # 点回见过的机器：行号越界或坐标错位，别猜
+                seen.append(picked)
+                cur = picked
+                need_open = True
+                continue
+            state = _dropdown_open(probe, base)
+            if state is True:
+                need_open = False  # 浮层还开着、这行没点中 → 直接试下一行
+                continue
+            # 浮层已收起却没读到机名，或根本判断不了 → 不盲点下一行
+            return False
         return False
     finally:
         if need_restore:
@@ -627,7 +834,7 @@ def run(path: str, stop_before_send: bool = False,
     target = ax.send_target_device()
     if target != want_name:
         # 自动选机（2026-10-24）：发送页只显示机名、下拉选项不暴露给 AX，这里用
-        # 「读选择器几何 + 名称升序坐标点击」选机，再读回机名验证（全程零视觉）。
+        # 「读选择器几何 + 逐行点选 + 读回机名验证」选机，不依赖下拉行序（全程零视觉）。
         switched = select_device(want_name, cur_target=target)
         rec("select-device", switched,
             "目标「%s」→「%s」" % (target or "?", want_name))
