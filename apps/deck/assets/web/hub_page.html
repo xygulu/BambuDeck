@@ -499,26 +499,118 @@
     .grid { grid-template-columns: 1fr; gap: 10px; }
   }
 
-  /* 手机: 单列、按钮加高, 顶栏收窄; 一次只显示一个视角 (和 app 一致)。 */
+  /* 手机: 单列、字号加一档、触控目标 40px 起; 摄像头控制条移到画面下方,
+     不再盖住本来就小的画面 (反馈 2026-10-25: iPhone 上「不太适合手机屏幕」)。 */
   @media (max-width: 700px) {
     :root { --head: calc(52px + env(safe-area-inset-top, 0px)); }
     header { gap: 8px; padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); }
     h1 { font-size: 17px; }
-    .seg button { padding: 4px 10px; font-size: 11px; gap: 4px; }
-    .seg svg { width: 13px; height: 13px; }
+    .seg { padding: 2px; }
+    .seg button { padding: 6px 11px; font-size: 12px; gap: 5px; }
+    .seg svg { width: 14px; height: 14px; }
     #clock { display: none; }
-    .pident .name { font-size: 16px; }
+    .conn { gap: 5px; font-size: 12px; min-width: 0; }
+    .conn .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 78px; }
+    .conn i { width: 8px; height: 8px; }
+
+    /* 列表 */
+    .rail-head { padding: 10px 14px 2px; }
+    #plist { gap: 10px; padding: 6px 12px 20px; }
+    .pcard { padding: 14px; }
+    .pident .name { font-size: 17px; }
+    .pident .meta { font-size: 13px; margin-top: 4px; }
+    .badge { font-size: 13px; padding: 5px 11px; }
+    .taskrow { margin-top: 12px; }
+    .task, .pct { font-size: 13px; }
+    .bar { height: 4px; margin: 6px 0 7px; }
+    .facts { font-size: 12px; margin-top: 5px; }
+    .stage { font-size: 12px; gap: 5px; margin-top: 4px; }
+    .stage svg { width: 13px; height: 13px; }
+    .door { font-size: 12px; }
+    .errchip { font-size: 12px; padding: 5px 10px; margin-top: 8px; }
+
+    /* 详情 */
+    .back { width: 40px; height: 40px; border-radius: 12px; font-size: 19px; }
+    .pane-head { padding: 8px 12px 2px; }
+    .pane-head .ptitle { font-size: 18px; }
+    /* 任务行在手机上折两行, 别把 进度/层数/剩余 截掉。 */
+    .pjob {
+      font-size: 12.5px; line-height: 1.45; white-space: normal;
+      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+      overflow: hidden;
+    }
+    body[data-view="detail"] .pnet { font-size: 12px; margin-top: 2px; }
+    .pane-body { padding: 8px 12px 20px; gap: 10px; }
+    .ctl-title { font-size: 14px; }
+    .lbl { font-size: 13px; }
     .ctl-row { gap: 10px; }
-    .btn { height: 40px; font-size: 14px; }
-    .btn.icon { width: 40px; }
-    .speed button { padding: 6px 12px; font-size: 12px; }
-    #toast { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+    .btn { height: 42px; font-size: 14px; padding: 0 14px; }
+    .btn.icon { width: 42px; }
+    .btn svg { width: 17px; height: 17px; }
+    .btn.outline { height: 40px; font-size: 13px; }
+    .speed button { padding: 7px 11px; font-size: 12.5px; }
+    .lamp svg { width: 19px; height: 19px; }
+    /* 开关的触控区撑到 40px 高, 轨道也放大一点。 */
+    .sw { padding: 9px 0; }
+    .sw span.track { width: 42px; height: 24px; }
+    .sw span.track::after { width: 20px; height: 20px; }
+    .sw input:checked + span.track::after { transform: translateX(18px); }
+
+    /* AMS: 料盘均分整行宽度 */
+    .amscard { width: 100%; }
+    .ams-row { width: 100%; gap: 8px; }
+    .ams-unit { flex: 1 1 100%; padding: 10px 12px; }
+    .ams-unit .uh { margin-bottom: 8px; }
+    .ams-unit .uh b { font-size: 13px; }
+    .hum, .dry { font-size: 11px; }
+    .trays { gap: 4px; }
+    .tray { flex: 1; width: auto; }
+    .tray .c { width: 38px; height: 38px; }
+    .tray .t, .tray .p { font-size: 11px; }
+    .ams-none { font-size: 14px; }
+
+    /* 摄像头: 控制条 + 云台放到画面下方 (画面 16:9 只有 ~200px 高,
+       原来压在上面的按钮和云台盘占掉近一半)。 */
+    .cam { padding: 12px; }
+    .camview { display: grid; grid-template-columns: 1fr auto; align-items: center; }
+    .camview > .shot { grid-column: 1 / -1; }
+    .camchips { position: static; grid-column: 1; padding: 8px 0 8px 10px; }
+    /* 不能是 static: 四个方向键是 absolute, 得让 .ptz 自己当包含块。 */
+    .ptz {
+      position: relative; grid-column: 2; width: 108px; height: 108px;
+      margin: 4px 8px 4px 0;
+    }
+    .ptz button { width: 34px; height: 34px; }
+    .ptz .up, .ptz .down { margin-left: -17px; }
+    .ptz .left, .ptz .right { margin-top: -17px; }
+    .ptz .up { top: 4px; } .ptz .down { bottom: 4px; }
+    .ptz .left { left: 4px; } .ptz .right { right: 4px; }
+    .chip { height: 30px; font-size: 12px; padding: 0 10px; }
+    .chip.icon { width: 30px; }
+    .chip svg { width: 15px; height: 15px; }
+    .wall-empty { font-size: 13.5px; }
+    .wall .off, .cam .off { font-size: 13px; }
+
+    /* 摄像头视角 */
+    #s-cameras { padding: 10px 12px 20px; }
+    h2 { font-size: 15px; }
+
+    /* 弹窗 / 令牌页 / 提示 */
+    .modal-card { padding: 16px; }
+    .modal-card h3 { font-size: 17px; }
+    .hms-entry .code, .hms-entry .desc { font-size: 13px; }
+    .opt { min-height: 44px; font-size: 14px; }
+    #gate .gate-card { padding: 20px; }
+    #gate input { font-size: 16px; padding: 13px 14px; }
+    #gate button { font-size: 15px; }
+    #toast { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); font-size: 13.5px; }
   }
-  /* 竖屏 iPhone 上顶栏放不下文字状态, 只留一个点。 */
-  @media (max-width: 430px) {
+  /* iPhone SE 这类 375px 机器: 标题收一点, 状态文字只留「已连接/重连中」时放得下。 */
+  @media (max-width: 380px) {
     header { gap: 6px; }
     h1 { font-size: 16px; }
-    .conn .txt { display: none; }
+    .seg button { padding: 6px 9px; font-size: 11.5px; }
+    .conn .txt { max-width: 56px; }
   }
 </style>
 </head>
