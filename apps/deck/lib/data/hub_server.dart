@@ -683,6 +683,10 @@ class HubServer {
     try {
       if (path == '/' || path == '/index.html') {
         req.response.headers.contentType = ContentType.html;
+        // 页面是打在 App 包里的, 每次重启 App 都可能换了一版; 不加这个
+        // iOS Safari (尤其是「添加到主屏幕」的独立窗口) 会拿缓存里的旧页面,
+        // 用户看不到修复, 还以为没生效 (反馈 2026-10-26)。
+        req.response.headers.set('Cache-Control', 'no-cache, max-age=0');
         req.response.write(pageHtml ?? 'BambuDeck hub');
         await req.response.close();
         return;

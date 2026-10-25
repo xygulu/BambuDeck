@@ -1430,7 +1430,7 @@ function syncWalls() {
     (WIDE() || document.body.dataset.view === 'detail');
   const zc = zoomedCam();
   for (const img of document.querySelectorAll('#camwall img')) {
-    if (visible && !(zc && img.dataset.cam === zc)) mountStream(img);
+    if (visible && !(zc && img.dataset.cam === zc)) attachStream(img);
     else unmountStream(img);
   }
   syncAudio(document.querySelectorAll('#camwall audio.camaudio'), visible);
@@ -1483,20 +1483,41 @@ function unmountStream(img) {
   if (img.hasAttribute('src')) img.removeAttribute('src');
 }
 
+/* 挂流: 平时立即挂; 回前台的头几秒走错峰 (见 remountAll)。
+   iOS 同源只给 6 条连接, 一次性把 3 台画面全挂上去, 新的 <img> 一条都
+   收不到数据 —— 表现就是黑屏。 */
+let mountStagger = 0;   // >0: 这一轮每张画面之间隔多少毫秒
+let mountQueue = 0;
+function attachStream(img) {
+  if (mountStagger <= 0) { mountStream(img); return; }
+  const wait = (mountQueue++) * mountStagger;
+  setTimeout(() => { if (img.isConnected) mountStream(img); }, wait);
+}
+
 /* 锁屏/切后台再回来: iOS 会把 MJPEG 连接全掐掉, <img> 只剩一个问号,
-   而 src 属性还在 (浏览器不会自己重连)。回前台时整片重挂一遍,
-   顺手把断掉的 WebSocket 也接回来。 */
+   而 src 属性还在 (浏览器不会自己重连)。回前台时重挂一遍,
+   顺手把断掉的 WebSocket 也接回来。
+
+   但不能一口气全挂: 旧连接在 WebKit 里还没释放, 立刻开 N 条新连接就超了
+   并发上限 —— 用户看到的是「锁屏再开就全黑, 怎么等都不回来」
+   (反馈 2026-10-26)。先等 400ms 让系统收掉旧连接, 再每 700ms 挂一台。 */
 function remountAll() {
   for (const el of document.querySelectorAll('img[data-cam], audio.camaudio')) {
     if (!el.isConnected) continue;
     if (el.tagName === 'AUDIO') unmountAudio(el);
     else unmountStream(el);
   }
-  syncWalls();
-  syncCameras();
-  for (const img of document.querySelectorAll('#zoom img[data-src]')) {
-    mountStream(img);
-  }
+  mountStagger = 700;
+  mountQueue = 0;
+  setTimeout(() => {
+    syncWalls();
+    syncCameras();
+    for (const img of document.querySelectorAll('#zoom img[data-src]')) {
+      attachStream(img);
+    }
+  }, 400);
+  // 错峰窗口够把当前所有画面排完就行, 之后恢复即时挂 (切页签不该等)。
+  setTimeout(() => { mountStagger = 0; mountQueue = 0; }, 400 + 700 * 6);
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
@@ -1544,6 +1565,26 @@ function unmountAudio(a) {
 /* 服务端每出一帧就加 1; 12 秒没变化说明这条流卡死了, 重挂连接。
    (Mac 那边的 relay 也会在 10 秒无帧时自己重启 ffmpeg, 页面这一层
    管的是浏览器到 Mac 之间那段断了没人发现的情况。) */
+/* 画面「黑了但连接看着还在」: 挂上去 8 秒还没收到过一帧 (naturalWidth 仍是
+   0), 说明这条 MJPEG 根本没在出数据。iOS 锁屏回来最典型: 服务端帧号照走,
+   <img> 却一条数据都收不到 —— 帧号看门狗完全判不出来, 只能看客户端自己。
+   连续失败逐次拉长间隔 (8/16/24… 封顶 60 秒), 出帧后清零。 */
+function checkBlindStreams() {
+  if (document.visibilityState !== 'visible') return;
+  const now = Date.now();
+  for (const img of document.querySelectorAll('img[data-cam][src]')) {
+    if (!img.isConnected) continue;
+    if (img.naturalWidth > 0) { img.dataset.blind = '0'; continue; }
+    const tries = Number(img.dataset.blind || 0);
+    const wait = Math.min(60000, 8000 * (tries + 1));
+    if (now - Number(img.dataset.since || now) < wait) continue;
+    img.dataset.blind = String(tries + 1);
+    unmountStream(img);
+    mountStream(img);
+  }
+}
+setInterval(checkBlindStreams, 2000);
+
 const streamWatch = new Map();
 function checkStalls() {
   // 帧号是 WS 推来的。WS 被 iOS 挂起/掐掉之后 lastCameras 不再更新, 再拿
@@ -1976,7 +2017,7 @@ function syncCameras() {
   const on = document.body.dataset.tab === 'cameras';
   const zc = zoomedCam();
   for (const img of document.querySelectorAll('#cameras img')) {
-    if (on && !(zc && img.dataset.cam === zc)) mountStream(img);
+    if (on && !(zc && img.dataset.cam === zc)) attachStream(img);
     else unmountStream(img);
   }
   syncAudio(document.querySelectorAll('#cameras audio.camaudio'), on);
