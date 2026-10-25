@@ -228,6 +228,17 @@ def has_text(want: str) -> bool:
     return any(want in t for t in texts())
 
 
+def text_items() -> list[dict]:
+    """所有可见静态文字 + 几何 {text, pos, size}（快速 AX 路径）。
+
+    慢路径（System Events）不做几何读取 —— 一次遍历本来就 ~4s，逐元素再查
+    position/size 更慢；取不到就返回空，由调用方走视觉兜底。
+    """
+    if _fast_ok():
+        return _fast.text_items()
+    return []
+
+
 def press_text(want: str) -> bool:
     if _fast_ok() and _fast.press_text(want):
         return True
@@ -603,6 +614,13 @@ def click_at(x: float, y: float, timeout: int = 15) -> bool:
         return _fast.click_at(x, y)
     rc, _out, _err = _osa_js(_CLICK_JS, str(x), str(y), timeout=timeout)
     return rc == 0
+
+
+def press_escape() -> bool:
+    """按一次 Esc（收起 antd 浮层/菜单）。慢路径不做，交给调用方超时兜底。"""
+    if _fast_ok():
+        return _fast.press_escape()
+    return False
 
 
 # 控制按钮：一次遍历同时「确认在 name 详情页 + 找跳过锚 + 找图标按钮 + 点」。

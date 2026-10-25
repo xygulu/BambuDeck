@@ -13,7 +13,7 @@ macOS 上的本机 Python 服务,驱动 **Bambu Connect**(拓竹官方客户端)
 |---|---|
 | `bconnect_service.py` | HTTP 服务入口(127.0.0.1:8799),命令路由 + LAN MQTT 兜底控制 |
 | `bconnect_print.py` | 打印/换盘驱动:deep link → 导入 → 打印 → 发送 |
-| `bconnect_drive.py` | 暂停/恢复/停止驱动:正则匹配打印机 + AX 定位控制按钮 |
+| `bconnect_drive.py` | 暂停/恢复/停止/调速驱动:正则匹配打印机 + AX 定位控制按钮与速度档位菜单 |
 | `bconnect_ax.py` | JXA 无障碍遍历(AX)底层:短路 `probe`、按文字/desc/坐标点击 |
 | `bconnect_cloud.py` | 云端共享层:登录态、设备注册表、云 MQTT 状态、任务匹配 |
 | `bconnect_vision.py` | 多供应商视觉/文本模型接入(Connect 控制按钮 AX 找不到时的兜底) |
@@ -41,6 +41,8 @@ python3 -m venv .venv
    {"accessToken": "…"}
    ```
    也可用环境变量 `BAMBU_SESSION=/path/to/session.json` 覆盖路径。
+   默认位置没有这个文件时,会自动认 `~/.bambudeck/cloud_session.json`
+   (凭证放在仓库外,CLI 直接跑就不用带环境变量)。
 4. **局域网控制**(可选,dev-ON 直发):`~/.bambudeck/printers.json` 里配
    `serial -> {ip, name}`;访问码从云端注册表运行时取,不写死。
 5. **视觉兜底**(可选,控制按钮 AX 找不到时):`~/.bambudeck/models.json` 配
@@ -72,7 +74,20 @@ cd apps/deck/tool/connect_helper
 - `POST /command` `{serial, command, params}`
   - `command=print`  `params={file, filament?, stop_before_send?}` — 导入 → 打印 → 发送
   - `command=pause|resume|stop` — Connect 自动化,失败退回 LAN MQTT
+  - `command=speed` `params={level:1-4}` — 点 Connect 设备页的速度档位菜单
+    (1 静音 50% / 2 标准 100% / 3 运动 124% / 4 狂暴 166%)。只能在打印/暂停中改;
+    返回里 `confirmed=false` 表示 3 秒内 Connect 界面百分比还没刷新(它要绕云端
+    一圈,常见 2~20 秒),档位确认交给 App 用局域网 `spd_lvl` 做
   - `command=status` — 云 MQTT 只读快照
+
+CLI 单跑(调试用):
+
+```bash
+./.venv/bin/python bconnect_drive.py 123 speed 4      # 切狂暴
+./.venv/bin/python bconnect_drive.py 123 --speed-probe  # 打印控制行的 AX 几何
+```
+
+CLI 会自己把 Connect 置前(CGEvent 点的是最顶层窗口)。
 
 打印成功判定 = **点下「发送」即算成功**(Connect 已派单),不等发送页离开/任务落库/打印执行
 ——换盘本身需要一段时间,等 RUNNING 是多余阻塞。派单后立即返回、释放服务端 busy 锁,

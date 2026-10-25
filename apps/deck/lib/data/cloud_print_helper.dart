@@ -150,6 +150,12 @@ class CloudControlResult {
 
 /// helper 连接信息：本机从 `~/.bambudeck/helper.json` 读，其他设备在设置里
 /// 填服务地址 + 令牌（自动化仍然在跑 helper 的那台 Mac 上执行）。
+/// 速度档位 1-4 的名称（和 Bambu Connect 设备页的档位一致）。
+const speedLevelNames = <String>['静音', '标准', '运动', '狂暴'];
+
+String speedLevelName(int level) =>
+    level >= 1 && level <= 4 ? speedLevelNames[level - 1] : '$level 档';
+
 class HelperEndpoint {
   const HelperEndpoint({required this.url, required this.token});
 
@@ -270,6 +276,7 @@ class CloudPrintHelper {
   Future<CloudControlResult> control(
     String serial,
     String command, {
+    Map<String, dynamic> params = const <String, dynamic>{},
     Duration timeout = const Duration(seconds: 60),
   }) async {
     final ep = await endpoint();
@@ -284,7 +291,7 @@ class CloudPrintHelper {
       final res = await _request(ep, 'POST', '/command', body: {
         'serial': serial,
         'command': command,
-        'params': const <String, dynamic>{},
+        'params': params,
       }, timeout: timeout);
       return CloudControlResult.fromJson(res);
     } on TimeoutException {

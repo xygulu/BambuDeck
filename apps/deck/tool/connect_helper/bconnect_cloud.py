@@ -29,6 +29,12 @@ import paho.mqtt.client as mqtt
 HERE = os.path.dirname(os.path.abspath(__file__))
 SESSION_FILE = os.environ.get(
     "BAMBU_SESSION", os.path.join(HERE, "creds", "cloud_session.json"))
+# 登录态实际放在 ~/.bambudeck/ 下（凭证不进仓库）。没设 BAMBU_SESSION 时
+# 自动认这个位置，CLI 直接跑就不用每次带环境变量。
+if not os.path.exists(SESSION_FILE):
+    _HOME_SESSION = os.path.expanduser("~/.bambudeck/cloud_session.json")
+    if os.path.exists(_HOME_SESSION):
+        SESSION_FILE = _HOME_SESSION
 API = os.environ.get("BAMBU_API", "https://api.bambulab.cn")
 MQTT_HOST = "cn.mqtt.bambulab.com"
 MQTT_PORT = 8883

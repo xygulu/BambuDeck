@@ -77,6 +77,7 @@ _COMMAND_ALIASES = {
     "pause": "pause", "暂停": "pause",
     "resume": "resume", "继续": "resume", "恢复": "resume",
     "stop": "stop", "停止": "stop",
+    "speed": "speed", "速度": "speed",
     "status": "status", "状态": "status",
 }
 
@@ -131,6 +132,17 @@ def _restore_frontmost(prev: str | None) -> None:
             capture_output=True, text=True, timeout=30)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _activate_connect() -> bool:
+    """把 Connect 置前。CGEvent 点像素坐标点的是最顶层窗口，它不在前就点空。"""
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", 'tell application "%s" to activate' % bp.APP],
+            capture_output=True, text=True, timeout=30)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ---------------------------------------------------------------- 控制
@@ -304,6 +316,15 @@ def dispatch(serial: str, command: str, params: dict) -> dict:
         if lan.get("ok"):
             return lan
         return res
+    if cmd == "speed":
+        # 调速必须让 **Connect** 发 print_speed: App 自己经 LAN/云 MQTT 发的
+        # 会被固件拦 (84033543) 或收下不改档 —— 这是签名问题的老账。
+        # Connect 设备页的档位按钮就是同一条命令, 点它等于用官方身份发。
+        try:
+            level = int(params.get("level") or 0)
+        except (TypeError, ValueError):
+            level = 0
+        return drive.set_speed(serial, level)
     if cmd == "status":
         st = cloud.cloud_state(serial, seconds=10)
         return {"ok": bool(st), "result": st}
@@ -410,13 +431,17 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         cmd = _COMMAND_ALIASES.get(command, command)
-        mutating = cmd in ("print", "pause", "resume", "stop")
+        mutating = cmd in ("print", "pause", "resume", "stop", "speed")
         if mutating and not _BUSY.acquire(blocking=False):
             self._send(409, {"ok": False, "error": "已有命令在执行，请稍后重试"})
             return
-        # 只有打印会抢焦点（CGEvent 点像素坐标必须 Connect 在最前）；控制走 AXPress，
-        # 后台也能按，省掉两次 osascript 前台查询/还原（~0.3s）。
-        prev = _frontmost_app() if cmd == "print" else None
+        # 打印和调速都要真实鼠标点击（Connect 是 Electron，档位下拉/百分比不是
+        # AXButton，AXPress 点不动），点像素坐标必须 Connect 在最前；控制按钮走
+        # AXPress，后台也能按，省掉两次 osascript 前台查询/还原（~0.3s）。
+        need_click = cmd in ("print", "speed")
+        prev = _frontmost_app() if need_click else None
+        if need_click:
+            _activate_connect()
         try:
             res = dispatch(serial, command, params)
         except Exception as e:  # noqa: BLE001

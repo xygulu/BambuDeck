@@ -492,7 +492,7 @@ class _ControlBar extends ConsumerWidget {
                     ButtonSegment(value: 1, label: Text('静音')),
                     ButtonSegment(value: 2, label: Text('标准')),
                     ButtonSegment(value: 3, label: Text('运动')),
-                    ButtonSegment(value: 4, label: Text('疯狂')),
+                    ButtonSegment(value: 4, label: Text('狂暴')),
                   ],
                   selected: {s.speedLevel > 0 ? s.speedLevel : 2},
                   onSelectionChanged: !canControl
@@ -542,23 +542,77 @@ Future<void> runControl(BuildContext context, PrinterProfile profile,
   await runCloudControl(context, profile, command);
 }
 
-/// 调速: 固件常只在打印中才真正接受, 而且不一定回报 spd_lvl。没确认就弹一句,
-/// 免得用户以为「点了运动还是显示标准」是界面坏了 (反馈 2026-10-25)。
+/// 调速: 走 Bambu Connect 自动化 (点 Connect 设备页上的档位按钮), 由 Connect
+/// 用官方客户端身份发 print_speed。
+///
+/// 为什么不能自己发: 固件拦 App 的 print_speed(84033543), 或者收下却不改档 ——
+/// 这就是签名问题的老账 (反馈 2026-10-26)。Connect 服务不在线时退回局域网直发,
+/// 那条路在开发者模式的机器上偶尔还能用, 但只算「已发送」, 不当成功。
 Future<void> runSpeed(BuildContext context, PrinterProfile profile,
     ConnectionNotifier notifier, int level) async {
   final messenger = ScaffoldMessenger.of(context);
-  final r = await notifier.setSpeedConfirmed(level);
-  LogBuffer.instance.add('[速度] ${profile.name}: $level 档 '
-      '${!r.sent ? '发送失败' : r.confirmed ? '已确认' : '未确认'}');
-  if (!r.sent) {
-    messenger.showSnackBar(const SnackBar(
-        backgroundColor: DeckColors.error,
-        content: Text('调速失败: 打印机未连接')));
-  } else if (!r.confirmed) {
+  final name = speedLevelName(level);
+
+  if (!await CloudPrintHelper.instance.health()) {
+    final r = await notifier.setSpeedConfirmed(level);
+    LogBuffer.instance.add('[速度] ${profile.name}: $name '
+        '局域网直发 ${!r.sent ? '失败' : r.confirmed ? '已确认' : '未确认'}'
+        ' (Connect 服务未运行)');
+    if (!r.sent) {
+      messenger.showSnackBar(const SnackBar(
+          backgroundColor: DeckColors.error,
+          content: Text('调速失败: 打印机未连接')));
+    } else if (!r.confirmed) {
+      messenger.showSnackBar(SnackBar(
+          content: Text(r.note ??
+              '速度已发给打印机, 但打印机没有确认切档'
+                  ' (不在打印中时通常不生效)')));
+    }
+    return;
+  }
+  // 服务端靠 serial 正则定位打印机, 空 serial 只会得到一句「缺字段 serial」。
+  if (profile.serial.trim().isEmpty) {
+    LogBuffer.instance.add('[速度] $name ${profile.name}: 失败 未配置序列号');
     messenger.showSnackBar(SnackBar(
-        content: Text(r.note ??
-            '速度已发给打印机, 但打印机没有确认切档'
-                ' (不在打印中时通常不生效)')));
+        backgroundColor: DeckColors.error,
+        content: Text('「${profile.name}」未配置序列号,Connect 自动化无法定位'
+            '打印机。请在该打印机卡片 → 编辑打印机 里补上序列号')));
+    return;
+  }
+
+  messenger.showSnackBar(
+      SnackBar(content: Text('正在通过 Bambu Connect 切到「$name」…')));
+  final r = await CloudPrintHelper.instance.control(
+    profile.serial,
+    'speed',
+    params: {'level': level},
+    timeout: const Duration(seconds: 45),
+  );
+  // Connect 界面上那个百分比要绕一大圈 (云 → 打印机 → 云 → Connect, 实测
+  // 2~20 秒不等) 才刷新, 不能拿它当确认。用局域网状态帧里的 spd_lvl 收口:
+  // 那是打印机直报的, 秒级。
+  var confirmed = false;
+  if (r.ok) {
+    confirmed =
+        await notifier.awaitSpeed(level, within: const Duration(seconds: 10));
+  }
+  LogBuffer.instance.add('[速度] ${profile.name}: $name via Connect '
+      'ok=${r.ok}${r.ok ? (confirmed ? ' 已确认' : ' 未确认') : ''}'
+      '${r.error == null ? '' : ' err=${r.error}'}'
+      '${r.elapsed == null ? '' : ' ${r.elapsed!.round()}s'}');
+  messenger.hideCurrentSnackBar();
+  if (!r.ok) {
+    messenger.showSnackBar(SnackBar(
+        backgroundColor: DeckColors.error,
+        content: Text('调速失败: ${r.error ?? '未知错误'}')));
+  } else if (confirmed) {
+    messenger.showSnackBar(SnackBar(
+        content: Text('已切到「$name」'
+            '${r.elapsed == null ? '' : '(${r.elapsed!.round()}s)'}')));
+  } else {
+    messenger.showSnackBar(const SnackBar(
+        content: Text('已在 Bambu Connect 点了这一档, 但打印机还没回报新档位\n'
+            '(常见原因: 打印机不在打印中)')));
   }
 }
 
@@ -781,7 +835,7 @@ class _ControlCard extends ConsumerWidget {
                         ButtonSegment(value: 1, label: Text('静音')),
                         ButtonSegment(value: 2, label: Text('标准')),
                         ButtonSegment(value: 3, label: Text('运动')),
-                        ButtonSegment(value: 4, label: Text('疯狂')),
+                        ButtonSegment(value: 4, label: Text('狂暴')),
                       ],
                       selected: {s.speedLevel > 0 ? s.speedLevel : 2},
                       onSelectionChanged: !(live && profile != null)

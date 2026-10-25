@@ -210,32 +210,67 @@ class _DeckAppState extends ConsumerState<DeckApp> {
         'steps': r.steps.map((s) => s.toJson()).toList(),
       };
     };
-    // 网页端速度档位 / 腔灯：和 App 控制卡一样只发到本机 MQTT 连接。
+    // 网页端速度档位 / 腔灯。调速和 App 控制卡一样走 Bambu Connect 自动化
+    // (点 Connect 设备页的档位按钮, 由 Connect 用官方身份发 print_speed),
+    // 腔灯仍发到本机 MQTT 连接 —— 固件拦的是 App 自己发的 print_speed。
     hubServer.setHandler = (profile, {speed, light}) async {
       final n = ref.read(connectionProvider(profile.id).notifier);
       var ok = true;
-      // 速度要打印机确认: 固件常常收下命令却不改档(不在打印中), publish
-      // 成功并不代表调速成功 —— 不确认就如实说, 别让网页显示「已发送」。
       var speedConfirmed = true;
       String? speedNote;
+      String? speedError;
       if (speed != null) {
-        final r = await n.setSpeedConfirmed(speed);
-        ok = r.sent && ok;
-        speedConfirmed = r.confirmed;
-        speedNote = r.note;
+        if (profile.serial.trim().isEmpty) {
+          ok = false;
+          speedError = '「${profile.name}」未配置序列号，Connect 自动化无法定位打印机';
+        } else if (!await CloudPrintHelper.instance.health()) {
+          // helper 没跑: 退回局域网直发。结果如实标注「未确认」——publish
+          // 成功不代表改档成功, 别让网页显示「已发送」。
+          final r = await n.setSpeedConfirmed(speed);
+          ok = r.sent && ok;
+          speedConfirmed = r.confirmed;
+          speedNote = r.note;
+          if (!r.sent) speedError = '局域网直发失败(打印机未连接或不在局域网)';
+          LogBuffer.instance.add('[网页] 速度${speedLevelName(speed)} '
+              '${profile.name}: 局域网直发${r.sent ? '' : '失败'}'
+              '${r.confirmed ? '' : '(未确认)'} (Connect 服务未运行)');
+        } else {
+          final r = await CloudPrintHelper.instance.control(
+            profile.serial,
+            'speed',
+            params: {'level': speed},
+            timeout: const Duration(seconds: 45),
+          );
+          ok = r.ok && ok;
+          // Connect 界面上的百分比要绕云端一圈才刷新 (2~20s), 不能当确认。
+          // 用局域网状态帧里的 spd_lvl 收口 —— 打印机直报的, 秒级。
+          speedConfirmed =
+              r.ok && await n.awaitSpeed(speed, within: const Duration(seconds: 10));
+          if (r.ok && !speedConfirmed) {
+            speedNote = '已在 Bambu Connect 点了这一档，但打印机还没回报新档位'
+                '（不在打印中时通常不生效）';
+          }
+          LogBuffer.instance.add('[网页] 速度${speedLevelName(speed)} '
+              '${profile.name}: via Connect ok=${r.ok}'
+              '${r.ok ? (speedConfirmed ? ' 已确认' : ' 未确认') : ''}'
+              '${r.error == null ? '' : ' err=${r.error}'}'
+              '${r.elapsed == null ? '' : ' ${r.elapsed!.round()}s'}');
+          if (!r.ok) speedError = r.error ?? 'Connect 调速失败';
+        }
       }
       if (light != null) ok = await n.setLight(light) && ok;
-      LogBuffer.instance.add('[网页] 设置 ${profile.name}: '
-          '${speed == null ? '' : '速度$speed${speedConfirmed ? '' : '(未确认)'} '}'
-          '${light == null ? '' : '腔灯${light ? '开' : '关'} '}'
-          '${ok ? '已发送' : '失败(打印机未连接?)'}');
+      if (speed == null && light != null) {
+        LogBuffer.instance.add('[网页] 设置 ${profile.name}: '
+            '腔灯${light ? '开' : '关'} ${ok ? '已发送' : '失败(打印机未连接?)'}');
+      }
       return <String, dynamic>{
         'ok': ok,
         'printer': profile.name,
         if (speed != null) 'speed': speed,
         if (speed != null) 'confirmed': speedConfirmed,
         if (light != null) 'light': light,
-        if (!ok) 'error': '局域网直发失败(打印机未连接或不在局域网)',
+        if (speedError != null) 'error': speedError,
+        if (!ok && speedError == null) 'error': '局域网直发失败(打印机未连接或不在局域网)',
         if (ok && speed != null && !speedConfirmed)
           'note': speedNote ??
               '速度已发给打印机，但打印机没有确认切档'

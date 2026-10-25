@@ -335,6 +335,14 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
     }
     return _current.state?.speedLevel == level;
   }
+
+  /// 等打印机状态帧里的 spd_lvl 变成 level。
+  ///
+  /// 走 Bambu Connect 调速时用它做权威确认: Connect 界面上那个百分比是
+  /// 云端绕一圈回来的(实测 2~20 秒)，局域网状态帧是打印机直报的(秒级)。
+  Future<bool> awaitSpeed(int level,
+          {Duration within = const Duration(seconds: 10)}) =>
+      _awaitSpeed(level, within);
   Future<bool> setLight(bool on) =>
       _link?.setLight(on) ?? Future.value(false);
   Future<bool> refresh() => _link?.refresh() ?? Future.value(false);

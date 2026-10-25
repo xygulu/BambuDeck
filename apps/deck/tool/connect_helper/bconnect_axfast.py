@@ -367,6 +367,37 @@ def texts(limit: int = 400) -> list[str]:
     return out
 
 
+# 带文字且需要几何的元素: 静态文字 + 菜单项/按钮（antd 下拉项是 AXMenuItem,
+# 它的标签在 AXTitle 上, 不是 AXStaticText —— 档位菜单就是这种）。
+_ITEM_ROLES = _TEXT_ROLES + ("AXMenuItem", "AXButton")
+
+
+def text_items(limit: int = 400) -> list[dict]:
+    """所有带文字元素 + 几何 {text, role, pos:[x,y], size:[w,h]}。
+
+    定位「可点但 AXPress 点不动」的元素用（Connect 的调速百分比/下拉项都是
+    Electron 的 div，只能按包围盒注入真实鼠标点击）。一次遍历 ~0.2s。
+    """
+    out: list[dict] = []
+
+    def on(el, _d):
+        if len(out) >= limit:
+            return True
+        role = _role(el)
+        if role not in _ITEM_ROLES:
+            return False
+        t = _attr_str(el, "AXValue") or _attr_str(el, "AXTitle") \
+            or _attr_str(el, "AXDescription")
+        r = _rect(el) or {}
+        if t and r.get("w", 0) > 0 and r.get("h", 0) > 0:
+            out.append({"text": t, "role": role,
+                        "pos": [r["x"], r["y"]], "size": [r["w"], r["h"]]})
+        return False
+
+    walk(on)
+    return out
+
+
 def probe(want_texts: list[str] | None = None,
           want_buttons: list[str] | None = None) -> dict:
     """短路探测：一次遍历同时找文字/按钮；全部命中即停（同 bconnect_ax.probe）。"""
