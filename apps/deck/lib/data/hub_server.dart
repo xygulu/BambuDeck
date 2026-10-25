@@ -9,6 +9,7 @@ import 'package:flutter/services.dart' show rootBundle;
 
 import 'app_settings.dart';
 import 'bambu_mjpeg.dart';
+import 'bambu_mjpeg_hub.dart';
 import 'camera_profile.dart';
 import 'hub_ptz.dart';
 import 'log_buffer.dart';
@@ -117,7 +118,10 @@ class CameraRelay {
   Timer? _retry;
   Timer? _watchdog;
   DateTime? _lastFrameAt;
-  BambuMjpegStream? _bambu;
+  /// 机内摄像头走共享连接 (App 画面块也读同一条, 打印机只认一个客户端)。
+  SharedBambuMjpeg? _shared;
+  StreamSubscription<Uint8List>? _sharedSub;
+  StreamSubscription<String>? _sharedErr;
   Process? _proc;
   var _retryDelay = const Duration(seconds: 1);
   bool _disposed = false;
@@ -126,14 +130,24 @@ class CameraRelay {
   /// 等下去不再出帧，原来只有进程退出才重连，于是网页上一直停在最后一帧。
   static const _stallAfter = Duration(seconds: 10);
 
+  var _loggedFirstFrame = false;
+
   void _publish(Uint8List frame) {
     seq++;
     _lastFrameAt = DateTime.now();
     latest = frame;
+    if (!_loggedFirstFrame) {
+      _loggedFirstFrame = true;
+      // 画面黑屏时, 日志里有没有这一行就能分清「源没出帧」还是「浏览器不画」。
+      _log('[网页] ${camera.name}: 视频源已出帧 '
+          '(${(frame.length / 1024).round()} KB)');
+    }
     _frames.add(frame);
   }
 
-  static const _maxClients = 4;
+  /// 每台画面最多给几个网页客户端。手机上一台打印机最多摆两张卡
+  /// (墙 + 放大), 3 条够用; 太多会把 Safari 的同源连接名额吃光。
+  static const _maxClients = 3;
 
   bool get saturated => clients >= _maxClients;
 
@@ -167,7 +181,7 @@ class CameraRelay {
   var _loggedNoSource = false;
 
   void _ensureSource() {
-    if (_disposed || _bambu != null || _proc != null || _retry != null) return;
+    if (_disposed || _shared != null || _proc != null || _retry != null) return;
     final url = resolveUrl();
     if (url == null || url.isEmpty) {
       if (!_loggedNoSource) {
@@ -184,16 +198,15 @@ class CameraRelay {
         _log('[网页] ${camera.name}: bmjpeg 地址无法解析');
         return;
       }
-      final s = BambuMjpegStream(
-        host: p.host,
-        port: p.port,
-        username: p.username,
-        password: p.password,
-        onFrame: _publish,
-        onError: _log,
-      );
-      _bambu = s;
-      s.start(); // reconnects internally, never completes
+      // 和 App 的画面块共用一条打印机连接 —— 自己再开一条会互相踢。
+      final s = BambuMjpegHub.instance
+          .acquire(p.host, p.port, p.username, p.password);
+      _shared = s;
+      _sharedSub = s.frames.listen(_publish);
+      _sharedErr = s.errors.listen((m) => _log('[网页] ${camera.name}: $m'));
+      // 已经有帧就直接用, 网页端不用等下一帧。
+      final last = s.latest;
+      if (last != null) _publish(last);
     } else if (url.startsWith('rtsp')) {
       _log('[网页] ${camera.name}: 网页端开始转码拉流 (${_mask(url)}, '
           'ffmpeg=$ffmpegPath)');
@@ -207,20 +220,27 @@ class CameraRelay {
   static String _mask(String url) => url.replaceFirstMapped(
       RegExp(r'://([^:@/]*):([^@/]*)@'), (m) => '://${m[1]}:***@');
 
-  Future<void> _runFfmpeg(String url) async {
-    try {
-      final proc = await Process.start(ffmpegPath, [
+  /// 拉 RTSP 转 MJPEG 的命令行。
+  ///
+  /// 读超时是 `-timeout` (rtsp 解复用器自己的选项, 微秒), **不是**
+  /// `-rw_timeout`: ffmpeg 8 起 rtsp 不再接受 rw_timeout, 会在连上之前就报
+  /// "Option rw_timeout not found" 退出 —— 网页端所有第三方摄像头全黑,
+  /// 而 App 里自己的画面是 mpv 拉的, 一切正常, 很容易误判成手机问题
+  /// (实测 ffmpeg 8.1.1, 反馈 2026-10-26)。
+  static List<String> videoArgs(String url) => [
         '-loglevel', 'error',
         '-rtsp_transport', 'tcp',
-        // RTSP 读超时 (微秒): 网络半开时 ffmpeg 自己退出, 交给下面的重连,
-        // 不会一直挂着不出帧。MJPEG 只要画面, 不带音频。
-        '-rw_timeout', '5000000',
+        '-timeout', '5000000',
         '-i', url,
         '-an',
         '-f', 'mjpeg',
         '-q:v', '5',
         '-',
-      ]);
+      ];
+
+  Future<void> _runFfmpeg(String url) async {
+    try {
+      final proc = await Process.start(ffmpegPath, videoArgs(url));
       _proc = proc;
       _startWatchdog();
       final splitter = JpegSplitter();
@@ -241,7 +261,8 @@ class CameraRelay {
         for (final line in chunk.split('\n')) {
           final l = line.trim();
           if (l.isEmpty) continue;
-          if (stderrTail.length < 3) stderrTail.add(l);
+          // ffmpeg 会把整条 URL (含密码) 打进错误信息, 落日志前先打码。
+          if (stderrTail.length < 3) stderrTail.add(_mask(l));
         }
       }, onDone: () {
         if (stderrTail.isNotEmpty) {
@@ -307,8 +328,13 @@ class CameraRelay {
     _lastFrameAt = null;
     _retry?.cancel();
     _retry = null;
-    _bambu?.dispose();
-    _bambu = null;
+    unawaited(_sharedSub?.cancel());
+    _sharedSub = null;
+    unawaited(_sharedErr?.cancel());
+    _sharedErr = null;
+    _shared?.release();
+    _shared = null;
+    _loggedFirstFrame = false;
     try {
       _proc?.kill();
     } on ProcessException {
@@ -391,12 +417,11 @@ class AudioRelay {
     _runFfmpeg(url);
   }
 
-  Future<void> _runFfmpeg(String url) async {
-    try {
-      final proc = await Process.start(ffmpegPath, [
+  /// 同画面: 读超时只认 `-timeout` (见 [CameraRelay.videoArgs])。
+  static List<String> audioArgs(String url) => [
         '-loglevel', 'error',
         '-rtsp_transport', 'tcp',
-        '-rw_timeout', '5000000',
+        '-timeout', '5000000',
         '-i', url,
         '-vn',
         '-ac', '1',
@@ -406,14 +431,20 @@ class AudioRelay {
         '-flush_packets', '1',
         '-f', 'mp3',
         '-',
-      ]);
+      ];
+
+  Future<void> _runFfmpeg(String url) async {
+    try {
+      final proc = await Process.start(ffmpegPath, audioArgs(url));
       _proc = proc;
       _startWatchdog();
       final errTail = <String>[];
       proc.stderr.transform(utf8.decoder).listen((chunk) {
         for (final line in chunk.split('\n')) {
           final l = line.trim();
-          if (l.isNotEmpty && errTail.length < 3) errTail.add(l);
+          if (l.isNotEmpty && errTail.length < 3) {
+            errTail.add(CameraRelay._mask(l));
+          }
         }
       }, onDone: () {
         // 摄像头这条码流没声音时 ffmpeg 会立刻退出, 把原因带进日志。
@@ -542,10 +573,12 @@ class HubServer {
   ///
   /// iOS 锁屏/切后台再回来时, 旧 socket 常常既不读也不关 (半死连接):
   /// 我们这边 flush 永远等不到, 也就永远收不到 `response.done`, relay 的
-  /// `clients` 只增不减。攒满上限 (画面 4 路 / 声音 2 路) 之后所有新连接
-  /// 都是 503, 页面一直裂图 —— 只能重启 App 才好 (反馈 2026-10-25)。
-  /// 超时主动断开, 名额就能收回来。测试里会调小。
-  Duration streamStallTimeout = const Duration(seconds: 15);
+  /// `clients` 只增不减。攒满上限之后新连接都被挡, 页面一直裂图。
+  ///
+  /// 6s: 页面重挂的间隔是 3s, 留一倍余量就够; 15s 太久了 —— 手机的同源连接
+  /// 名额 (6 条) 被半死连接占着时, 整页都加载不出来 (反馈 2026-10-26)。
+  /// 现在还有「满了踢最老的」兜底 (见 [_streamClients])。测试里会调小。
+  Duration streamStallTimeout = const Duration(seconds: 6);
 
   /// Test seam: [relayOverride] 绕过了托管的 relay, 测试靠这个钩子确认
   /// 「卡住的观众把名额还回来了」。
@@ -1149,7 +1182,24 @@ class HubServer {
 
   // -- mjpeg ------------------------------------------------------------
 
-  /// 连接数打满只记一次: 页面每 3 秒重试一次, 不节流日志会被刷屏。
+  /// 谁来连了画面: 手机端黑屏时, 这条日志能分清「请求根本没到服务端」
+  /// (iOS 并发连接被占满 / 走错地址) 和「到了但浏览器不画」。页面重挂会
+  /// 反复连, 每台摄像头 5 秒只记一次。
+  final _attachLoggedAt = <String, DateTime>{};
+  void _logAttach(CameraProfile cam, HttpRequest req) {
+    final now = DateTime.now();
+    final last = _attachLoggedAt[cam.id];
+    if (last != null && now.difference(last) < const Duration(seconds: 5)) {
+      return;
+    }
+    _attachLoggedAt[cam.id] = now;
+    final remote = req.connectionInfo?.remoteAddress.address ?? '?';
+    final ua = (req.headers.value('user-agent') ?? '?').trim();
+    final who = ua.length > 40 ? '${ua.substring(0, 40)}…' : ua;
+    _log('[网页] ${cam.name}: 画面请求 $remote ($who)');
+  }
+
+  /// 连接数打满只记一次: 页面每几秒重试一次, 不节流日志会被刷屏。
   final _saturatedLoggedAt = <String, DateTime>{};
   void _logSaturated(
       String what, CameraProfile cam, int clients, int max) {
@@ -1164,11 +1214,31 @@ class HubServer {
         ' —— 不读数据的连接应在 ${streamStallTimeout.inSeconds}s 内被回收');
   }
 
+  /// 每次挂流都登记一个回收器: 名额满了就踢最老的那条。
+  ///
+  /// 手机 Safari 每站只给 6 条 HTTP 连接, 用满以后旧连接既不读也不关 (半死);
+  /// 只「拒绝新连接」的话页面会一直卡在「连接数已满」—— 表现是整页摄像头全黑,
+  /// 等 15s 回收也未必来得及 (反馈 2026-10-26)。新请求显然代表「现在要看」,
+  /// 所以让新连接赢: 先断最老的, 再挂新的。
+  final _streamClients = <String, List<void Function()>>{};
+
+  void _logEvicted(String camera, int kept) {
+    final now = DateTime.now();
+    final last = _saturatedLoggedAt['$camera/evict'];
+    if (last != null && now.difference(last) < const Duration(seconds: 10)) {
+      return;
+    }
+    _saturatedLoggedAt['$camera/evict'] = now;
+    _log('[网页] $camera: 画面连接已满, 断开最老的一条给新连接'
+        ' (剩 $kept 条) —— 反复出现说明页面在重复挂同一条流');
+  }
+
   Future<void> _serveMjpeg(HttpRequest req, String cameraId) async {
     CameraProfile? cam;
     for (final c in cameras) {
       if (c.id == cameraId) cam = c;
     }
+    if (cam != null) _logAttach(cam, req);
     if (cam == null || !cam.enabled) {
       req.response.statusCode = HttpStatus.notFound;
       req.response.write('摄像头不存在或已停用');
@@ -1177,12 +1247,23 @@ class HubServer {
     }
     final camera = cam;
     final managed = relayOverride == null ? _relayFor(camera) : null;
-    if (managed != null && managed.saturated) {
-      _logSaturated('画面', camera, managed.clients, CameraRelay._maxClients);
-      req.response.statusCode = HttpStatus.serviceUnavailable;
-      req.response.write('该画面网页端连接数已达上限');
-      await req.response.close();
-      return;
+    // 名额满了先踢最老的半死连接 (见 [_streamClients])。
+    final mine = managed == null
+        ? null
+        : _streamClients.putIfAbsent(camera.id, () => <void Function()>[]);
+    if (managed != null && mine != null) {
+      while (managed.saturated && mine.isNotEmpty) {
+        final oldest = mine.removeAt(0);
+        _logEvicted(camera.name, mine.length);
+        oldest();
+      }
+      if (managed.saturated) {
+        _logSaturated('画面', camera, managed.clients, CameraRelay._maxClients);
+        req.response.statusCode = HttpStatus.serviceUnavailable;
+        req.response.write('该画面网页端连接数已达上限');
+        await req.response.close();
+        return;
+      }
     }
     final Stream<Uint8List> frames;
     if (relayOverride != null) {
@@ -1216,6 +1297,7 @@ class HubServer {
       stalled?.cancel();
       stalled = null;
       managed?.detach();
+      mine?.remove(release);
       onStreamReleased?.call(camera);
       unawaited(sub?.cancel());
       try {
@@ -1224,6 +1306,8 @@ class HubServer {
         // flush 挂着关不掉 - 名额已经还了, 不再往里写
       }
     }
+
+    mine?.add(release);
 
     req.response.done.then((_) => release());
     final boundaryHead = ascii.encode('--bambudeck\r\n'

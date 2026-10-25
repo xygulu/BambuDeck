@@ -39,6 +39,7 @@ class _FakePtz implements PtzClient {
 }
 
 void main() {
+  _ffmpegArgsTests();
   group('JpegSplitter', () {
     Uint8List jpeg(int seed) => Uint8List.fromList(
         [0xFF, 0xD8, seed, 0x11, 0x22, 0x33, 0xFF, 0xD9]);
@@ -655,5 +656,21 @@ void main() {
       expect(body['available'], isFalse);
       expect(fake.moves, isEmpty);
     });
+  });
+}
+
+void _ffmpegArgsTests() {
+  test('rtsp read timeout uses -timeout, not rw_timeout', () {
+    // ffmpeg 8 的 rtsp 解复用器不认 -rw_timeout, 进程会立刻退出
+    // ("Option rw_timeout not found"), 网页端第三方摄像头全黑。
+    for (final args in [
+      CameraRelay.videoArgs('rtsp://cam/live'),
+      AudioRelay.audioArgs('rtsp://cam/live'),
+    ]) {
+      expect(args, contains('-timeout'));
+      expect(args, isNot(contains('-rw_timeout')));
+    }
+    expect(CameraRelay.videoArgs('rtsp://cam/live'),
+        containsAllInOrder(['-i', 'rtsp://cam/live']));
   });
 }

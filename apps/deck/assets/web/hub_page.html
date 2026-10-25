@@ -1064,7 +1064,7 @@ function buildPane(p) {
               <button data-speed="1" title="静音" aria-label="静音">静</button>
               <button data-speed="2" title="标准" aria-label="标准">标</button>
               <button data-speed="3" title="运动" aria-label="运动">运</button>
-              <button data-speed="4" title="疯狂" aria-label="疯狂">狂</button>
+              <button data-speed="4" title="狂暴" aria-label="狂暴">狂</button>
             </div>
           </span>
           <button class="btn icon lamp" id="lamp" type="button" aria-label="腔灯" title="开灯">${ICON.bulbOff}</button>
@@ -1415,40 +1415,71 @@ function renderWall(p) {
   paintCam();
 }
 
+// 放大视图里正在看的那台。它已经在放大图里挂着一条流了。
+function zoomedCam() {
+  const z = $('zoom');
+  if (!z || !z.classList.contains('show')) return null;
+  const img = z.querySelector('img[data-cam]');
+  return img ? img.dataset.cam : null;
+}
+
 // 摄像头墙的 <img> 只在看得见时挂 MJPEG, 切走/换机器就摘掉。
+// 放大中的那台墙上不再挂: 同一台机内摄像头第二条连接会把第一条踢掉。
 function syncWalls() {
   const visible = document.body.dataset.tab === 'printers' &&
     (WIDE() || document.body.dataset.view === 'detail');
+  const zc = zoomedCam();
   for (const img of document.querySelectorAll('#camwall img')) {
-    if (visible) mountStream(img);
+    if (visible && !(zc && img.dataset.cam === zc)) mountStream(img);
     else unmountStream(img);
   }
   syncAudio(document.querySelectorAll('#camwall audio.camaudio'), visible);
 }
 
 // 声音跟着画面一起挂/摘; 静音是全局开关, 关着就不占带宽。
+//
+// 手机上每路声音都是额外一条 HTTP 长连接, 而 Safari 每个站只给 6 条:
+// 2 台摄像头就是 2 画面 + 2 声音 + WebSocket = 5, 再多一条重试就超,
+// 超了以后新的 <img> 全部不出帧 —— 表现就是「整页全黑」(反馈 2026-10-26)。
+// 所以窄屏只给放大中的那台出声, 宽屏 (电脑) 才全部挂。
 function syncAudio(list, visible) {
+  const zimg = document.querySelector('#zoom.show img[data-cam]');
+  const zoomCam = zimg ? zimg.dataset.cam : null;
   for (const a of list) {
-    if (visible) mountAudio(a);
+    const want = visible && (WIDE() || a.dataset.cam === zoomCam);
+    if (want) mountAudio(a);
     else unmountAudio(a);
   }
 }
+
+/* 断流重挂的退避: 4 秒起步, 连续失败越久退得越久 (封顶 20 秒),
+   再加随机抖动 —— 几台摄像头一起断时不能同时重连, iOS 的 6 条连接
+   名额会被同一瞬间的重试占满, 结果是全都出不来。 */
+const streamFails = new Map();
 
 // 每次挂流都带一个时间戳, 码流切换后重挂才能绕开缓存。
 function mountStream(img) {
   const base = img.dataset.src;
   if (!base || img.hasAttribute('src')) return;
-  // 连接被服务端/网络掐掉时浏览器只会显示裂图, 3 秒后自己重挂。
+  img.dataset.mounted = '1';
+  // 连接被服务端/网络掐掉时浏览器只会显示裂图, 退避后自己重挂。
   img.onerror = () => {
-    if (!img.isConnected || !img.hasAttribute('src')) return;
+    if (!img.isConnected || img.dataset.mounted !== '1') return;
+    if (!img.hasAttribute('src')) return;
     img.removeAttribute('src');
-    setTimeout(() => { if (img.isConnected) mountStream(img); }, 3000);
+    const cam = img.dataset.cam || '';
+    const fails = Math.min((streamFails.get(cam) || 0) + 1, 6);
+    streamFails.set(cam, fails);
+    setTimeout(() => {
+      if (img.isConnected && img.dataset.mounted === '1') mountStream(img);
+    }, 4000 * fails + Math.random() * 1500);
   };
   img.src = base + (base.includes('?') ? '&' : '?') + 'v=' + Date.now();
   img.dataset.since = String(Date.now()); // 第一次出帧的宽限期从这一刻算
   streamWatch.delete(img.dataset.cam); // 新连接重新计时
 }
 function unmountStream(img) {
+  img.dataset.mounted = '0'; // 让待执行的重挂/重试自己放弃
   if (img.hasAttribute('src')) img.removeAttribute('src');
 }
 
@@ -1529,6 +1560,7 @@ function checkStalls() {
     if (c.seq !== rec.seq) {
       rec.seq = c.seq;
       rec.movedAt = now;
+      streamFails.delete(c.id); // 出帧了, 失败计数清零
     }
     if (c.seq > 0 && now - rec.movedAt > 12000) {
       // 有帧号但 12 秒没动 = 这条流卡死了。
@@ -1577,19 +1609,25 @@ function checkAudioStalls(now) {
    <img> 却会自己「定格」不再绘制 (锁屏、长时间播放之后尤其常见), 页面这
    边完全感知不到 —— 帧号照常前进, 看门狗不会触发。唯一可靠的办法是隔一
    段时间主动重挂一次: 服务端立刻回一帧缓存画面, 视觉上几乎无感, 顺带把
-   可能半死的连接换掉 (服务端 15 秒收不回就主动断开, 见 streamStallTimeout)。 */
+   可能半死的连接换掉 (服务端 6 秒收不回就主动断开, 见 streamStallTimeout)。
+
+   以前是每 25 秒把**所有**流一起重挂。那等于每轮同时开 N 条新连接, 而
+   WebKit 收掉旧的多媒体请求要好几秒, iOS 同源又只给 6 条 —— 旧连接还挂
+   着、新的就排队, 超限以后新的 <img> 一条都不出帧, 表现是整页全黑
+   (反馈 2026-10-26)。改成每轮只轮换一台, 任何时刻最多多占一条连接。 */
 const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+let iosRotate = 0;
 setInterval(() => {
   if (!IS_IOS || document.visibilityState !== 'visible') return;
-  for (const img of document.querySelectorAll(
-      '#camwall img[data-cam], #cameras img[data-cam], #zoom img[data-cam]')) {
-    if (!img.hasAttribute('src')) continue;
-    unmountStream(img);
-    // 给 WebKit 一点时间把旧请求收掉, 再挂新的, 否则容易两条连接叠着。
-    setTimeout(() => { if (img.isConnected) mountStream(img); }, 150);
-  }
-}, 25000);
+  const imgs = [...document.querySelectorAll(
+      '#camwall img[data-cam][src], #cameras img[data-cam][src], #zoom img[data-cam][src]')];
+  if (!imgs.length) return;
+  const img = imgs[iosRotate++ % imgs.length];
+  unmountStream(img);
+  // 给 WebKit 一点时间把旧请求收掉, 再挂新的, 否则容易两条连接叠着。
+  setTimeout(() => { if (img.isConnected) mountStream(img); }, 200);
+}, 20000);
 
 // 只重拉一台摄像头的画面 (换码流后服务端已经放掉旧 relay)。
 function reloadStream(camId) {
@@ -1792,8 +1830,11 @@ function zoomOn(camId) {
       data-src="${esc(c.stream)}" style="transform:${camTransform(c)}">
     ${camChipsHtml(c)}${camPadHtml(c)}`;
   const img = z.querySelector('img');
-  img.src = c.stream + (c.stream.includes('?') ? '&' : '?') + 'v=' + Date.now();
   z.classList.add('show');
+  mountStream(img);
+  // 墙上/列表里那台先摘掉 (见 zoomedCam), 手机上声音也跟着放大这台走。
+  syncWalls();
+  syncCameras();
   paintCam();
   if (c.ptz) probePtz(c);
 }
@@ -1801,6 +1842,9 @@ function closeZoom() {
   const z = $('zoom');
   z.classList.remove('show');
   z.innerHTML = '';
+  // 放大关掉, 墙上那张挂回来。
+  syncWalls();
+  syncCameras();
 }
 $('zoom').addEventListener('click', e => {
   // 只点背景或画面本身才关; 点控制按钮不关。
@@ -1930,8 +1974,9 @@ function renderCameras(list) {
 // 切到摄像头才挂 MJPEG, 切走就摘掉 —— 不为看不见的画面占着三条流。
 function syncCameras() {
   const on = document.body.dataset.tab === 'cameras';
+  const zc = zoomedCam();
   for (const img of document.querySelectorAll('#cameras img')) {
-    if (on) mountStream(img);
+    if (on && !(zc && img.dataset.cam === zc)) mountStream(img);
     else unmountStream(img);
   }
   syncAudio(document.querySelectorAll('#cameras audio.camaudio'), on);

@@ -1,14 +1,18 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
 import '../core/theme.dart';
-import '../data/bambu_mjpeg.dart';
+import '../data/bambu_mjpeg_hub.dart';
 import '../data/log_buffer.dart';
 
 /// Live view for the A1/P1-family built-in camera: MJPEG frames pushed
 /// over TLS :6000. Decodes are capped to ~15 fps - the printer pushes
 /// faster than a monitoring tile needs to redraw.
+///
+/// 帧从 [BambuMjpegHub] 拿, 不是自己开连接: 打印机那边只认一个客户端,
+/// App 和网页各开一条会互相踢 (见 [BambuMjpegHub] 的说明)。
 class MjpegTile extends StatefulWidget {
   const MjpegTile({
     super.key,
@@ -30,7 +34,9 @@ class MjpegTile extends StatefulWidget {
 }
 
 class _MjpegTileState extends State<MjpegTile> {
-  BambuMjpegStream? _stream;
+  SharedBambuMjpeg? _shared;
+  StreamSubscription<Uint8List>? _sub;
+  StreamSubscription<String>? _errSub;
   Uint8List? _jpeg;
   String? _error;
   DateTime _lastPaint = DateTime.fromMillisecondsSinceEpoch(0);
@@ -38,34 +44,37 @@ class _MjpegTileState extends State<MjpegTile> {
 
   static const _minFrameInterval = Duration(milliseconds: 66);
 
+  void _close() {
+    _sub?.cancel();
+    _sub = null;
+    _errSub?.cancel();
+    _errSub = null;
+    _shared?.release();
+    _shared = null;
+  }
+
   void _open() {
-    _stream?.dispose();
-    final stream = BambuMjpegStream(
-      host: widget.host,
-      port: widget.port,
-      username: widget.username,
-      password: widget.password,
-      onFrame: _onFrame,
-      onError: (msg) {
-        // The stream retries on its own; surface the failure only while
-        // nothing has ever rendered.
-        LogBuffer.instance.add('[${widget.label ?? "摄像头"}] MJPEG: $msg');
-        if (!mounted) return;
-        setState(() {
-          if (_jpeg == null) {
-            _error = msg;
-          } else {
-            _reconnecting = true;
-          }
-        });
-      },
-    );
-    setState(() {
-      _stream = stream;
-      _reconnecting = false;
-      _error = null;
+    _close();
+    final shared = BambuMjpegHub.instance.acquire(
+        widget.host, widget.port, widget.username, widget.password);
+    _shared = shared;
+    _jpeg = shared.latest ?? _jpeg;
+    _reconnecting = false;
+    _error = _jpeg == null ? shared.error : null;
+    _sub = shared.frames.listen(_onFrame);
+    _errSub = shared.errors.listen((msg) {
+      // 连接层自己会重试; 画面出来过就只在角上标「重连中」。
+      LogBuffer.instance.add('[${widget.label ?? "摄像头"}] MJPEG: $msg');
+      if (!mounted) return;
+      setState(() {
+        if (shared.latest == null) {
+          _error = msg;
+        } else {
+          _reconnecting = true;
+        }
+      });
     });
-    stream.start();
+    if (mounted) setState(() {});
   }
 
   void _onFrame(Uint8List jpeg) {
@@ -76,6 +85,7 @@ class _MjpegTileState extends State<MjpegTile> {
     setState(() {
       _jpeg = jpeg;
       _reconnecting = false;
+      _error = null;
     });
   }
 
@@ -98,8 +108,7 @@ class _MjpegTileState extends State<MjpegTile> {
 
   @override
   void dispose() {
-    _stream?.dispose();
-    _stream = null;
+    _close();
     super.dispose();
   }
 
