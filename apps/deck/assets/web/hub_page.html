@@ -1514,6 +1514,10 @@ function unmountAudio(a) {
    管的是浏览器到 Mac 之间那段断了没人发现的情况。) */
 const streamWatch = new Map();
 function checkStalls() {
+  // 帧号是 WS 推来的。WS 被 iOS 挂起/掐掉之后 lastCameras 不再更新, 再拿
+  // 旧帧号判断「卡住」就会每 12 秒白重挂一次 —— 每次重挂都要新连接, 半死
+  // 连接很快把 iOS 的并发名额耗光, 画面反而彻底出不来。WS 静默就不判。
+  if (Date.now() - lastMsgAt > 25000) return;
   const now = Date.now();
   for (const img of document.querySelectorAll(
       '#camwall img[data-cam], #cameras img[data-cam], #zoom img[data-cam]')) {
@@ -1532,6 +1536,24 @@ function checkStalls() {
     streamWatch.set(c.id, rec);
   }
 }
+
+/* iOS WebKit 的 multipart/x-mixed-replace 有个老毛病: 服务端一直在推帧,
+   <img> 却会自己「定格」不再绘制 (锁屏、长时间播放之后尤其常见), 页面这
+   边完全感知不到 —— 帧号照常前进, 看门狗不会触发。唯一可靠的办法是隔一
+   段时间主动重挂一次: 服务端立刻回一帧缓存画面, 视觉上几乎无感, 顺带把
+   可能半死的连接换掉 (服务端 15 秒收不回就主动断开, 见 streamStallTimeout)。 */
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+setInterval(() => {
+  if (!IS_IOS || document.visibilityState !== 'visible') return;
+  for (const img of document.querySelectorAll(
+      '#camwall img[data-cam], #cameras img[data-cam], #zoom img[data-cam]')) {
+    if (!img.hasAttribute('src')) continue;
+    unmountStream(img);
+    // 给 WebKit 一点时间把旧请求收掉, 再挂新的, 否则容易两条连接叠着。
+    setTimeout(() => { if (img.isConnected) mountStream(img); }, 150);
+  }
+}, 25000);
 
 // 只重拉一台摄像头的画面 (换码流后服务端已经放掉旧 relay)。
 function reloadStream(camId) {

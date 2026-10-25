@@ -516,6 +516,19 @@ class HubServer {
   /// single-subscription used once).
   Stream<Uint8List> Function(CameraProfile camera)? relayOverride;
 
+  /// 一条长连接 (画面/声音) 的写入卡住多久就断定客户端已经走了。
+  ///
+  /// iOS 锁屏/切后台再回来时, 旧 socket 常常既不读也不关 (半死连接):
+  /// 我们这边 flush 永远等不到, 也就永远收不到 `response.done`, relay 的
+  /// `clients` 只增不减。攒满上限 (画面 4 路 / 声音 2 路) 之后所有新连接
+  /// 都是 503, 页面一直裂图 —— 只能重启 App 才好 (反馈 2026-10-25)。
+  /// 超时主动断开, 名额就能收回来。测试里会调小。
+  Duration streamStallTimeout = const Duration(seconds: 15);
+
+  /// Test seam: [relayOverride] 绕过了托管的 relay, 测试靠这个钩子确认
+  /// 「卡住的观众把名额还回来了」。
+  void Function(CameraProfile camera)? onStreamReleased;
+
   /// 网页端控制（暂停/继续/停止）的注入点，由 app 外壳接到和 App 内控制按钮
   /// 同一条路由上：dev-ON → LAN MQTT，其余 → Bambu Connect helper。
   /// 返回 {@code {ok, error?, printer?, elapsed?, method?}}。
@@ -1114,6 +1127,21 @@ class HubServer {
 
   // -- mjpeg ------------------------------------------------------------
 
+  /// 连接数打满只记一次: 页面每 3 秒重试一次, 不节流日志会被刷屏。
+  final _saturatedLoggedAt = <String, DateTime>{};
+  void _logSaturated(
+      String what, CameraProfile cam, int clients, int max) {
+    final now = DateTime.now();
+    final key = '${cam.id}/$what';
+    final last = _saturatedLoggedAt[key];
+    if (last != null && now.difference(last) < const Duration(seconds: 30)) {
+      return;
+    }
+    _saturatedLoggedAt[key] = now;
+    _log('[网页] ${cam.name}: $what连接数已满 ($clients/$max), 拒绝新连接'
+        ' —— 不读数据的连接应在 ${streamStallTimeout.inSeconds}s 内被回收');
+  }
+
   Future<void> _serveMjpeg(HttpRequest req, String cameraId) async {
     CameraProfile? cam;
     for (final c in cameras) {
@@ -1125,8 +1153,10 @@ class HubServer {
       await req.response.close();
       return;
     }
-    final managed = relayOverride == null ? _relayFor(cam) : null;
+    final camera = cam;
+    final managed = relayOverride == null ? _relayFor(camera) : null;
     if (managed != null && managed.saturated) {
+      _logSaturated('画面', camera, managed.clients, CameraRelay._maxClients);
       req.response.statusCode = HttpStatus.serviceUnavailable;
       req.response.write('该画面网页端连接数已达上限');
       await req.response.close();
@@ -1134,7 +1164,7 @@ class HubServer {
     }
     final Stream<Uint8List> frames;
     if (relayOverride != null) {
-      frames = relayOverride!(cam);
+      frames = relayOverride!(camera);
     } else {
       frames = managed!.attach();
     }
@@ -1149,14 +1179,31 @@ class HubServer {
     await req.response.flush();
 
     var open = true;
-    void close() {
+    var busy = false;
+    StreamSubscription<Uint8List>? sub;
+    Timer? stalled;
+
+    // 断开并归还名额 (只做一次)。注意 dart:io 在 flush 还挂着的时候
+    // 不允许 close() (抛 "StreamSink is bound to a stream") —— 而这正是
+    // 客户端不读了的状态。所以名额先收回、写循环先停, close 失败就由
+    // 这条半死连接自己烂掉 (客户端真走时 done 会再叫一次, 不会重复 detach)。
+    void release() {
       if (!open) return;
       open = false;
+      busy = false;
+      stalled?.cancel();
+      stalled = null;
       managed?.detach();
-      req.response.close().catchError((_) => req.response);
+      onStreamReleased?.call(camera);
+      unawaited(sub?.cancel());
+      try {
+        req.response.close().catchError((_) => req.response);
+      } catch (_) {
+        // flush 挂着关不掉 - 名额已经还了, 不再往里写
+      }
     }
 
-    req.response.done.then((_) => close());
+    req.response.done.then((_) => release());
     final boundaryHead = ascii.encode('--bambudeck\r\n'
         'Content-Type: image/jpeg\r\nContent-Length: ');
     final blankLine = ascii.encode('\r\n\r\n');
@@ -1167,26 +1214,42 @@ class HubServer {
     // open without reading, and writing every frame would balloon the
     // response buffer and hand the client minutes of stale video when it
     // comes back. Drop frames while the last flush is still pending.
-    var busy = false;
+    //
+    // 但「等不到 flush」不能无限等: 客户端彻底不读了就断开回收 (见
+    // [streamStallTimeout])。否则 detach 永远不执行, 名额被半死连接占死。
     void push(Uint8List frame) {
       if (!open || busy) return;
       busy = true;
+      stalled?.cancel();
+      stalled = Timer(streamStallTimeout, () {
+        if (!open) return;
+        _log('[网页] ${camera.name}: 画面连接 '
+            '${streamStallTimeout.inSeconds}s 写不出去 (客户端不读了), 断开回收');
+        release();
+      });
       _emit(req.response, boundaryHead, frame, blankLine, tail);
       req.response.flush().then((_) {
         busy = false;
+        stalled?.cancel();
+        stalled = null;
       }).catchError((_) {
         busy = false;
+        release(); // 写失败 = socket 已断, 直接回收
       });
     }
 
     final first = managed?.latest;
     if (first != null) push(first);
-    final sub = frames.listen(
+    sub = frames.listen(
       push,
-      onDone: close,
-      onError: (_) => close(),
+      onDone: release,
+      onError: (_) => release(),
     );
-    await req.response.done.then((_) => sub.cancel());
+    try {
+      await req.response.done;
+    } catch (_) {
+      // client vanished - release() already ran via done/onError
+    }
   }
 
   void _emit(HttpResponse res, List<int> head, Uint8List frame,
@@ -1245,6 +1308,7 @@ class HubServer {
     }
     final relay = _audioRelayFor(cam);
     if (relay.saturated) {
+      _logSaturated('声音', cam, relay.clients, AudioRelay._maxClients);
       req.response.statusCode = HttpStatus.serviceUnavailable;
       req.response.write('该画面声音连接数已达上限');
       await req.response.close();
@@ -1258,33 +1322,62 @@ class HubServer {
 
     var open = true;
     var busy = false;
-    void close() {
+    StreamSubscription<Uint8List>? sub;
+    Timer? stalled;
+
+    // 同画面: flush 挂着时 dart:io 不让 close(), 先把名额还回去。
+    void release() {
       if (!open) return;
       open = false;
+      busy = false;
+      stalled?.cancel();
+      stalled = null;
       relay.detach();
-      req.response.close().catchError((_) => req.response);
+      unawaited(sub?.cancel());
+      try {
+        req.response.close().catchError((_) => req.response);
+      } catch (_) {
+        // flush 挂着关不掉 - 名额已经还了
+      }
     }
 
-    req.response.done.then((_) => close());
-    final sub = chunks.listen(
+    req.response.done.then((_) => release());
+    sub = chunks.listen(
       (chunk) {
         if (!open || busy) return; // 读得慢就丢一小段, 别让延迟越积越大
         busy = true;
+        // 和画面一样: 客户端不读了 (锁屏/切后台的半死连接) 就断开回收,
+        // 否则 AudioRelay.clients 只增不减, 攒满 2 路之后声音永久 503。
+        stalled?.cancel();
+        stalled = Timer(streamStallTimeout, () {
+          if (!open) return;
+          _log('[网页] ${cam.name}: 声音连接 '
+              '${streamStallTimeout.inSeconds}s 写不出去, 断开回收');
+          release();
+        });
         try {
           req.response.add(chunk);
           req.response.flush().then((_) {
             busy = false;
+            stalled?.cancel();
+            stalled = null;
           }).catchError((_) {
             busy = false;
+            release();
           });
         } catch (_) {
-          busy = false; // client gone - response.done triggers close
+          busy = false;
+          release(); // client gone
         }
       },
-      onDone: close,
-      onError: (_) => close(),
+      onDone: release,
+      onError: (_) => release(),
     );
-    await req.response.done.then((_) => sub.cancel());
+    try {
+      await req.response.done;
+    } catch (_) {
+      // client vanished - release() already ran via done/onError
+    }
   }
 
   AudioRelay _audioRelayFor(CameraProfile c) {

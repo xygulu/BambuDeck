@@ -271,6 +271,41 @@ void main() {
       expect(text, contains(latin1.decode(frame)));
     });
 
+    test('a viewer that stops reading is dropped, freeing its slot', () async {
+      hub.settings = hubSettings();
+      hub.cameras = [camera()];
+      // 真机上 iOS 锁屏后 socket 既不读也不关: 服务端 flush 永远等不到,
+      // 旧代码就此把 relay 名额占死, 4 路之后画面永久 503 (必须重启 App)。
+      hub.streamStallTimeout = const Duration(milliseconds: 250);
+      final frames = StreamController<Uint8List>.broadcast();
+      addTearDown(frames.close);
+      hub.relayOverride = (_) => frames.stream;
+      var released = 0;
+      hub.onStreamReleased = (_) => released++;
+      await hub.start();
+
+      final client = HttpClient();
+      final req = await client.getUrl(Uri.parse(
+          'http://127.0.0.1:${bound.port}/stream/c1?token=sekrit'));
+      final res = await req.close();
+      final sub = res.listen((_) {}, onError: (_) {});
+      sub.pause(); // 不读 socket = 半死连接
+      final frame = Uint8List(256 * 1024);
+      // 灌到 socket 缓冲满了为止: flush 卡住 -> 超时 -> 归还名额。
+      for (var i = 0; i < 200 && released == 0; i++) {
+        frames.add(frame);
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      final deadline = DateTime.now().add(const Duration(seconds: 3));
+      while (released == 0 && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      expect(released, 1,
+          reason: '卡住的连接必须把 relay 名额还回来, 否则攒满 4 路就永久 503');
+      sub.resume();
+      client.close(force: true);
+    });
+
     test('stream for an unknown camera is 404', () async {
       hub.settings = hubSettings();
       await hub.start();
