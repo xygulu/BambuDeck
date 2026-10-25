@@ -213,6 +213,10 @@
     font-variant-numeric: tabular-nums;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  /* 只有模型名会很长: 它自己缩并出 … , 进度/层数/剩余时间固定显示。 */
+  .pjob .jname { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+  .pjob .jsep { flex: 0 0 auto; padding: 0 4px; opacity: .55; }
+  .pjob .jnum { flex: 0 0 auto; }
   .pane-head .pnet {
     margin-left: auto; font-size: 12px; color: var(--text2);
     font-variant-numeric: tabular-nums;
@@ -502,7 +506,7 @@
     #pane { display: none; padding-bottom: 8px; }
     body[data-view="detail"] #rail { display: none; }
     body[data-view="detail"] #pane { display: flex; }
-    body[data-view="detail"] .pjob { display: block; }
+    body[data-view="detail"] .pjob { display: flex; align-items: baseline; }
     /* 窄屏把 WiFi/IP 折到第二行, 让任务行有整行宽度。 */
     body[data-view="detail"] .pane-head { flex-wrap: wrap; row-gap: 2px; }
     body[data-view="detail"] .pnet {
@@ -549,14 +553,17 @@
     .errchip { font-size: 12px; padding: 5px 10px; margin-top: 8px; }
 
     /* 详情 */
-    .back { width: 40px; height: 40px; border-radius: 12px; font-size: 19px; }
-    .pane-head { padding: 8px 12px 2px; }
-    .pane-head .ptitle { font-size: 18px; }
-    /* 任务行在手机上折两行, 别把 进度/层数/剩余 截掉。 */
+    .back { width: 36px; height: 36px; border-radius: 11px; font-size: 17px; }
+    /* 详情头部只留一行名字 + 一行任务, 高度让给监控画面。
+       名字和模型名都单行, 超长用 … ; 进度/层数/剩余不截。 */
+    .pane-head { padding: 6px 12px 0; min-height: 0; gap: 8px; align-items: center; }
+    .pane-head .ptitle {
+      font-size: 15px; line-height: 1.3;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
     .pjob {
-      font-size: 12.5px; line-height: 1.45; white-space: normal;
-      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
-      overflow: hidden;
+      margin-top: 2px; font-size: 11px; line-height: 1.35;
+      white-space: nowrap; overflow: hidden;
     }
     /* 手机上监控页不显示 WiFi/IP：挤在一行里还抢画面, 想看网络去列表的
        「局域网 · 已连接」。 */
@@ -770,6 +777,12 @@ const fmtRemaining = m => {
   const h = Math.floor(m / 60), mm = m % 60;
   if (h === 0) return mm + '分钟';
   return mm === 0 ? h + '小时' : h + '小时' + mm + '分';
+};
+// 详情页那行只有一行宽, 剩余时间用紧凑写法: 1h15m / 45m。
+const fmtShortRemaining = m => {
+  if (!m || m <= 0) return '0m';
+  const h = Math.floor(m / 60), mm = m % 60;
+  return h ? (mm ? h + 'h' + mm + 'm' : h + 'h') : mm + 'm';
 };
 // BambuConnStatus → 卡片上的连接文字 (和 App 左栏卡片一样)。
 const CONN = {
@@ -1058,13 +1071,15 @@ function updatePane(p) {
   const net = [s.wifi != null ? `WiFi ${s.wifi} dBm` : '', s.ip || ''].filter(Boolean).join(' · ');
   $('pnet').textContent = net;
   if (job) {
-    const bits = [s.subtaskName || ''];
+    // 只有模型名会超长, 让它自己缩 (见 .pjob .jname), 进度和剩余时间不截。
+    const bits = [];
+    if (s.subtaskName) bits.push(`<span class="jname">${esc(s.subtaskName)}</span>`);
     if (s.printing) {
-      bits.push(`${s.progress || 0}%`, `层 ${s.layerNum || 0}/${s.totalLayers || 0}`);
-      const rem = fmtRemaining(s.remainingMinutes);
-      if (rem) bits.push('剩 ' + rem);
+      bits.push(`<span class="jnum">${s.progress || 0}%</span>`);
+      bits.push(`<span class="jnum">${s.layerNum || 0}/${s.totalLayers || 0}层</span>`);
+      bits.push(`<span class="jnum">剩${fmtShortRemaining(s.remainingMinutes)}</span>`);
     }
-    job.textContent = bits.filter(Boolean).join(' · ');
+    job.innerHTML = bits.join('<span class="jsep">·</span>');
   }
 
   const setHidden = (id, v) => { const el = $(id); if (el) el.hidden = v; };
