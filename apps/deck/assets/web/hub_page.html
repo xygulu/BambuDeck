@@ -338,7 +338,7 @@
   }
   .camview .shot {
     display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: contain;
-    cursor: zoom-in; transition: transform .18s;
+    background: #000; cursor: zoom-in; transition: transform .18s;
   }
   .wall .off, .cam .off {
     width: 100%; aspect-ratio: 16 / 9; background: #000;
@@ -410,12 +410,12 @@
     overflow: hidden;
   }
   #zoom.show { display: flex; }
-  #zoom img {
+  #zoom .shot {
     max-width: 100%; max-height: 100%; object-fit: contain;
-    border-radius: 10px; cursor: zoom-out;
+    background: #000; border-radius: 10px; cursor: zoom-out;
   }
   /* 90/270° 时画面绕中心转了 90°, 用视口的高宽互换后再放得下。 */
-  #zoom img.rot { max-width: calc(100vh - 32px); max-height: calc(100vw - 32px); }
+  #zoom .shot.rot { max-width: calc(100vh - 32px); max-height: calc(100vw - 32px); }
 
   /* 状态占位 */
   .placeholder {
@@ -1371,13 +1371,13 @@ function camCard(c) {
     card.innerHTML = `<div class="prow"><div class="pident"><div class="name">${esc(c.name)}</div>
         <div class="meta">${esc(c.type || '')}</div></div></div>
       <div class="camview">
-        <img class="shot" alt="${esc(c.name)}" data-cam="${esc(c.id)}"
-          data-src="${esc(c.stream)}" style="transform:${camTransform(c)}">
+        <canvas class="shot cstream" aria-label="${esc(c.name)}" data-cam="${esc(c.id)}"
+          data-src="${esc(c.stream)}" style="transform:${camTransform(c)}"></canvas>
         ${c.audioStream ? `<audio class="camaudio" data-cam="${esc(c.id)}"
           data-src="${esc(c.audioStream)}" preload="none" playsinline></audio>` : ''}
         ${camChipsHtml(c)}${camPadHtml(c)}
       </div>`;
-    card.querySelector('img').addEventListener('click', () => zoomOn(c.id));
+    card.querySelector('canvas').addEventListener('click', () => zoomOn(c.id));
   } else {
     card.innerHTML = `<div class="prow"><div class="pident"><div class="name">${esc(c.name)}</div>
         <div class="meta">${esc(c.type || '')}</div></div></div>
@@ -1423,7 +1423,7 @@ function renderWall(p) {
 function zoomedCam() {
   const z = $('zoom');
   if (!z || !z.classList.contains('show')) return null;
-  const img = z.querySelector('img[data-cam]');
+  const img = z.querySelector('canvas[data-cam]');
   return img ? img.dataset.cam : null;
 }
 
@@ -1469,7 +1469,7 @@ function trackNear(img) {
 // 连接会一直挂在浏览器的名额里, 切几台机器就满了。
 function dropStreams(root) {
   if (!root) return;
-  for (const img of root.querySelectorAll('img[data-cam]')) unmountStream(img);
+  for (const img of root.querySelectorAll('canvas.cstream')) unmountStream(img);
   for (const a of root.querySelectorAll('audio.camaudio')) unmountAudio(a);
 }
 
@@ -1479,7 +1479,7 @@ function syncWalls() {
   const visible = document.body.dataset.tab === 'printers' &&
     (WIDE() || document.body.dataset.view === 'detail');
   const zc = zoomedCam();
-  for (const img of document.querySelectorAll('#camwall img')) {
+  for (const img of document.querySelectorAll('#camwall canvas')) {
     const near = trackNear(img);
     if (visible && near && !(zc && img.dataset.cam === zc)) attachStream(img);
     else unmountStream(img);
@@ -1494,7 +1494,7 @@ function syncWalls() {
 // 超了以后新的 <img> 全部不出帧 —— 表现就是「整页全黑」(反馈 2026-10-26)。
 // 所以窄屏只给放大中的那台出声, 宽屏 (电脑) 才全部挂。
 function syncAudio(list, visible) {
-  const zimg = document.querySelector('#zoom.show img[data-cam]');
+  const zimg = document.querySelector('#zoom.show canvas[data-cam]');
   const zoomCam = zimg ? zimg.dataset.cam : null;
   for (const a of list) {
     const want = visible && (WIDE() || a.dataset.cam === zoomCam);
@@ -1508,30 +1508,126 @@ function syncAudio(list, visible) {
    名额会被同一瞬间的重试占满, 结果是全都出不来。 */
 const streamFails = new Map();
 
-// 每次挂流都带一个时间戳, 码流切换后重挂才能绕开缓存。
-function mountStream(img) {
-  const base = img.dataset.src;
-  if (!base || img.hasAttribute('src')) return;
-  img.dataset.mounted = '1';
-  // 连接被服务端/网络掐掉时浏览器只会显示裂图, 退避后自己重挂。
-  img.onerror = () => {
-    if (!img.isConnected || img.dataset.mounted !== '1') return;
-    if (!img.hasAttribute('src')) return;
-    img.removeAttribute('src');
-    const cam = img.dataset.cam || '';
-    const fails = Math.min((streamFails.get(cam) || 0) + 1, 6);
-    streamFails.set(cam, fails);
-    setTimeout(() => {
-      if (img.isConnected && img.dataset.mounted === '1') mountStream(img);
-    }, 4000 * fails + Math.random() * 1500);
-  };
-  img.src = base + (base.includes('?') ? '&' : '?') + 'v=' + Date.now();
-  img.dataset.since = String(Date.now()); // 第一次出帧的宽限期从这一刻算
-  streamWatch.delete(img.dataset.cam); // 新连接重新计时
+/* 画面不用 <img src=MJPEG>, 改成 fetch + <canvas>。
+   <img> 拉 MJPEG 时, 页面把它摘掉 (切打印机/滚出屏幕) WebKit 并不真的关掉
+   那条连接: 服务端 flush 一直挂着, 这条 TCP 永远 ESTABLISHED —— 客户端
+   不读了, close() 会抛 "StreamSink is bound to a stream", 关不掉 (实测)。
+   切几次机器, 浏览器的同源连接名额就被这些死连接占满, 之后新画面一条都
+   连不上: **一个黑屏 → 全黑**, 只能杀 App 重开 (反馈 2026-10-26)。
+   fetch 有 AbortController, abort() 一定把连接关掉, 服务端马上回收。 */
+const streamOf = new Map(); // canvas -> {ctrl, reader}
+
+function streamBackoff(cam) {
+  const fails = Math.min((streamFails.get(cam) || 0) + 1, 6);
+  streamFails.set(cam, fails);
+  return 4000 * fails + Math.random() * 1500;
 }
-function unmountStream(img) {
-  img.dataset.mounted = '0'; // 让待执行的重挂/重试自己放弃
-  if (img.hasAttribute('src')) img.removeAttribute('src');
+
+// 每次挂流都带一个时间戳, 码流切换后重挂才能绕开缓存。
+function mountStream(el) {
+  const base = el.dataset.src;
+  if (!base || streamOf.has(el)) return;
+  el.dataset.mounted = '1';
+  el.dataset.since = String(Date.now()); // 第一次出帧的宽限期从这一刻算
+  el.dataset.frames = '0';
+  streamWatch.delete(el.dataset.cam); // 新连接重新计时
+  const rec = { ctrl: new AbortController(), reader: null };
+  streamOf.set(el, rec);
+  pullStream(el, base, rec);
+}
+
+async function pullStream(el, base, rec) {
+  const url = base + (base.includes('?') ? '&' : '?') + 'v=' + Date.now();
+  try {
+    const res = await fetch(url, { signal: rec.ctrl.signal, cache: 'no-store' });
+    if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+    const reader = res.body.getReader();
+    rec.reader = reader;
+    let buf = new Uint8Array(0);
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!buf.length) {
+        buf = value;
+      } else {
+        const next = new Uint8Array(buf.length + value.length);
+        next.set(buf);
+        next.set(value, buf.length);
+        buf = next;
+      }
+      let f;
+      while ((f = takeJpeg(buf))) {
+        buf = f.rest;
+        if (!el.isConnected || streamOf.get(el) !== rec) return;
+        await drawFrame(el, f.jpg); // 解一张画一张, 慢就自然丢后面的帧
+        el.dataset.frames = String(Number(el.dataset.frames || 0) + 1);
+      }
+      // 攒了一堆都切不出完整帧 = 这条流不成帧, 别把内存吃光
+      if (buf.length > 4 * 1024 * 1024) buf = new Uint8Array(0);
+    }
+  } catch (_) {
+    // abort / 网络断 / 服务端关流都走这里, 下面统一收尾
+  }
+  if (rec.ctrl.signal.aborted || !el.isConnected || streamOf.get(el) !== rec) {
+    return;
+  }
+  streamOf.delete(el);
+  if (el.dataset.mounted !== '1') return;
+  setTimeout(() => {
+    if (el.isConnected && el.dataset.mounted === '1') mountStream(el);
+  }, streamBackoff(el.dataset.cam || ''));
+}
+
+// 从缓冲里切出第一张完整 JPEG (SOI FFD8 .. EOI FFD9), 返回 {jpg, rest}
+function takeJpeg(buf) {
+  let start = -1;
+  for (let i = 0; i + 1 < buf.length; i++) {
+    if (buf[i] === 0xff && buf[i + 1] === 0xd8) { start = i; break; }
+  }
+  if (start < 0) return null;
+  for (let i = start + 2; i + 1 < buf.length; i++) {
+    if (buf[i] === 0xff && buf[i + 1] === 0xd9) {
+      return { jpg: buf.slice(start, i + 2), rest: buf.slice(i + 2) };
+    }
+  }
+  return null;
+}
+
+const imgBitmaps = typeof createImageBitmap === 'function';
+
+async function drawFrame(el, jpg) {
+  const blob = new Blob([jpg], { type: 'image/jpeg' });
+  try {
+    if (imgBitmaps) {
+      const bmp = await createImageBitmap(blob);
+      if (el.width !== bmp.width || el.height !== bmp.height) {
+        el.width = bmp.width;
+        el.height = bmp.height;
+      }
+      el.getContext('2d').drawImage(bmp, 0, 0);
+      bmp.close();
+      return;
+    }
+    // 老 Safari 没有 createImageBitmap: 退回收到的 Image 对象
+    const url = URL.createObjectURL(blob);
+    const im = new Image();
+    await new Promise((ok, no) => { im.onload = ok; im.onerror = no; im.src = url; });
+    if (el.width !== im.naturalWidth || el.height !== im.naturalHeight) {
+      el.width = im.naturalWidth;
+      el.height = im.naturalHeight;
+    }
+    el.getContext('2d').drawImage(im, 0, 0);
+    URL.revokeObjectURL(url);
+  } catch (_) { /* 坏帧跳过 */ }
+}
+
+function unmountStream(el) {
+  el.dataset.mounted = '0'; // 让待执行的重挂/重试自己放弃
+  const rec = streamOf.get(el);
+  if (!rec) return;
+  streamOf.delete(el);
+  try { rec.ctrl.abort(); } catch (_) {}
+  try { if (rec.reader) rec.reader.cancel(); } catch (_) {}
 }
 
 /* 挂流: 平时立即挂; 回前台的头几秒走错峰 (见 remountAll)。
@@ -1553,7 +1649,7 @@ function attachStream(img) {
    并发上限 —— 用户看到的是「锁屏再开就全黑, 怎么等都不回来」
    (反馈 2026-10-26)。先等 400ms 让系统收掉旧连接, 再每 700ms 挂一台。 */
 function remountAll() {
-  for (const el of document.querySelectorAll('img[data-cam], audio.camaudio')) {
+  for (const el of document.querySelectorAll('canvas.cstream, audio.camaudio')) {
     if (!el.isConnected) continue;
     if (el.tagName === 'AUDIO') unmountAudio(el);
     else unmountStream(el);
@@ -1563,7 +1659,7 @@ function remountAll() {
   setTimeout(() => {
     syncWalls();
     syncCameras();
-    for (const img of document.querySelectorAll('#zoom img[data-src]')) {
+    for (const img of document.querySelectorAll('#zoom canvas[data-src]')) {
       attachStream(img);
     }
   }, 400);
@@ -1571,7 +1667,19 @@ function remountAll() {
   setTimeout(() => { mountStagger = 0; mountQueue = 0; }, 400 + 700 * 6);
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'visible') return;
+  if (document.visibilityState !== 'visible') {
+    /* 切后台/锁屏时主动断流。iOS 会把页面冻住, 连接既不再读也关不掉;
+       服务端 6s 后回收名额, 但那条 TCP 一直是 ESTABLISHED —— 手机经
+       Cloudflare 隧道来时, 边缘那条流也跟着挂死, 连接级流控窗口被吃光,
+       回来以后所有画面一起黑 (反馈 2026-10-26)。这里干净地 abort 掉,
+       隧道那头立刻结束, 前台再按 remountAll 重挂。 */
+    for (const el of document.querySelectorAll('canvas.cstream, audio.camaudio')) {
+      if (!el.isConnected) continue;
+      if (el.tagName === 'AUDIO') unmountAudio(el);
+      else unmountStream(el);
+    }
+    return;
+  }
   remountAll();
   if (!ws || ws.readyState > WebSocket.OPEN) {
     try { ws && ws.close(); } catch (_) {}
@@ -1616,16 +1724,16 @@ function unmountAudio(a) {
 /* 服务端每出一帧就加 1; 12 秒没变化说明这条流卡死了, 重挂连接。
    (Mac 那边的 relay 也会在 10 秒无帧时自己重启 ffmpeg, 页面这一层
    管的是浏览器到 Mac 之间那段断了没人发现的情况。) */
-/* 画面「黑了但连接看着还在」: 挂上去 8 秒还没收到过一帧 (naturalWidth 仍是
-   0), 说明这条 MJPEG 根本没在出数据。iOS 锁屏回来最典型: 服务端帧号照走,
-   <img> 却一条数据都收不到 —— 帧号看门狗完全判不出来, 只能看客户端自己。
+/* 画面「黑了但连接看着还在」: 挂上去 8 秒还没画出过一帧 (data-frames 仍是
+   0), 说明这条流根本没在出数据。iOS 锁屏回来最典型: 服务端帧号照走,
+   浏览器却一条数据都收不到 —— 帧号看门狗完全判不出来, 只能看客户端自己。
    连续失败逐次拉长间隔 (8/16/24… 封顶 60 秒), 出帧后清零。 */
 function checkBlindStreams() {
   if (document.visibilityState !== 'visible') return;
   const now = Date.now();
-  for (const img of document.querySelectorAll('img[data-cam][src]')) {
+  for (const img of document.querySelectorAll('canvas[data-cam][data-mounted="1"]')) {
     if (!img.isConnected) continue;
-    if (img.naturalWidth > 0) { img.dataset.blind = '0'; continue; }
+    if (Number(img.dataset.frames || 0) > 0) { img.dataset.blind = '0'; continue; }
     const tries = Number(img.dataset.blind || 0);
     const wait = Math.min(60000, 8000 * (tries + 1));
     if (now - Number(img.dataset.since || now) < wait) continue;
@@ -1644,8 +1752,8 @@ function checkStalls() {
   if (Date.now() - lastMsgAt > 25000) return;
   const now = Date.now();
   for (const img of document.querySelectorAll(
-      '#camwall img[data-cam], #cameras img[data-cam], #zoom img[data-cam]')) {
-    if (!img.hasAttribute('src')) continue;
+      '#camwall canvas[data-cam], #cameras canvas[data-cam], #zoom canvas[data-cam]')) {
+    if (!streamOf.has(img)) continue;
     const c = byCam(img.dataset.cam);
     if (!c) continue;
     const rec = streamWatch.get(c.id) || { seq: -1, movedAt: now };
@@ -1657,13 +1765,13 @@ function checkStalls() {
     if (c.seq > 0 && now - rec.movedAt > 12000) {
       // 有帧号但 12 秒没动 = 这条流卡死了。
       rec.movedAt = now;
-      img.removeAttribute('src');
+      unmountStream(img);
       mountStream(img);
     } else if (c.seq === 0 &&
         now - Number(img.dataset.since || now) > 20000) {
       // 服务端从来没出过一帧 (打印机离线 / 源还没就绪): 重挂一次, 让服务端
       // 重新解析源。服务端自己也每 5 秒重试, 这里是双保险。
-      img.removeAttribute('src');
+      unmountStream(img);
       mountStream(img);
     }
     streamWatch.set(c.id, rec);
@@ -1713,7 +1821,8 @@ let iosRotate = 0;
 setInterval(() => {
   if (!IS_IOS || document.visibilityState !== 'visible') return;
   const imgs = [...document.querySelectorAll(
-      '#camwall img[data-cam][src], #cameras img[data-cam][src], #zoom img[data-cam][src]')];
+      '#camwall canvas[data-cam], #cameras canvas[data-cam], #zoom canvas[data-cam]')]
+      .filter(el => streamOf.has(el));
   if (!imgs.length) return;
   const img = imgs[iosRotate++ % imgs.length];
   unmountStream(img);
@@ -1723,7 +1832,7 @@ setInterval(() => {
 
 // 只重拉一台摄像头的画面 (换码流后服务端已经放掉旧 relay)。
 function reloadStream(camId) {
-  for (const img of document.querySelectorAll(`img[data-cam="${CSS.escape(camId)}"]`)) {
+  for (const img of document.querySelectorAll(`canvas[data-cam="${CSS.escape(camId)}"]`)) {
     if (img.closest('#zoom')) continue;
     unmountStream(img);
   }
@@ -1756,7 +1865,7 @@ function paintCam() {
     const c = byCam(chip.dataset.cam);
     chip.classList.toggle('on', !!(c && (c.flipH || c.rotation)));
   }
-  for (const img of document.querySelectorAll('img[data-cam]')) {
+  for (const img of document.querySelectorAll('canvas[data-cam]')) {
     const c = byCam(img.dataset.cam);
     if (!c) continue;
     img.style.transform = camTransform(c);
@@ -1918,10 +2027,10 @@ function zoomOn(camId) {
   const c = byCam(camId);
   if (!c || !c.stream) return;
   const z = $('zoom');
-  z.innerHTML = `<img alt="${esc(c.name)}" data-cam="${esc(c.id)}"
+  z.innerHTML = `<canvas class="shot" aria-label="${esc(c.name)}" data-cam="${esc(c.id)}"
       data-src="${esc(c.stream)}" style="transform:${camTransform(c)}">
-    ${camChipsHtml(c)}${camPadHtml(c)}`;
-  const img = z.querySelector('img');
+    </canvas>${camChipsHtml(c)}${camPadHtml(c)}`;
+  const img = z.querySelector('canvas');
   z.classList.add('show');
   mountStream(img);
   // 墙上/列表里那台先摘掉 (见 zoomedCam), 手机上声音也跟着放大这台走。
@@ -1940,7 +2049,7 @@ function closeZoom() {
 }
 $('zoom').addEventListener('click', e => {
   // 只点背景或画面本身才关; 点控制按钮不关。
-  if (e.target === $('zoom') || e.target.tagName === 'IMG') closeZoom();
+  if (e.target === $('zoom') || e.target.tagName === 'CANVAS') closeZoom();
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && $('zoom').classList.contains('show')) closeZoom();
@@ -2068,7 +2177,7 @@ function renderCameras(list) {
 function syncCameras() {
   const on = document.body.dataset.tab === 'cameras';
   const zc = zoomedCam();
-  for (const img of document.querySelectorAll('#cameras img')) {
+  for (const img of document.querySelectorAll('#cameras canvas')) {
     const near = trackNear(img);
     if (on && near && !(zc && img.dataset.cam === zc)) attachStream(img);
     else unmountStream(img);
