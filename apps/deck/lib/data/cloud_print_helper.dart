@@ -248,18 +248,26 @@ class CloudPrintHelper {
             '也没在设置里填服务地址。',
       );
     }
-    // 远程服务里的文件路径指的是「那台 Mac 的磁盘」——手机上传的临时路径它
-    // 看不到。所以远程模式把文件内容一起发过去，服务端落盘后再派单。
+    // 远程服务里的文件路径指的是「那台 Mac 的磁盘」——手机/Windows 上传的
+    // 临时路径它看不到。所以远程模式把文件内容一起发过去，服务端落盘后再派单。
+    // 直接发 /command 形状：旧 /print 兼容层只把 file/stop_before_send 拷进
+    // params，file_b64 会被丢掉（Windows 一键换盘 502「print 缺参数 file」
+    // 2026-10-26）。文件名按两种分隔符都切一遍——Windows 的临时路径是
+    // `C:\...\Temp/bambudeck_plate_swap.3mf` 混合分隔符。
     final remote = HelperEndpoint.fromSettings(settings) != null;
     try {
-      final res = await _request(ep, 'POST', '/print', body: {
-        if (remote) ...{
-          'file_b64': base64Encode(await File(file).readAsBytes()),
-          'filename': file.split(Platform.pathSeparator).last,
-        } else
-          'file': file,
+      final res = await _request(ep, 'POST', '/command', body: {
         if (serial != null) 'serial': serial,
-        'stop_before_send': stopBeforeSend,
+        'command': 'print',
+        'params': {
+          if (remote) ...{
+            'file_b64': base64Encode(await File(file).readAsBytes()),
+            'filename':
+                file.split(Platform.pathSeparator).last.split('/').last,
+          } else
+            'file': file,
+          'stop_before_send': stopBeforeSend,
+        },
       }, timeout: timeout);
       return CloudPrintResult.fromJson(res);
     } on TimeoutException {

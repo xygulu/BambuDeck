@@ -404,13 +404,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"ok": False, "error": str(e)})
             return
 
-        # 兼容旧接口 POST /print {file, serial, stop_before_send}
+        # 兼容旧接口 POST /print {file | file_b64+filename, serial,
+        # stop_before_send}。file_b64/filename 必须跟着进 params —— 远程客户端
+        # （Windows/手机）没有「Mac 本机路径」可发，只发字节流；漏拷的话
+        # dispatch 里看不到 file_b64，报「print 缺参数 file」（2026-10-26 实测，
+        # Windows 一键换盘 502 的根因）。
         if self.path == "/print":
             payload = dict(payload)
             payload.setdefault("serial", payload.get("serial") or "")
             payload.setdefault("command", "print")
             payload.setdefault("params", {
                 "file": payload.get("file"),
+                "file_b64": payload.get("file_b64"),
+                "filename": payload.get("filename"),
                 "stop_before_send": payload.get("stop_before_send"),
                 "filament": payload.get("filament"),
             })
