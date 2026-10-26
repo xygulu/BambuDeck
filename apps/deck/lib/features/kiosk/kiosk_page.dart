@@ -10,6 +10,7 @@ import '../../core/theme.dart';
 import '../../core/format.dart';
 import '../../data/app_settings.dart';
 import '../../data/providers.dart';
+import '../../data/settings_providers.dart';
 import '../../ui/widgets.dart';
 
 /// Kiosk rotation (PRD FR-6 自动轮换): one printer at a time, big text,

@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
 import '../../data/camera_profile.dart';
+import '../../data/camera_providers.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 import '../../data/rtsp_scanner.dart';

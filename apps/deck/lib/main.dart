@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -8,13 +11,16 @@ import 'core/theme.dart';
 import 'data/app_settings.dart';
 import 'data/camera_audio.dart';
 import 'data/camera_profile.dart';
+import 'data/camera_providers.dart';
 import 'data/cloud_print_helper.dart';
+import 'data/hub_config.dart';
 import 'data/hub_server.dart';
 import 'data/log_buffer.dart';
 import 'data/plate_swap.dart';
 import 'data/print_events.dart';
 import 'data/printer_profile.dart';
 import 'data/rtsp_quality.dart';
+import 'data/settings_providers.dart';
 import 'data/vision_guard.dart';
 import 'data/providers.dart';
 import 'features/home/home_page.dart';
@@ -67,6 +73,11 @@ Future<void> main() async {
   // 字段加密 + app_cert_install 装证书,缺了照样静默失败(换盘 2026-10-21)。
   // 私钥路径 ~/.bambudeck/signing_key.pem 已停用,避免过期私钥的法律风险。
   LogBuffer.instance.add('[签名] 未签名直发(需打印机开启开发者模式)');
+
+  // 网页页面与换盘模型: App 从打包资产读; 独立服务(bin/hub.dart)读磁盘文件。
+  hubServer.pageLoader = () => rootBundle.loadString(kHubPageAsset);
+  plateSwapBytesLoader = () async =>
+      (await rootBundle.load(kPlateSwapAsset)).buffer.asUint8List();
 
   // Desktop notifications: init asks macOS for permission on first run.
   try {
@@ -334,13 +345,17 @@ class _DeckAppState extends ConsumerState<DeckApp> {
     if (loaded != null) syncService(loaded);
     ref.listenManual(appSettingsProvider, (_, next) {
       final s = next.valueOrNull;
-      if (s != null) syncService(s);
+      if (s != null) {
+        syncService(s);
+        _exportHub();
+      }
     });
     ref.listenManual(camerasProvider, (_, next) {
       final list = next.valueOrNull;
       if (list != null) {
         visionGuard.cameras = list;
         hubServer.cameras = list;
+        _exportHub();
       }
     }, fireImmediately: true);
     ref.listenManual(printersProvider, (_, next) {
@@ -350,8 +365,24 @@ class _DeckAppState extends ConsumerState<DeckApp> {
         // camera's IP / access code.
         visionGuard.printers = list;
         hubServer.printers = list;
+        _exportHub();
       }
     }, fireImmediately: true);
+  }
+
+  /// 把当前 printers/cameras/settings 导出到 `~/.bambudeck/hub.json`, 供独立
+  /// 网页服务(bin/hub.dart)读取。内容含局域网访问码/摄像头地址等凭据, 故只写
+  /// 家目录(与 helper.json / signing_key.pem 同级信任)。
+  void _exportHub() {
+    final printers = ref.read(printersProvider).valueOrNull ?? const [];
+    final cameras = ref.read(camerasProvider).valueOrNull ?? const [];
+    final settings = ref.read(appSettingsProvider).valueOrNull;
+    if (settings == null) return;
+    unawaited(saveHubConfig(HubConfig(
+      settings: settings,
+      printers: printers,
+      cameras: cameras,
+    )));
   }
 
   /// Start/stop the web hub (网页访问) with its switch; a port change while

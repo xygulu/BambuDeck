@@ -1,7 +1,5 @@
 import 'dart:convert';
 
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-
 import 'printer_profile.dart';
 
 /// Kiosk rotation policy (PRD FR-6 自动轮换).
@@ -213,20 +211,3 @@ class SecureSettingsStore implements SettingsStore {
   Future<void> save(AppSettings s) =>
       storage.write(_key, jsonEncode(s.toJson()));
 }
-
-class AppSettingsNotifier extends AsyncNotifier<AppSettings> {
-  @override
-  Future<AppSettings> build() => ref.watch(settingsStoreProvider).load();
-
-  Future<void> set(AppSettings s) async {
-    state = AsyncData(s);
-    await ref.read(settingsStoreProvider).save(s);
-  }
-}
-
-final settingsStoreProvider = Provider<SettingsStore>(
-    (ref) => throw UnimplementedError('override settingsStoreProvider'));
-
-final appSettingsProvider =
-    AsyncNotifierProvider<AppSettingsNotifier, AppSettings>(
-        AppSettingsNotifier.new);

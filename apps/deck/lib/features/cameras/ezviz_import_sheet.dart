@@ -4,8 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme.dart';
 import '../../data/app_settings.dart';
 import '../../data/camera_profile.dart';
+import '../../data/camera_providers.dart';
 import '../../data/ezviz_cloud.dart';
 import '../../data/ezviz_discovery.dart';
+import '../../data/settings_providers.dart';
 
 /// EZVIZ RTSP URL for one camera on the LAN (verification code as password).
 String ezvizRtspUrl({required String ip, required String code}) =>

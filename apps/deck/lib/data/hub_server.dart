@@ -5,7 +5,6 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:bambu_protocol/bambu_protocol.dart';
-import 'package:flutter/services.dart' show rootBundle;
 
 import 'app_settings.dart';
 import 'bambu_mjpeg.dart';
@@ -560,6 +559,12 @@ class HubServer {
         _log = log ?? LogBuffer.instance.add;
 
   String? pageHtml;
+
+  /// Injected page loader: the Flutter app reads the bundled asset via
+  /// `rootBundle`, the standalone web service reads the .html off disk.
+  /// null = serve the `BambuDeck hub` placeholder.
+  Future<String> Function()? pageLoader;
+
   final Future<HttpServer> Function(InternetAddress, int) _bind;
   final String ffmpegPath;
   final void Function(String message) _log;
@@ -642,7 +647,14 @@ class HubServer {
     if (_server != null) return;
     // `?token=` on the page URL is only a handoff - the page stores the
     // token in localStorage and strips it from the address bar.
-    pageHtml ??= await rootBundle.loadString(kHubPageAsset);
+    final load = pageLoader;
+    if (pageHtml == null && load != null) {
+      try {
+        pageHtml = await load();
+      } catch (e) {
+        _log('[网页] 页面加载失败: $e');
+      }
+    }
     try {
       _server = await _bind(InternetAddress.anyIPv4, settings.hubPort);
     } on SocketException catch (e) {

@@ -7,13 +7,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
 import '../../data/app_settings.dart';
-import '../../data/camera_profile.dart';
+import '../../data/camera_providers.dart';
 import '../../data/cloud_print_helper.dart';
 import '../../data/hcnetsdk.dart' show detectLocalIpv4;
 import '../../data/hub_server.dart';
 import '../../data/log_buffer.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
+import '../../data/settings_providers.dart';
 import '../../data/vision_guard.dart';
 import '../../data/vision_llm.dart';
 
@@ -611,24 +612,28 @@ class LogPage extends StatelessWidget {
           ),
         ],
       ),
-      body: ValueListenableBuilder<List<String>>(
-        valueListenable: log.lines,
-        builder: (context, lines, _) => lines.isEmpty
-            ? const Center(
-                child: Text('暂无日志',
-                    style: TextStyle(color: DeckColors.textSecondary)))
-            : ListView.builder(
-                padding: const EdgeInsets.all(12),
-                itemCount: lines.length,
-                itemBuilder: (context, i) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 1),
-                  child: Text(lines[i],
-                      style: const TextStyle(
-                          fontSize: 11,
-                          fontFamily: 'monospace',
-                          color: DeckColors.textSecondary)),
-                ),
-              ),
+      body: StreamBuilder<List<String>>(
+        stream: log.lines,
+        initialData: log.value,
+        builder: (context, snapshot) {
+          final lines = snapshot.data ?? const <String>[];
+          return lines.isEmpty
+              ? const Center(
+                  child: Text('暂无日志',
+                      style: TextStyle(color: DeckColors.textSecondary)))
+              : ListView.builder(
+                  padding: const EdgeInsets.all(12),
+                  itemCount: lines.length,
+                  itemBuilder: (context, i) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 1),
+                    child: Text(lines[i],
+                        style: const TextStyle(
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            color: DeckColors.textSecondary)),
+                  ),
+                );
+        },
       ),
     );
   }

@@ -2,7 +2,6 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:bambu_protocol/bambu_protocol.dart';
-import 'package:flutter/services.dart' show rootBundle;
 
 import 'cloud_print_helper.dart';
 import 'ftps_client.dart';
@@ -39,8 +38,15 @@ typedef ProjectFileSender = Future<bool> Function({
   ({int amsId, int slot})? ams,
 });
 
-Future<Uint8List> loadBundledPlateSwap() async =>
-    (await rootBundle.load(kPlateSwapAsset)).buffer.asUint8List();
+/// Default [PlateSwapBytesLoader] for [startPlateSwap] / [startCloudPlateSwap].
+///
+/// The Flutter app wires this to read the bundled asset (main.dart); the
+/// standalone web service wires it to read the .3mf off disk. Throws until
+/// wired, so a silent empty swap is impossible.
+PlateSwapBytesLoader plateSwapBytesLoader = _unwiredSwapModel;
+
+Future<Uint8List> _unwiredSwapModel() =>
+    throw StateError('plateSwapBytesLoader 未注入 (换盘模型读取器)');
 
 /// 换盘模型按单耗材 PLA 切片(slice_info.config type="PLA"),所以在打印机
 /// 当前 AMS 里选一个类型匹配的槽位喂料;颜色不挑(用户 2026-10-21)。每次
@@ -71,15 +77,16 @@ Future<Uint8List> loadBundledPlateSwap() async =>
 Future<void> startPlateSwap(
   PrinterProfile profile, {
   required ProjectFileSender sendPrint,
-  PlateSwapBytesLoader loadBytes = loadBundledPlateSwap,
+  PlateSwapBytesLoader? loadBytes,
   ({int amsId, int slot})? ams,
 }) async {
+  final loader = loadBytes ?? plateSwapBytesLoader;
   final log = LogBuffer.instance.add;
   if (profile.mode != PrinterMode.lan || profile.ip.isEmpty) {
     throw Exception('自动换盘仅支持局域网直连打印机');
   }
   log('[换盘] 读取内置换盘模型…');
-  final bytes = await loadBytes();
+  final bytes = await loader();
   // 固件校验的是 3mf 内嵌 gcode 的 md5,不是整个容器(整个 3mf 的 md5 会
   // 静默 no-op,换盘无响应 2026-10-21)。换盘模型是打包资产,gcode 恒定。
   final md5Hex = kPlateSwapGcodeMd5;
@@ -124,11 +131,11 @@ Future<void> startPlateSwap(
 /// 模式、无需局域网。返回 helper 的派单结果, 由调用方决定怎么提示用户。
 Future<CloudPrintResult> startCloudPlateSwap(
   PrinterProfile profile, {
-  PlateSwapBytesLoader loadBytes = loadBundledPlateSwap,
+  PlateSwapBytesLoader? loadBytes,
 }) async {
   final log = LogBuffer.instance.add;
   log('[换盘] 读取内置换盘模型…');
-  final bytes = await loadBytes();
+  final bytes = await (loadBytes ?? plateSwapBytesLoader)();
   final file = await _writeSwapModelToTemp(bytes);
   log('[换盘] 通过 Bambu Connect 云端派单到 ${profile.name} '
       '(serial=${profile.serial})…');
