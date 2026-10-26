@@ -15,6 +15,7 @@ import '../../data/providers.dart';
 import '../../data/rtsp_scanner.dart';
 import '../../ui/camera_tile.dart';
 import '../monitor/overview_wall.dart';
+import 'ezviz_import_sheet.dart';
 
 /// Cameras tab body (PRD FR-3): a stepless-zoomable wall of live tiles
 /// (2026-10-26 需求, 交互对齐 iPhone 照片墙) - 默认单画面, 鼠标滚轮 /
@@ -83,6 +84,11 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                 icon: const Icon(Icons.add),
                 label: const Text('添加摄像头'),
               ),
+              TextButton.icon(
+                onPressed: () => showEzvizImportSheet(context, ref),
+                icon: const Icon(Icons.cloud_download_outlined, size: 18),
+                label: const Text('萤石云端导入'),
+              ),
             ]),
           );
         }
@@ -107,8 +113,8 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
     _zoom = _zoom.clamp(1.0, zMax);
     final k = math.min(n, math.max(1, (n / (_zoom * _zoom)).round()));
     final shown = list.take(k).toList();
-    final canZoomIn = _zoom > 1.0001; // 放大 = 画面更少
-    final canZoomOut = _zoom < zMax - 0.0001; // 缩小 = 画面更多
+    final canZoomIn = _zoom < zMax - 0.0001; // 放大 = 画面更少 (_zoom 还能加)
+    final canZoomOut = _zoom > 1.0001; // 缩小 = 画面更多 (_zoom 还能减)
 
     return LayoutBuilder(builder: (context, box) {
       final w = box.maxWidth > 0 ? box.maxWidth : 1.0;
@@ -169,6 +175,30 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                     ),
                 ]),
               ),
+            ),
+          ),
+          // 右上角动作: 萤石云端导入 / 添加摄像头 (原列表页入口搬进墙内)。
+          Positioned(
+            top: 10,
+            right: 12,
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.65),
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(
+                  icon: const Icon(Icons.cloud_download_outlined,
+                      size: 20, color: Colors.white),
+                  tooltip: '萤石云端导入',
+                  onPressed: () => showEzvizImportSheet(context, ref),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.add, size: 22, color: Colors.white),
+                  tooltip: '添加摄像头',
+                  onPressed: widget.onAdd,
+                ),
+              ]),
             ),
           ),
           // 缩放控制: 底部居中大按钮 (用户要求显眼可点), 计数显示当前/全部。

@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
 import '../cameras/cameras_page.dart';
-import '../monitor/camera_monitor_page.dart';
 import '../monitor/monitor_page.dart';
 import '../settings/settings_page.dart';
 import 'add_printer_sheet.dart';
@@ -61,8 +60,9 @@ class HomePage extends ConsumerWidget {
         index: perspective.index,
         children: [
           MonitorPage(onAddPrinter: () => _openAddSheet(context)),
-          CameraMonitorPage(
-              onAddCamera: () => showAddCameraDialog(context, ref)),
+          // 摄像头视角 = 无级缩放画面墙 (2026-10-26: iPhone 照片墙式交互,
+          // 缩放胶囊/滚轮/捏合; 取代旧的左列表+单画面布局)。
+          CamerasPage(onAdd: () => showAddCameraDialog(context, ref)),
         ],
       ),
     );
