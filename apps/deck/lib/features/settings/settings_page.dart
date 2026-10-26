@@ -20,13 +20,56 @@ import '../../data/vision_llm.dart';
 
 /// Settings center (PRD FR-10, MVP slice): notification switches, run log,
 /// config backup via clipboard, about. Theme/accent/i18n land with M5.
-class SettingsPage extends ConsumerWidget {
+class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends ConsumerState<SettingsPage> {
+  // 文本输入的 controller 必须跨 build 存活：旧实现每次 build 都新建
+  // TextEditingController，而 onChanged 又即时保存 → 每敲一个字就触发 provider
+  // 更新 → 整页重建 → controller 被替换，光标跳回末尾、输入法合成被打断，
+  // 表现为「输一个字就刷新、字符乱序」。这里提升到 State，只在首次初始化。
+  late final _visionBase = TextEditingController();
+  late final _visionKey = TextEditingController();
+  late final _visionModel = TextEditingController();
+  late final _helperUrl = TextEditingController();
+  late final _helperToken = TextEditingController();
+  late final _hubPort = TextEditingController();
+  late final _hubToken = TextEditingController();
+  bool _ctrlsInit = false;
+
+  void _initCtrls(AppSettings s) {
+    if (_ctrlsInit) return;
+    _visionBase.text = s.visionBaseUrl;
+    _visionKey.text = s.visionApiKey;
+    _visionModel.text = s.visionModel;
+    _helperUrl.text = s.helperUrl;
+    _helperToken.text = s.helperToken;
+    _hubPort.text = '${s.hubPort}';
+    _hubToken.text = s.hubToken;
+    _ctrlsInit = true;
+  }
+
+  @override
+  void dispose() {
+    _visionBase.dispose();
+    _visionKey.dispose();
+    _visionModel.dispose();
+    _helperUrl.dispose();
+    _helperToken.dispose();
+    _hubPort.dispose();
+    _hubToken.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final settings = ref.watch(appSettingsProvider).valueOrNull ??
         const AppSettings();
+    _initCtrls(settings);
     final notifier = ref.read(appSettingsProvider.notifier);
     final printers = ref.watch(printersProvider).valueOrNull ?? const [];
 
@@ -124,9 +167,6 @@ class SettingsPage extends ConsumerWidget {
   /// shows the verdict inline.
   Widget _visionSection(BuildContext context, WidgetRef ref,
       AppSettings settings, AppSettingsNotifier notifier) {
-    final baseCtrl = TextEditingController(text: settings.visionBaseUrl);
-    final keyCtrl = TextEditingController(text: settings.visionApiKey);
-    final modelCtrl = TextEditingController(text: settings.visionModel);
     var testing = false;
     String? testResult;
     return StatefulBuilder(builder: (context, setState) {
@@ -152,7 +192,7 @@ class SettingsPage extends ConsumerWidget {
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Column(children: [
             TextField(
-              controller: baseCtrl,
+              controller: _visionBase,
               decoration: const InputDecoration(
                   labelText: 'API 地址(含 /v1 段)',
                   hintText: 'https://open.bigmodel.cn/api/paas/v4',
@@ -165,7 +205,7 @@ class SettingsPage extends ConsumerWidget {
             Row(children: [
               Expanded(
                 child: TextField(
-                  controller: keyCtrl,
+                  controller: _visionKey,
                   obscureText: true,
                   decoration:
                       const InputDecoration(labelText: 'API Key'),
@@ -176,7 +216,7 @@ class SettingsPage extends ConsumerWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: TextField(
-                  controller: modelCtrl,
+                  controller: _visionModel,
                   decoration: const InputDecoration(
                       labelText: '模型', hintText: 'glm-4v-flash'),
                   onChanged: (v) =>
@@ -264,8 +304,6 @@ class SettingsPage extends ConsumerWidget {
   /// Mac 上的自动化，留空则读本机 `~/.bambudeck/helper.json`。
   Widget _serviceSection(BuildContext context, WidgetRef ref,
       AppSettings settings, AppSettingsNotifier notifier) {
-    final urlCtrl = TextEditingController(text: settings.helperUrl);
-    final tokCtrl = TextEditingController(text: settings.helperToken);
     var testing = false;
     String? result;
     return StatefulBuilder(builder: (context, setState) {
@@ -277,7 +315,7 @@ class SettingsPage extends ConsumerWidget {
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Column(children: [
             TextField(
-              controller: urlCtrl,
+              controller: _helperUrl,
               decoration: const InputDecoration(
                   labelText: '服务地址',
                   hintText: 'http://192.168.1.10:8799(留空=本机)'),
@@ -285,7 +323,7 @@ class SettingsPage extends ConsumerWidget {
             ),
             const SizedBox(height: 8),
             TextField(
-              controller: tokCtrl,
+              controller: _helperToken,
               decoration: const InputDecoration(labelText: '服务令牌'),
               onChanged: (v) => save(settings.copyWith(helperToken: v.trim())),
             ),
@@ -299,7 +337,7 @@ class SettingsPage extends ConsumerWidget {
                     : () async {
                         setState(() { testing = true; result = null; });
                         final r = await CloudPrintHelper.instance
-                            .probe(urlCtrl.text, tokCtrl.text);
+                            .probe(_helperUrl.text, _helperToken.text);
                         if (!context.mounted) return;
                         setState(() {
                           testing = false;
@@ -320,8 +358,8 @@ class SettingsPage extends ConsumerWidget {
                     setState(() => result = '❌ 没找到 ~/.bambudeck/helper.json');
                     return;
                   }
-                  urlCtrl.text = ep.url;
-                  tokCtrl.text = ep.token;
+                  _helperUrl.text = ep.url;
+                  _helperToken.text = ep.token;
                   save(settings.copyWith(
                       helperUrl: ep.url, helperToken: ep.token));
                   setState(() => result = '✅ 已填入本机服务地址');
@@ -366,8 +404,6 @@ class SettingsPage extends ConsumerWidget {
   Widget _hubSection(BuildContext context, WidgetRef ref,
       AppSettings settings, AppSettingsNotifier notifier) {
     Future<void> save(AppSettings s) => notifier.set(s);
-    final portCtrl = TextEditingController(text: '${settings.hubPort}');
-    final tokenCtrl = TextEditingController(text: settings.hubToken);
 
     void syncToken(String raw) {
       final t = raw.trim();
@@ -403,7 +439,7 @@ class SettingsPage extends ConsumerWidget {
               SizedBox(
                 width: 120,
                 child: TextField(
-                  controller: portCtrl,
+                  controller: _hubPort,
                   keyboardType: TextInputType.number,
                   inputFormatters: [
                     FilteringTextInputFormatter.digitsOnly,
@@ -427,7 +463,7 @@ class SettingsPage extends ConsumerWidget {
             ]),
             const SizedBox(height: 8),
             TextField(
-              controller: tokenCtrl,
+              controller: _hubToken,
               inputFormatters: [
                 FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9._~-]')),
                 LengthLimitingTextInputFormatter(64),
@@ -442,14 +478,14 @@ class SettingsPage extends ConsumerWidget {
                     icon: const Icon(Icons.casino_outlined, size: 20),
                     onPressed: () {
                       final t = generateHubToken();
-                      tokenCtrl.text = t;
+                      _hubToken.text = t;
                       save(settings.copyWith(hubToken: t));
                     },
                   ),
                   IconButton(
                     tooltip: '保存令牌',
                     icon: const Icon(Icons.check, size: 20),
-                    onPressed: () => syncToken(tokenCtrl.text),
+                    onPressed: () => syncToken(_hubToken.text),
                   ),
                 ]),
               ),
