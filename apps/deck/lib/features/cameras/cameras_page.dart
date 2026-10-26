@@ -4,6 +4,8 @@ import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:flutter/gestures.dart';
+
 import '../../core/theme.dart';
 import '../../data/camera_profile.dart';
 import '../../data/camera_providers.dart';
@@ -13,10 +15,9 @@ import '../../data/rtsp_scanner.dart';
 import '../../ui/camera_tile.dart';
 import '../monitor/overview_wall.dart';
 
-/// Cameras tab body (PRD FR-3): a wall of live tiles that auto-fits the
-/// screen, tap a feed (或左下「放大」胶囊) to zoom it to fill the page,
-/// pinch / scroll to zoom and pan the enlarged picture, 缩到阈值以下松手
-/// (或缩小按钮) 回到自动排布的墙。
+/// Cameras tab body (PRD FR-3): a zoomable wall of live tiles (2026-10-26
+/// 需求) - 默认单画面, 鼠标滚轮/捏合缩小逐档显示更多画面 (一排两个 →
+/// 2x2 → 3x3 … 封顶全部), 放大反之; 网格按画面数自动取最佳 16:9 排布。
 class CamerasPage extends ConsumerStatefulWidget {
   const CamerasPage({super.key, required this.onAdd});
 
@@ -29,19 +30,30 @@ class CamerasPage extends ConsumerStatefulWidget {
 }
 
 class _CamerasPageState extends ConsumerState<CamerasPage> {
-  /// Id of the feed zoomed to fill the page; null shows the wall.
-  String? _zoomedId;
-  final _zoomTransform = TransformationController();
+  /// 缩放档位下标, 默认 0 = 单画面; 档位对应的画面数 1→2→4→9→16…。
+  int _level = 0;
 
-  @override
-  void dispose() {
-    _zoomTransform.dispose();
-    super.dispose();
+  /// 捏合进行中的实时缩放 (仅视觉反馈, 松手归位)。
+  double _pinch = 1.0;
+
+  /// 档位 → 画面数: [1, 2, 4, 9, 16 …], 封顶实际摄像头数。
+  List<int> _levelsFor(int n) {
+    const base = [1, 2, 4, 9, 16, 25, 36, 49, 64, 81, 100];
+    int cap(int c) => c >= n ? n : c;
+    final levels = <int>[for (final c in base) if (c == 1 || cap(c) < n) cap(c)];
+    if (levels.last != n) levels.add(n);
+    return levels;
   }
 
-  void _exitZoom() {
-    _zoomTransform.value = Matrix4.identity();
-    setState(() => _zoomedId = null);
+  void _stepZoom(int delta) {
+    final n =
+        (ref.read(camerasProvider).valueOrNull ?? const <CameraProfile>[])
+            .length;
+    if (n == 0) return;
+    setState(() {
+      _level = (_level + delta).clamp(0, _levelsFor(n).length - 1);
+      _pinch = 1.0;
+    });
   }
 
   @override
@@ -79,199 +91,146 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
           );
         }
 
-        // A deleted/unbound zoom target falls back to the wall.
-        CameraProfile? zoomed;
-        if (_zoomedId != null) {
-          for (final c in list) {
-            if (c.id == _zoomedId) zoomed = c;
-          }
-          if (zoomed == null) _zoomedId = null;
-        }
-        return zoomed == null
-            ? _wall(list, printers)
-            : _zoomedView(zoomed, printers);
+        // A stale level (摄像头被删) clamps itself in _wall.
+        return _wall(list, printers);
       },
     );
   }
 
-  /// Grid whose column count lands each cell closest to 16:9, so every
-  /// feed fills the whole tab on one screen however many cameras there
-  /// are (优化需求 3 自动排布). Nothing scrolls - the layout scales to fit.
+  /// 可缩放的墙: 默认单画面; 滚轮下滚/捏合缩小 → 逐档显示更多画面
+  /// (一排两个 → 2x2 → 3x3…封顶全部), 上滚/捏合放大反之; 双击就近切换
+  /// 一档; 右上角 ± 按钮兜底并显示当前画面数。
   Widget _wall(List<CameraProfile> list, List<PrinterProfile> printers) {
+    final levels = _levelsFor(list.length);
+    if (_level > levels.length - 1) _level = levels.length - 1;
+    final shown = list.take(levels[_level]).toList();
+    final canZoomIn = _level > 0;
+    final canZoomOut = _level < levels.length - 1;
+
     return LayoutBuilder(builder: (context, box) {
-      final n = list.length;
+      final n = shown.length;
       final w = box.maxWidth > 0 ? box.maxWidth : 1.0;
       final h = box.maxHeight > 0 ? box.maxHeight : 1.0;
       final bestCols = bestFitColumns(n, w, h);
       final rows = (n / bestCols).ceil();
       return Padding(
         padding: const EdgeInsets.all(12),
-        child: Column(children: [
-          for (var r = 0; r < rows; r++)
-            Expanded(
-              child: Row(children: [
-                for (var i = r * bestCols; i < (r + 1) * bestCols && i < n; i++)
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.all(5),
-                      child: _wallCell(list[i], printers),
+        child: Stack(children: [
+          Listener(
+            onPointerSignal: (e) {
+              if (e is PointerScrollEvent && e.scrollDelta.dy != 0) {
+                // 下滚 = 缩小 = 画面变多; 上滚 = 放大。
+                _stepZoom(e.scrollDelta.dy > 0 ? 1 : -1);
+              }
+            },
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onScaleUpdate: (d) {
+                if (d.scale != 1.0) setState(() => _pinch = d.scale);
+              },
+              onScaleEnd: (_) {
+                final s = _pinch;
+                if (s < 0.85) {
+                  _stepZoom(1); // 捏合缩小 → 画面变多
+                } else if (s > 1.15) {
+                  _stepZoom(-1); // 捏合放大 → 画面变少
+                } else {
+                  setState(() => _pinch = 1.0);
+                }
+              },
+              onDoubleTap: () => _stepZoom(canZoomIn ? -1 : (canZoomOut ? 1 : 0)),
+              child: Transform.scale(
+                scale: _pinch,
+                child: Column(children: [
+                  for (var r = 0; r < rows; r++)
+                    Expanded(
+                      child: Row(children: [
+                        for (var i = r * bestCols;
+                            i < (r + 1) * bestCols && i < n;
+                            i++)
+                          Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.all(5),
+                              child: _wallCell(shown[i], printers),
+                            ),
+                          ),
+                        // 补位空格, 末行不满时格子宽度与上方一致。
+                        for (var i = n; i < (r + 1) * bestCols; i++)
+                          const Expanded(child: SizedBox()),
+                      ]),
                     ),
-                  ),
-                // Invisible spacers keep a partial last row's cells the
-                // same width as the rows above.
-                for (var i = n; i < (r + 1) * bestCols; i++)
-                  const Expanded(child: SizedBox()),
-              ]),
-            ),
-        ]),
-      );
-    });
-  }
-
-  /// One wall cell: the feed fills the cell, tap / double-tap / 左下
-  /// 「放大」胶囊 to zoom; 绑定打印机时左上角挂状态角标 (缩小态的
-  /// 「其他打印机信息」)。
-  Widget _wallCell(CameraProfile camera, List<PrinterProfile> printers) {
-    final linked = _linkedPrinter(camera, printers);
-    final url = camera.resolveUrl(linked);
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(14),
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _zoomedId = camera.id),
-        onDoubleTap: () => setState(() => _zoomedId = camera.id),
-        child: Stack(fit: StackFit.expand, children: [
-          if (url != null && camera.enabled)
-            CameraTile(
-              streamUrl: url,
-              label: camera.name,
-              expand: true,
-              onToggleQuality: qualityToggler(ref, camera),
-              cameraId: camera.id,
-              frameSlot: 'cameras-grid',
-              flipH: camera.flipH,
-              rotationDeg: camera.rotationDeg,
-              ptzInvertPan: camera.ptzInvertPan,
-              ptzInvertTilt: camera.ptzInvertTilt,
-            )
-          else
-            Container(
-              color: Colors.black,
-              alignment: Alignment.center,
-              child: Text(
-                !camera.enabled ? '已停用' : '未配置视频源',
-                style: const TextStyle(
-                    fontSize: 13, color: DeckColors.textSecondary),
+                ]),
               ),
             ),
-          if (linked != null)
-            Positioned(left: 8, top: 8, child: FeedStatusChip(printer: linked)),
+          ),
           Positioned(
-            left: 8,
-            bottom: 8,
+            top: 0,
+            right: 0,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: 0.55),
                 borderRadius: BorderRadius.circular(999),
               ),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.open_in_full,
-                    size: 12, color: Colors.white.withValues(alpha: 0.9)),
-                const SizedBox(width: 4),
-                const Text('放大',
-                    style: TextStyle(fontSize: 11, color: Colors.white)),
+                Text('${shown.length}/${list.length}',
+                    style: const TextStyle(fontSize: 11, color: Colors.white)),
+                const SizedBox(width: 2),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.zoom_in, size: 18, color: Colors.white),
+                  tooltip: '放大 (画面更少更大)',
+                  onPressed: canZoomIn ? () => _stepZoom(-1) : null,
+                ),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  icon:
+                      const Icon(Icons.zoom_out, size: 18, color: Colors.white),
+                  tooltip: '缩小 (画面更多)',
+                  onPressed: canZoomOut ? () => _stepZoom(1) : null,
+                ),
               ]),
             ),
           ),
         ]),
-      ),
-    );
+      );
+    });
   }
 
-  /// A single feed filling the page (点击放大). InteractiveViewer adds the
-  /// 缩放滚动 the user asked for: pinch / scroll-wheel to zoom, drag to pan.
-  Widget _zoomedView(CameraProfile camera, List<PrinterProfile> printers) {
+  /// One wall cell: the feed fills the cell; 绑定打印机时左上角挂状态角标。
+  Widget _wallCell(CameraProfile camera, List<PrinterProfile> printers) {
     final linked = _linkedPrinter(camera, printers);
     final url = camera.resolveUrl(linked);
-    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-        child: Row(children: [
-          Expanded(
-            child: Text(camera.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style:
-                    const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: Stack(fit: StackFit.expand, children: [
+        if (url != null && camera.enabled)
+          CameraTile(
+            streamUrl: url,
+            label: camera.name,
+            expand: true,
+            onToggleQuality: qualityToggler(ref, camera),
+            cameraId: camera.id,
+            frameSlot: 'cameras-grid',
+            flipH: camera.flipH,
+            rotationDeg: camera.rotationDeg,
+            ptzInvertPan: camera.ptzInvertPan,
+            ptzInvertTilt: camera.ptzInvertTilt,
+          )
+        else
+          Container(
+            color: Colors.black,
+            alignment: Alignment.center,
+            child: Text(
+              !camera.enabled ? '已停用' : '未配置视频源',
+              style:
+                  const TextStyle(fontSize: 13, color: DeckColors.textSecondary),
+            ),
           ),
-          IconButton(
-            icon: const Icon(Icons.edit_outlined, size: 19),
-            tooltip: '编辑摄像头',
-            onPressed: () => showAddCameraDialog(context, ref, editing: camera),
-          ),
-          IconButton.filledTonal(
-            icon: const Icon(Icons.close_fullscreen, size: 18),
-            tooltip: '缩小',
-            onPressed: _exitZoom,
-          ),
-        ]),
-      ),
-      Expanded(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(14),
-            child: Stack(fit: StackFit.expand, children: [
-              InteractiveViewer(
-                transformationController: _zoomTransform,
-                // minScale < 1: 捏合/滚轮缩到 0.85 以下松手 = 退出放大,
-                // 自动回到排布好的墙 (2026-10-26 缩小需求)。
-                minScale: 0.5,
-                maxScale: 6.0,
-                onInteractionEnd: (_) {
-                  if (_zoomTransform.value.getMaxScaleOnAxis() < 0.85) {
-                    _exitZoom();
-                  }
-                },
-                child: Container(
-                  color: Colors.black,
-                  child: url != null && camera.enabled
-                      ? CameraTile(
-                          streamUrl: url,
-                          label: camera.name,
-                          expand: true,
-                          onToggleQuality: qualityToggler(ref, camera),
-                          cameraId: camera.id,
-                          frameSlot: 'cameras-zoom',
-                          flipH: camera.flipH,
-                          rotationDeg: camera.rotationDeg,
-                          ptzInvertPan: camera.ptzInvertPan,
-                          ptzInvertTilt: camera.ptzInvertTilt,
-                        )
-                      : Center(
-                          child: Text(
-                            !camera.enabled ? '已停用' : '未配置视频源',
-                            style: const TextStyle(
-                                fontSize: 14, color: DeckColors.textSecondary),
-                          ),
-                        ),
-                ),
-              ),
-              Positioned(
-                left: 10,
-                bottom: 10,
-                child: IconButton.filledTonal(
-                  icon: const Icon(Icons.close_fullscreen, size: 18),
-                  tooltip: '缩小',
-                  onPressed: _exitZoom,
-                ),
-              ),
-            ]),
-          ),
-        ),
-      ),
-    ]);
+        if (linked != null)
+          Positioned(left: 8, top: 8, child: FeedStatusChip(printer: linked)),
+      ]),
+    );
   }
 
   PrinterProfile? _linkedPrinter(
