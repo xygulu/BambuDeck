@@ -133,6 +133,11 @@ class CameraRelay {
   var _loggedFirstFrame = false;
 
   void _publish(Uint8List frame) {
+    // dispose() 之后 ffmpeg 的 stdout 还可能再推几块 (kill 是异步的), 往已
+    // 关闭的 controller 里 add 会抛「Cannot add new events after calling
+    // close」—— 那不是崩溃, 但会以未处理异常的身份冒到日志里 (测试里会
+    // 直接判失败)。
+    if (_disposed) return;
     seq++;
     _lastFrameAt = DateTime.now();
     latest = frame;

@@ -40,6 +40,7 @@ class _FakePtz implements PtzClient {
 
 void main() {
   _ffmpegArgsTests();
+  _wsCamTests();
   group('JpegSplitter', () {
     Uint8List jpeg(int seed) => Uint8List.fromList(
         [0xFF, 0xD8, seed, 0x11, 0x22, 0x33, 0xFF, 0xD9]);
@@ -655,6 +656,135 @@ void main() {
       expect(body['ok'], isFalse);
       expect(body['available'], isFalse);
       expect(fake.moves, isEmpty);
+    });
+  });
+}
+
+// `/ws-cam` 是网页端画面的唯一通道: iOS 的 fetch 读不出 MJPEG 长连接
+// body(WebKit 实测 Load failed), 所以帧改走一条 WebSocket。这里用一个
+// 假 ffmpeg(往 stdout 循环写一张 JPEG)当视频源, 走完整的真实路径:
+// CameraRelay → _FrameSub → 浏览器协议。
+void _wsCamTests() {
+  group('HubServer /ws-cam', () {
+    late HubServer hub;
+    late HttpServer bound;
+    late Directory tmp;
+    late String port;
+
+    setUp(() async {
+      tmp = Directory.systemTemp.createTempSync('ws-cam-test');
+      final fake = File('${tmp.path}/ffmpeg');
+      fake.writeAsStringSync('#!/bin/sh\n'
+          'while :; do\n'
+          "  printf '\\377\\330\\101\\377\\331'\n"
+          '  sleep 0.1\n'
+          'done\n');
+      Process.runSync('chmod', ['+x', fake.path]);
+
+      hub = HubServer(
+        pageHtml: '<html>deck-hub-page</html>',
+        ffmpegPath: fake.path,
+        bind: (_, __) async {
+          final srv = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          bound = srv;
+          return srv;
+        },
+        log: (_) {},
+      );
+      hub.settings = const AppSettings(hubPort: 0, hubToken: 'sekrit');
+      hub.cameras = [
+        CameraProfile(
+          id: 'c1',
+          name: '工位相机',
+          sourceType: CameraSourceType.rtsp,
+          url: 'rtsp://10.0.0.5:554/stream',
+          printerIds: ['p1'],
+        ),
+      ];
+      await hub.start();
+      port = '${bound.port}';
+    });
+
+    tearDown(() async {
+      await hub.stop();
+      try {
+        tmp.deleteSync(recursive: true);
+      } catch (_) {}
+    });
+
+    test('needs the same token as every other route', () async {
+      await expectLater(
+        WebSocket.connect('ws://127.0.0.1:$port/ws-cam'),
+        throwsA(anything),
+      );
+    });
+
+    test('subscribes, waits for ack between frames, and unsubscribes',
+        () async {
+      final ws = await WebSocket.connect(
+          'ws://127.0.0.1:$port/ws-cam?token=sekrit');
+      final msgs = <dynamic>[];
+      ws.listen(msgs.add);
+      ws.add(jsonEncode({
+        'sub': ['c1']
+      }));
+
+      // 第一帧: [1 字节 id 长度]['c1'][JPEG]
+      final deadline = DateTime.now().add(const Duration(seconds: 5));
+      while (msgs.isEmpty && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(msgs, isNotEmpty, reason: '订阅后必须出帧');
+      final f1 = msgs.first as List<int>;
+      expect(f1[0], 2);
+      expect(latin1.decode(f1.sublist(1, 3)), 'c1');
+      expect(f1.sublist(3, 5), [0xFF, 0xD8]); // SOI
+
+      // 没回 ack 之前不再推第二帧 (手机跟不上时服务端不囤积过期帧)。
+      msgs.clear();
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      expect(msgs, isEmpty, reason: 'ack 之前只能有一帧在飞');
+
+      ws.add(jsonEncode({'ack': 'c1'}));
+      final t2 = DateTime.now().add(const Duration(seconds: 3));
+      while (msgs.isEmpty && DateTime.now().isBefore(t2)) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(msgs, isNotEmpty, reason: 'ack 之后要放行下一帧');
+
+      // 空的全量订阅 = 退订, 之后不再出帧。
+      ws.add(jsonEncode({'sub': []}));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      msgs.clear();
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      expect(msgs, isEmpty, reason: '退订之后不能再推帧');
+      await ws.close();
+    });
+
+    test('kick re-sends the cached frame immediately', () async {
+      final ws = await WebSocket.connect(
+          'ws://127.0.0.1:$port/ws-cam?token=sekrit');
+      final msgs = <dynamic>[];
+      ws.listen(msgs.add);
+      ws.add(jsonEncode({
+        'sub': ['c1']
+      }));
+      final t1 = DateTime.now().add(const Duration(seconds: 5));
+      while (msgs.isEmpty && DateTime.now().isBefore(t1)) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(msgs, isNotEmpty);
+      ws.add(jsonEncode({'ack': 'c1'}));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      msgs.clear();
+      ws.add(jsonEncode({'kick': 'c1'}));
+      final t2 = DateTime.now().add(const Duration(seconds: 2));
+      while (msgs.isEmpty && DateTime.now().isBefore(t2)) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(msgs, isNotEmpty, reason: 'kick 要立刻补一帧缓存画面, 页面不用等下一帧');
+      await ws.close();
     });
   });
 }
