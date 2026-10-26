@@ -171,33 +171,39 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
               ),
             ),
           ),
+          // 缩放控制: 底部居中大按钮 (用户要求显眼可点), 计数显示当前/全部。
           Positioned(
-            top: 0,
+            bottom: 10,
+            left: 0,
             right: 0,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.55),
-                borderRadius: BorderRadius.circular(999),
+            child: Center(
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.65),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    icon: const Icon(Icons.zoom_in,
+                        size: 26, color: Colors.white),
+                    tooltip: '放大 (画面更少更大)',
+                    onPressed: canZoomIn ? () => _applyZoom(1.4) : null,
+                  ),
+                  Text('$k / $n',
+                      style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white)),
+                  IconButton(
+                    icon: const Icon(Icons.zoom_out,
+                        size: 26, color: Colors.white),
+                    tooltip: '缩小 (画面更多)',
+                    onPressed: canZoomOut ? () => _applyZoom(1 / 1.4) : null,
+                  ),
+                ]),
               ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Text('$k/$n',
-                    style: const TextStyle(fontSize: 11, color: Colors.white)),
-                const SizedBox(width: 2),
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  icon: const Icon(Icons.zoom_in, size: 18, color: Colors.white),
-                  tooltip: '放大 (画面更少更大)',
-                  onPressed: canZoomIn ? () => _applyZoom(1.4) : null,
-                ),
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  icon:
-                      const Icon(Icons.zoom_out, size: 18, color: Colors.white),
-                  tooltip: '缩小 (画面更多)',
-                  onPressed: canZoomOut ? () => _applyZoom(1 / 1.4) : null,
-                ),
-              ]),
             ),
           ),
         ]),
