@@ -1226,6 +1226,11 @@ class HubServer {
   /// 所以让新连接赢: 先断最老的, 再挂新的。
   final _streamClients = <String, List<void Function()>>{};
 
+  /// 全站当前挂着的画面流条数。手机黑屏时看这一行: 页面只挂 1~2 张,
+  /// 这里却在涨, 说明浏览器那边 `src` 摘了但连接没关 (2026-10-26)。
+  int get _attachedCount =>
+      _streamClients.values.fold(0, (sum, l) => sum + l.length);
+
   void _logEvicted(String camera, int kept) {
     final now = DateTime.now();
     final last = _saturatedLoggedAt['$camera/evict'];
@@ -1237,6 +1242,21 @@ class HubServer {
         ' (剩 $kept 条) —— 反复出现说明页面在重复挂同一条流');
   }
 
+  /// 能强关的流式响应 (画面 / 声音共用)。
+  ///
+  /// 为什么不用 `HttpResponse`: 客户端不读的时候 `flush()` 会一直挂着, 这时
+  /// `close()` 抛 "StreamSink is bound to a stream", 而 `detachSocket()` 又
+  /// 因为「头已发出」直接拒绝 —— 两条路都不通, 那条 TCP 就永远 ESTABLISHED。
+  /// 手机经 Cloudflare 隧道来时后果最重: 边缘那条 HTTP/2 流永远结束不了,
+  /// 连接级流控窗口被它吃光, 别的画面跟着一起黑, 只有重启 App 才恢复
+  /// (2026-10-26 实测: cloudflared 侧积压 ~1MB 后不再读 origin)。
+  ///
+  /// 所以在写任何字节之前就把 socket 摘下来, HTTP 头自己写 (靠
+  /// `Connection: close` 定 body 长度), 卡住就 `destroy()` —— RST 立刻生效,
+  /// 隧道那头看到的是干净的 EOF 而不是半截 chunk。
+  ///
+  /// 探针: /tmp/deck_probe/raw_stream.dart (ffmpeg 能解码; 不读的客户端在
+  /// destroy 后连接立即消失)。
   Future<void> _serveMjpeg(HttpRequest req, String cameraId) async {
     CameraProfile? cam;
     for (final c in cameras) {
@@ -1275,25 +1295,26 @@ class HubServer {
     } else {
       frames = managed!.attach();
     }
-    req.response.headers.set(
-        'Content-Type', 'multipart/x-mixed-replace; boundary=bambudeck');
-    req.response.headers.set('Cache-Control', 'no-cache');
-    req.response.bufferOutput = false;
-    // dart:io only writes the status line + headers with the first body
-    // chunk, so nudge them out with a (legal multipart) preamble CRLF -
-    // clients wait for headers before rendering anything.
-    req.response.write('\r\n');
-    await req.response.flush();
+    // 头 + body 都走自己摘下来的 socket (见 [_RawStream]): 这样卡死时能真关。
+    final raw = await _RawStream.open(
+        req, 'multipart/x-mixed-replace; boundary=bambudeck');
+    if (raw == null) {
+      _log('[网页] ${camera.name}: 摘不到 socket, 这条画面放弃');
+      managed?.detach();
+      try {
+        req.response.statusCode = HttpStatus.internalServerError;
+        await req.response.close();
+      } catch (_) {}
+      return;
+    }
 
     var open = true;
     var busy = false;
     StreamSubscription<Uint8List>? sub;
     Timer? stalled;
 
-    // 断开并归还名额 (只做一次)。注意 dart:io 在 flush 还挂着的时候
-    // 不允许 close() (抛 "StreamSink is bound to a stream") —— 而这正是
-    // 客户端不读了的状态。所以名额先收回、写循环先停, close 失败就由
-    // 这条半死连接自己烂掉 (客户端真走时 done 会再叫一次, 不会重复 detach)。
+    // 断开并归还名额 (只做一次)。这次能真关: raw.close() 直接 destroy 底层
+    // socket, 不像 HttpResponse.close() 那样被挂着的 flush 卡住。
     void release() {
       if (!open) return;
       open = false;
@@ -1302,21 +1323,18 @@ class HubServer {
       stalled = null;
       managed?.detach();
       mine?.remove(release);
+      raw.close();
+      _log('[网页] ${camera.name}: 画面断开 (全站剩 $_attachedCount 条)');
       onStreamReleased?.call(camera);
       unawaited(sub?.cancel());
-      try {
-        req.response.close().catchError((_) => req.response);
-      } catch (_) {
-        // flush 挂着关不掉 - 名额已经还了, 不再往里写
-      }
     }
 
     mine?.add(release);
+    _log('[网页] ${camera.name}: 画面挂上 (全站 $_attachedCount 条)');
+    unawaited(raw.done.then((_) => release()));
 
-    req.response.done.then((_) => release());
     final boundaryHead = ascii.encode('--bambudeck\r\n'
         'Content-Type: image/jpeg\r\nContent-Length: ');
-    final blankLine = ascii.encode('\r\n\r\n');
     final tail = ascii.encode('\r\n');
 
     // First paint from the cached frame, then live ones. The `busy` flag is
@@ -1326,7 +1344,7 @@ class HubServer {
     // comes back. Drop frames while the last flush is still pending.
     //
     // 但「等不到 flush」不能无限等: 客户端彻底不读了就断开回收 (见
-    // [streamStallTimeout])。否则 detach 永远不执行, 名额被半死连接占死。
+    // [streamStallTimeout])。否则名额被半死连接占死, 隧道那头也跟着堵。
     void push(Uint8List frame) {
       if (!open || busy) return;
       busy = true;
@@ -1337,14 +1355,16 @@ class HubServer {
             '${streamStallTimeout.inSeconds}s 写不出去 (客户端不读了), 断开回收');
         release();
       });
-      _emit(req.response, boundaryHead, frame, blankLine, tail);
-      req.response.flush().then((_) {
+      raw.write([
+        boundaryHead,
+        ascii.encode('${frame.length}\r\n\r\n'),
+        frame,
+        tail,
+      ]).then((ok) {
         busy = false;
         stalled?.cancel();
         stalled = null;
-      }).catchError((_) {
-        busy = false;
-        release(); // 写失败 = socket 已断, 直接回收
+        if (!ok) release(); // socket 没了
       });
     }
 
@@ -1355,23 +1375,7 @@ class HubServer {
       onDone: release,
       onError: (_) => release(),
     );
-    try {
-      await req.response.done;
-    } catch (_) {
-      // client vanished - release() already ran via done/onError
-    }
-  }
-
-  void _emit(HttpResponse res, List<int> head, Uint8List frame,
-      List<int> blankLine, List<int> tail) {
-    try {
-      res.add(head);
-      res.add(ascii.encode('${frame.length}\r\n\r\n'));
-      res.add(frame);
-      res.add(tail);
-    } catch (_) {
-      // client gone - response.done triggers close
-    }
+    await raw.done;
   }
 
   CameraRelay _relayFor(CameraProfile c) {
@@ -1425,17 +1429,24 @@ class HubServer {
       return;
     }
     final chunks = relay.attach();
-    req.response.headers.set('Content-Type', 'audio/mpeg');
-    req.response.headers.set('Cache-Control', 'no-cache');
-    req.response.headers.set('Accept-Ranges', 'none');
-    req.response.bufferOutput = false;
+    // 同画面: 自己的 socket, 卡住能真关 (见 [_RawStream])。
+    final raw = await _RawStream.open(
+        req, 'audio/mpeg', headers: {'Accept-Ranges': 'none'});
+    if (raw == null) {
+      _log('[网页] ${cam.name}: 摘不到 socket, 这条声音放弃');
+      relay.detach();
+      try {
+        req.response.statusCode = HttpStatus.internalServerError;
+        await req.response.close();
+      } catch (_) {}
+      return;
+    }
 
     var open = true;
     var busy = false;
     StreamSubscription<Uint8List>? sub;
     Timer? stalled;
 
-    // 同画面: flush 挂着时 dart:io 不让 close(), 先把名额还回去。
     void release() {
       if (!open) return;
       open = false;
@@ -1443,15 +1454,11 @@ class HubServer {
       stalled?.cancel();
       stalled = null;
       relay.detach();
+      raw.close();
       unawaited(sub?.cancel());
-      try {
-        req.response.close().catchError((_) => req.response);
-      } catch (_) {
-        // flush 挂着关不掉 - 名额已经还了
-      }
     }
 
-    req.response.done.then((_) => release());
+    unawaited(raw.done.then((_) => release()));
     sub = chunks.listen(
       (chunk) {
         if (!open || busy) return; // 读得慢就丢一小段, 别让延迟越积越大
@@ -1465,29 +1472,17 @@ class HubServer {
               '${streamStallTimeout.inSeconds}s 写不出去, 断开回收');
           release();
         });
-        try {
-          req.response.add(chunk);
-          req.response.flush().then((_) {
-            busy = false;
-            stalled?.cancel();
-            stalled = null;
-          }).catchError((_) {
-            busy = false;
-            release();
-          });
-        } catch (_) {
+        raw.write([chunk]).then((ok) {
           busy = false;
-          release(); // client gone
-        }
+          stalled?.cancel();
+          stalled = null;
+          if (!ok) release();
+        });
       },
       onDone: release,
       onError: (_) => release(),
     );
-    try {
-      await req.response.done;
-    } catch (_) {
-      // client vanished - release() already ran via done/onError
-    }
+    await raw.done;
   }
 
   AudioRelay _audioRelayFor(CameraProfile c) {
@@ -1518,6 +1513,96 @@ class HubServer {
         _clients.remove(ws);
       }
     }
+  }
+}
+
+/// 一条可以「强关」的流式 HTTP 响应: 直接把底层 socket 拿在手里。
+///
+/// 见 [_serveMjpeg] 上的说明 —— `HttpResponse` 在客户端不读时既关不掉也摘不
+/// 走, 用这条路径才能在卡死时真的把 TCP 收掉。
+class _RawStream {
+  _RawStream._(this.socket);
+
+  final Socket socket;
+  StreamSubscription<Uint8List>? _sub;
+  final _done = Completer<void>();
+  bool _closed = false;
+
+  bool get closed => _closed;
+  Future<void> get done => _done.future;
+
+  /// 摘 socket 并写头。失败返回 null (这条连接救不回来)。
+  static Future<_RawStream?> open(
+    HttpRequest req,
+    String contentType, {
+    Map<String, String> headers = const {},
+  }) async {
+    final Socket socket;
+    try {
+      // 必须赶在写第一个字节之前: 头一发就抛 "Headers already sent"。
+      socket = await req.response.detachSocket(writeHeaders: false);
+    } catch (_) {
+      return null;
+    }
+    final stream = _RawStream._(socket);
+    stream._start(contentType, headers);
+    return stream;
+  }
+
+  void _start(String contentType, Map<String, String> extra) {
+    try {
+      socket.setOption(SocketOption.tcpNoDelay, true);
+    } catch (_) {}
+    _sub = socket.listen((_) {}, onError: (_) => close(), onDone: close);
+    final head = StringBuffer()
+      ..write('HTTP/1.1 200 OK\r\n')
+      ..write('Content-Type: $contentType\r\n')
+      ..write('Cache-Control: no-cache, no-store\r\n')
+      // 分块传输: 一条永不结束的流没有 Content-Length, 而 Cloudflare 边缘
+      // 只对 chunked 逐块转发 (关连接界定的 body 它可能一直缓着不发)。
+      ..write('Transfer-Encoding: chunked\r\n')
+      ..write('Connection: close\r\n');
+    extra.forEach((k, v) => head.write('$k: $v\r\n'));
+    head.write('\r\n');
+    try {
+      socket.add(ascii.encode(head.toString()));
+    } catch (_) {
+      close();
+    }
+  }
+
+  /// 写一个 chunk 并等它真的进了内核缓冲。false = socket 已经没了。
+  Future<bool> write(List<List<int>> parts) async {
+    if (_closed) return false;
+    var size = 0;
+    for (final p in parts) {
+      size += p.length;
+    }
+    try {
+      socket.add(ascii.encode('${size.toRadixString(16)}\r\n'));
+      for (final p in parts) {
+        socket.add(p);
+      }
+      socket.add(ascii.encode('\r\n'));
+      await socket.flush();
+      return !_closed;
+    } catch (_) {
+      close();
+      return false;
+    }
+  }
+
+  /// 真关: `destroy()` 立刻收掉 TCP (带 RST), 不等挂着的 flush。
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    try {
+      _sub?.cancel();
+    } catch (_) {}
+    try {
+      socket.destroy();
+    } catch (_) {}
+    if (!_done.isCompleted) _done.complete();
   }
 }
 
