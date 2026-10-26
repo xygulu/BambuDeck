@@ -541,6 +541,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
             ]),
           ),
         ),
+        actionsAlignment: MainAxisAlignment.spaceBetween,
         actions: [
           // 编辑模式才有删除 (2026-10-21 从卡片/面板头迁入), 二次确认后执行。
           if (editing != null)
@@ -572,11 +573,12 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
               },
               child: const Text('删除摄像头'),
             ),
-          const Spacer(),
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消')),
-          FilledButton(
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            const SizedBox(width: 4),
+            FilledButton(
               onPressed: () {
                 if (type == CameraSourceType.rtsp) {
                   final u = urlCtrl.text.trim();
@@ -591,6 +593,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                 Navigator.pop(ctx, true);
               },
               child: Text(editing == null ? '添加' : '保存')),
+          ]),
         ],
       ),
     ),
