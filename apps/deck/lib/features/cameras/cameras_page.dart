@@ -4,6 +4,7 @@ import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 
 import '../../core/theme.dart';
@@ -15,9 +16,10 @@ import '../../data/rtsp_scanner.dart';
 import '../../ui/camera_tile.dart';
 import '../monitor/overview_wall.dart';
 
-/// Cameras tab body (PRD FR-3): a zoomable wall of live tiles (2026-10-26
-/// 需求) - 默认单画面, 鼠标滚轮/捏合缩小逐档显示更多画面 (一排两个 →
-/// 2x2 → 3x3 … 封顶全部), 放大反之; 网格按画面数自动取最佳 16:9 排布。
+/// Cameras tab body (PRD FR-3): a stepless-zoomable wall of live tiles
+/// (2026-10-26 需求, 交互对齐 iPhone 照片墙) - 默认单画面, 鼠标滚轮 /
+/// 触控板 / 捏合连续缩放, 缩小时画面连续变多、放大时变少变大, 网格随
+/// 画面数自动取最佳 16:9 排布铺满一屏。
 class CamerasPage extends ConsumerStatefulWidget {
   const CamerasPage({super.key, required this.onAdd});
 
@@ -30,28 +32,22 @@ class CamerasPage extends ConsumerStatefulWidget {
 }
 
 class _CamerasPageState extends ConsumerState<CamerasPage> {
-  /// 缩放档位下标, 默认 0 = 单画面; 档位对应的画面数 1→2→4→9→16…。
-  int _level = 0;
+  /// 无级缩放值: 1 = 全部画面铺满, sqrt(n) = 单画面占满; 默认单画面。
+  double _zoom = 1;
 
-  /// 捏合进行中的实时缩放 (仅视觉反馈, 松手归位)。
+  /// _zoom 是否已按摄像头数初始化 (默认落在单画面档)。
+  bool _zoomInit = false;
+
+  /// 捏合进行中的实时缩放 (视觉反馈, 松手折算进 _zoom)。
   double _pinch = 1.0;
 
-  /// 档位 → 画面数: [1, 2, 4, 9, 16 …], 封顶实际摄像头数。
-  List<int> _levelsFor(int n) {
-    const base = [1, 2, 4, 9, 16, 25, 36, 49, 64, 81, 100];
-    int cap(int c) => c >= n ? n : c;
-    final levels = <int>[for (final c in base) if (c == 1 || cap(c) < n) cap(c)];
-    if (levels.last != n) levels.add(n);
-    return levels;
-  }
-
-  void _stepZoom(int delta) {
+  void _applyZoom(double factor) {
     final n =
         (ref.read(camerasProvider).valueOrNull ?? const <CameraProfile>[])
             .length;
     if (n == 0) return;
     setState(() {
-      _level = (_level + delta).clamp(0, _levelsFor(n).length - 1);
+      _zoom = (_zoom * factor).clamp(1.0, math.sqrt(n).toDouble());
       _pinch = 1.0;
     });
   }
@@ -97,30 +93,44 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
     );
   }
 
-  /// 可缩放的墙: 默认单画面; 滚轮下滚/捏合缩小 → 逐档显示更多画面
-  /// (一排两个 → 2x2 → 3x3…封顶全部), 上滚/捏合放大反之; 双击就近切换
-  /// 一档; 右上角 ± 按钮兜底并显示当前画面数。
+  /// 无级缩放的墙: _zoom ∈ [1, √n] 连续变化, 画面数 k = (n / z²) 连续
+  /// 增减 (1 ↔ 全部), 每次重建按 k 取最佳 16:9 网格铺满; 滚轮/触控板/
+  /// 捏合都连续驱动 _zoom, 捏合过程另有 Transform.scale 实时反馈。
   Widget _wall(List<CameraProfile> list, List<PrinterProfile> printers) {
-    final levels = _levelsFor(list.length);
-    if (_level > levels.length - 1) _level = levels.length - 1;
-    final shown = list.take(levels[_level]).toList();
-    final canZoomIn = _level > 0;
-    final canZoomOut = _level < levels.length - 1;
+    final n = list.length;
+    if (n == 0) return const SizedBox.shrink();
+    final zMax = math.sqrt(n).toDouble();
+    if (!_zoomInit) {
+      _zoom = zMax; // 默认单画面 (需求 2026-10-26)
+      _zoomInit = true;
+    }
+    _zoom = _zoom.clamp(1.0, zMax);
+    final k = math.min(n, math.max(1, (n / (_zoom * _zoom)).round()));
+    final shown = list.take(k).toList();
+    final canZoomIn = _zoom > 1.0001; // 放大 = 画面更少
+    final canZoomOut = _zoom < zMax - 0.0001; // 缩小 = 画面更多
 
     return LayoutBuilder(builder: (context, box) {
-      final n = shown.length;
       final w = box.maxWidth > 0 ? box.maxWidth : 1.0;
       final h = box.maxHeight > 0 ? box.maxHeight : 1.0;
-      final bestCols = bestFitColumns(n, w, h);
-      final rows = (n / bestCols).ceil();
+      final bestCols = bestFitColumns(k, w, h);
+      final rows = (k / bestCols).ceil();
       return Padding(
         padding: const EdgeInsets.all(12),
         child: Stack(children: [
           Listener(
             onPointerSignal: (e) {
+              // 鼠标滚轮: 下滚 = 缩小 = 画面渐多。单事件步长设上限,
+              // Windows 粗滚轮一格不至于连跳数档。
               if (e is PointerScrollEvent && e.scrollDelta.dy != 0) {
-                // 下滚 = 缩小 = 画面变多; 上滚 = 放大。
-                _stepZoom(e.scrollDelta.dy > 0 ? 1 : -1);
+                final dy = e.scrollDelta.dy.clamp(-60.0, 60.0);
+                _applyZoom(math.exp(-dy * 0.004));
+              }
+            },
+            onPointerPanZoomUpdate: (e) {
+              // 触控板双指滚动 (macOS 上不是 PointerScrollEvent)。
+              if (e.panDelta.dy != 0) {
+                _applyZoom(math.exp(-e.panDelta.dy * 0.006));
               }
             },
             child: GestureDetector(
@@ -130,15 +140,13 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
               },
               onScaleEnd: (_) {
                 final s = _pinch;
-                if (s < 0.85) {
-                  _stepZoom(1); // 捏合缩小 → 画面变多
-                } else if (s > 1.15) {
-                  _stepZoom(-1); // 捏合放大 → 画面变少
-                } else {
-                  setState(() => _pinch = 1.0);
+                _pinch = 1.0;
+                if (s != 1.0) {
+                  _applyZoom(1 / s); // 捏合放大(>1) → 画面变少
                 }
               },
-              onDoubleTap: () => _stepZoom(canZoomIn ? -1 : (canZoomOut ? 1 : 0)),
+              onDoubleTap: () => _applyZoom(
+                  _zoom > 1.0001 ? 1.0 : zMax), // 双击在单画面/全部间切换
               child: Transform.scale(
                 scale: _pinch,
                 child: Column(children: [
@@ -146,7 +154,7 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                     Expanded(
                       child: Row(children: [
                         for (var i = r * bestCols;
-                            i < (r + 1) * bestCols && i < n;
+                            i < (r + 1) * bestCols && i < k;
                             i++)
                           Expanded(
                             child: Padding(
@@ -155,7 +163,7 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                             ),
                           ),
                         // 补位空格, 末行不满时格子宽度与上方一致。
-                        for (var i = n; i < (r + 1) * bestCols; i++)
+                        for (var i = k; i < (r + 1) * bestCols; i++)
                           const Expanded(child: SizedBox()),
                       ]),
                     ),
@@ -173,21 +181,21 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                 borderRadius: BorderRadius.circular(999),
               ),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Text('${shown.length}/${list.length}',
+                Text('$k/$n',
                     style: const TextStyle(fontSize: 11, color: Colors.white)),
                 const SizedBox(width: 2),
                 IconButton(
                   visualDensity: VisualDensity.compact,
                   icon: const Icon(Icons.zoom_in, size: 18, color: Colors.white),
                   tooltip: '放大 (画面更少更大)',
-                  onPressed: canZoomIn ? () => _stepZoom(-1) : null,
+                  onPressed: canZoomIn ? () => _applyZoom(1.4) : null,
                 ),
                 IconButton(
                   visualDensity: VisualDensity.compact,
                   icon:
                       const Icon(Icons.zoom_out, size: 18, color: Colors.white),
                   tooltip: '缩小 (画面更多)',
-                  onPressed: canZoomOut ? () => _stepZoom(1) : null,
+                  onPressed: canZoomOut ? () => _applyZoom(1 / 1.4) : null,
                 ),
               ]),
             ),
