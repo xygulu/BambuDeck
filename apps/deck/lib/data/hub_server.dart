@@ -709,6 +709,8 @@ class HubServer {
           ws.listen((_) {},
               onDone: () => _clients.remove(ws),
               onError: (_) => _clients.remove(ws));
+        case '/ws-cam':
+          await _serveFrames(req);
         case '/api/control':
           await _handleAction(req, plateSwap: false);
         case '/api/plate-swap':
@@ -1504,6 +1506,111 @@ class HubServer {
 
   // -- ws ---------------------------------------------------------------
 
+  /// `/ws-cam` — 所有画面帧走一条 WebSocket。
+  ///
+  /// 为什么不用 MJPEG: WebKit(iOS Safari / WKWebView)的 `fetch` 读不出永不
+  /// 结束的响应体 —— 能拿到 200 和 body, 但第一次 `read()` 立刻
+  /// `TypeError: Load failed`。2026-10-26 用 Playwright 的 WebKit 对照实测
+  /// (换 Node 的最小 MJPEG 服务器、换 Content-Type、换分块/关连接界定都一样
+  /// 失败), 和本源实现无关; 同一个页面在电脑的 Chromium 上正常 —— 所以
+  /// 「电脑有画面、iOS 全黑」。
+  ///
+  /// `<img src=MJPEG>` 在 iOS 上能显示, 但页面把它摘掉时 WebKit 不关连接
+  /// (老问题: 名额被半死连接吃光 → 一个黑屏变全黑)。
+  ///
+  /// 一条 WS 承载所有可见画面: 一个站点只占 1 条连接, 退订立刻生效, 也不会
+  /// 像长连接流那样把 Cloudflare 隧道的连接级窗口堵死。
+  ///
+  /// 协议: 文本 = 控制 (`{"sub":[id…]}` 全量订阅 / `{"unsub":[id…]}` /
+  /// `{"ack":id}` / `{"kick":id}` 强制重启这一路);
+  /// 二进制 = `[1 字节 id 长度][id][JPEG]`。
+  /// 每路一次只放一帧出去, 客户端画完才回 ack —— 手机跟不上时服务端不会囤积。
+  Future<void> _serveFrames(HttpRequest req) async {
+    final WebSocket ws;
+    try {
+      ws = await WebSocketTransformer.upgrade(req);
+    } catch (e) {
+      _log('[网页] 画面通道升级失败: $e');
+      return;
+    }
+    // 协议层心跳: 手机断网/冻住时 dart:io 会自己把死连接收掉, 不至于让
+    // 一路 _FrameSub 一直挂着占 relay。
+    try {
+      ws.pingInterval = const Duration(seconds: 20);
+    } catch (_) {}
+    final subs = <String, _FrameSub>{};
+
+    void drop(String id) {
+      final sub = subs.remove(id);
+      sub?.close();
+      if (sub != null) {
+        _log('[网页] ${sub.camera.name}: 画面退订 (WS 全站 ${_FrameSub.active} 路)');
+      }
+    }
+
+    void subscribe(String id) {
+      if (subs.containsKey(id)) return;
+      final cam = _findCamera(id);
+      if (cam == null || !cam.enabled) return;
+      final sub = _FrameSub(ws, cam, _relayFor(cam));
+      subs[id] = sub;
+      sub.start();
+      _log('[网页] ${cam.name}: 画面挂上 (WS 全站 ${_FrameSub.active} 路)');
+    }
+
+    void sync(List<String> ids) {
+      final want = ids.toSet();
+      for (final id in subs.keys.toList()) {
+        if (!want.contains(id)) drop(id);
+      }
+      for (final id in want.toList()) {
+        subscribe(id);
+      }
+    }
+
+    ws.listen((data) {
+      if (data is! String) return;
+      Object? msg;
+      try {
+        msg = jsonDecode(data);
+      } catch (_) {
+        return;
+      }
+      if (msg is! Map) return;
+      if (msg['ping'] != null) {
+        // 页面用它判断这条 WS 是不是被 iOS 冻住了 (冻住的 socket 不 close)。
+        try {
+          ws.add(jsonEncode({'pong': 1}));
+        } catch (_) {}
+        return;
+      }
+      final sub = msg['sub'];
+      if (sub is List) sync(sub.whereType<String>().toList());
+      final unsub = msg['unsub'];
+      if (unsub is List) {
+        for (final id in unsub.whereType<String>()) {
+          drop(id);
+        }
+      }
+      final ack = msg['ack'];
+      if (ack is String) subs[ack]?.ack();
+      final kick = msg['kick'];
+      if (kick is String) {
+        final old = subs.remove(kick);
+        old?.close();
+        subscribe(kick); // 重新解析源 (页面看门狗用)
+      }
+    }, onDone: () {
+      for (final id in subs.keys.toList()) {
+        drop(id);
+      }
+    }, onError: (_) {
+      for (final id in subs.keys.toList()) {
+        drop(id);
+      }
+    });
+  }
+
   void _broadcast() {
     final text = jsonEncode(_snapshot());
     for (final ws in _clients.toList()) {
@@ -1603,6 +1710,96 @@ class _RawStream {
       socket.destroy();
     } catch (_) {}
     if (!_done.isCompleted) _done.complete();
+  }
+}
+
+/// 一路画面在 `/ws-cam` 上的订阅。
+///
+/// 背压: 一帧发出去后等页面的 ack 再发下一帧, 中间来的帧只留最新一张。
+/// 手机画一帧 720p JPEG 要几十毫秒, 不压的话浏览器会囤一长串过期帧, 越
+/// 看越延迟; 也不会像 MJPEG 那样在隧道里堆出几百 KB 的滞留字节。
+class _FrameSub {
+  _FrameSub(this.ws, this.camera, this.relay);
+
+  final WebSocket ws;
+  final CameraProfile camera;
+  final CameraRelay relay;
+
+  static var active = 0;
+
+  StreamSubscription<Uint8List>? _sub;
+  Uint8List? _pending;
+  bool _waiting = false;
+  bool _closed = false;
+  Timer? _ackTimeout;
+
+  /// 页面这么久不回 ack 就当它这一帧丢了, 放行下一帧 (不然一路卡死就永远
+  /// 停住)。真死了的 socket 由协议层心跳 + onDone 收拾。
+  static const _ackAfter = Duration(seconds: 8);
+
+  void start() {
+    if (_closed) return;
+    active++;
+    _sub = relay.attach().listen(_onFrame, onError: (_) {}, onDone: () {});
+    final first = relay.latest;
+    if (first != null) _send(first);
+  }
+
+  void _onFrame(Uint8List frame) {
+    if (_closed) return;
+    if (_waiting) {
+      _pending = frame; // 只留最新一张, 旧的丢掉
+      return;
+    }
+    _send(frame);
+  }
+
+  void _send(Uint8List frame) {
+    if (_closed) return;
+    final id = utf8.encode(camera.id);
+    final out = Uint8List(1 + id.length + frame.length);
+    out[0] = id.length;
+    out.setRange(1, 1 + id.length, id);
+    out.setRange(1 + id.length, out.length, frame);
+    try {
+      ws.add(out);
+    } catch (_) {
+      close();
+      return;
+    }
+    _waiting = true;
+    _ackTimeout?.cancel();
+    _ackTimeout = Timer(_ackAfter, () {
+      if (_closed || !_waiting) return;
+      _waiting = false;
+      final next = _pending;
+      _pending = null;
+      if (next != null) _send(next);
+    });
+  }
+
+  void ack() {
+    if (_closed) return;
+    _waiting = false;
+    _ackTimeout?.cancel();
+    _ackTimeout = null;
+    final next = _pending;
+    _pending = null;
+    if (next != null) _send(next);
+  }
+
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    active = (active - 1).clamp(0, 1 << 30);
+    _ackTimeout?.cancel();
+    _ackTimeout = null;
+    try {
+      _sub?.cancel();
+    } catch (_) {}
+    try {
+      relay.detach();
+    } catch (_) {}
   }
 }
 

@@ -1503,94 +1503,133 @@ function syncAudio(list, visible) {
   }
 }
 
-/* 断流重挂的退避: 4 秒起步, 连续失败越久退得越久 (封顶 20 秒),
-   再加随机抖动 —— 几台摄像头一起断时不能同时重连, iOS 的 6 条连接
-   名额会被同一瞬间的重试占满, 结果是全都出不来。 */
-const streamFails = new Map();
+/* —— 画面通道: 所有画面共用一条 /ws-cam WebSocket ——
 
-/* 画面不用 <img src=MJPEG>, 改成 fetch + <canvas>。
-   <img> 拉 MJPEG 时, 页面把它摘掉 (切打印机/滚出屏幕) WebKit 并不真的关掉
-   那条连接: 服务端 flush 一直挂着, 这条 TCP 永远 ESTABLISHED —— 客户端
-   不读了, close() 会抛 "StreamSink is bound to a stream", 关不掉 (实测)。
-   切几次机器, 浏览器的同源连接名额就被这些死连接占满, 之后新画面一条都
-   连不上: **一个黑屏 → 全黑**, 只能杀 App 重开 (反馈 2026-10-26)。
-   fetch 有 AbortController, abort() 一定把连接关掉, 服务端马上回收。 */
-const streamOf = new Map(); // canvas -> {ctrl, reader}
+   为什么换掉 fetch + canvas: WebKit(iOS Safari / WKWebView)的 fetch 读不出
+   永不结束的响应体 —— 能拿到 200 和 body, 第一次 read() 立刻
+   `TypeError: Load failed`。2026-10-26 用 Playwright 的 WebKit 对照实测:
+   换成最小的 Node MJPEG 服务器、换 Content-Type、换分块/关连接界定, 一样
+   失败; 同一个页面在电脑的 Chromium 上正常 —— 所以「电脑有画面、iOS 全黑」。
 
-function streamBackoff(cam) {
-  const fails = Math.min((streamFails.get(cam) || 0) + 1, 6);
-  streamFails.set(cam, fails);
-  return 4000 * fails + Math.random() * 1500;
+   <img src=MJPEG> 在 iOS 上能显示, 但页面把它摘掉时 WebKit 不真的关连接,
+   同源名额被半死连接吃光, 一个黑屏变全黑。
+
+   现在所有画面帧走一条 WS: 一个站点只占 1 条连接, 退订立刻生效, 服务端
+   一帧一 ack (客户端画完才回), 手机跟不上时不会囤积过期帧, 也不会像长
+   连接流那样把 Cloudflare 隧道的连接级窗口堵死。
+   帧格式: [1 字节 id 长度][id][JPEG]。 */
+const streamOf = new Map(); // canvas -> {cam}
+let camWS = null;
+let camSubs = new Set();    // 服务端那边已经订阅的 id
+let camBackoff = 0;
+let camPingAt = 0;          // 发出 ping 的时刻; 收到任何消息清零
+
+// 现在需要哪些画面 (顺手把已经从 DOM 里摘掉的清出去)。
+function camWant() {
+  const want = new Set();
+  for (const el of [...streamOf.keys()]) {
+    if (!el.isConnected) { streamOf.delete(el); continue; }
+    const id = el.dataset.cam;
+    if (id) want.add(id);
+  }
+  return want;
 }
 
-// 每次挂流都带一个时间戳, 码流切换后重挂才能绕开缓存。
+function camSend(obj) {
+  const s = camWS;
+  if (!s || s.readyState !== WebSocket.OPEN) return false;
+  try { s.send(JSON.stringify(obj)); return true; } catch (_) { return false; }
+}
+
+function camConnect() {
+  if (camWS && camWS.readyState <= WebSocket.OPEN) return camWS;
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = `${proto}://${location.host}/ws-cam?token=` +
+    encodeURIComponent(TOKEN || '');
+  let sock;
+  try { sock = new WebSocket(url); } catch (_) { return null; }
+  sock.binaryType = 'arraybuffer';
+  camWS = sock;
+  camSubs = new Set();
+  camPingAt = 0;
+  sock.onopen = () => {
+    camBackoff = 0;
+    camSyncSubs();
+  };
+  sock.onmessage = ev => {
+    camPingAt = 0;
+    if (typeof ev.data === 'string') return; // pong
+    onFrame(ev.data);
+  };
+  sock.onclose = () => {
+    if (camWS === sock) camWS = null;
+    camSubs = new Set();
+    camPingAt = 0;
+    if (!camWant().size || document.visibilityState !== 'visible') return;
+    // 断线重连退避, 别把手机的名额和电池耗在连不上的时候。
+    camBackoff = Math.min(camBackoff + 1, 5);
+    setTimeout(() => {
+      if (document.visibilityState === 'visible') camSyncSubs();
+    }, 1500 * camBackoff);
+  };
+  return sock;
+}
+
+// 把「现在要哪些画面」同步给服务端。
+// 服务端把 sub 当**全量集合**处理 (没列出的就退订), 所以这里发的永远是
+// 完整一份; 只有集合真的变了才发, 免得切页签时刷一串没用的消息。
+function camSyncSubs() {
+  const want = camWant();
+  if (!want.size && !camSubs.size) return; // 没什么要看的, 也不用连
+  const sock = camConnect(); // 已有连接就返回它, 没有才新开
+  if (!sock || sock.readyState !== WebSocket.OPEN) return;
+  const same = want.size === camSubs.size &&
+    [...want].every(id => camSubs.has(id));
+  if (same) return;
+  if (camSend({ sub: [...want] })) camSubs = new Set(want);
+}
+
+// 收到一帧: [idLen][id][JPEG], 画完所有显示这台摄像头的画布再回 ack。
+function onFrame(buf) {
+  if (!(buf instanceof ArrayBuffer) || buf.byteLength < 3) return;
+  const u8 = new Uint8Array(buf);
+  const idLen = u8[0];
+  if (idLen < 1 || u8.byteLength < 1 + idLen + 1) return;
+  const id = new TextDecoder().decode(u8.subarray(1, 1 + idLen));
+  const jpg = u8.subarray(1 + idLen);
+  const targets = [];
+  for (const el of streamOf.keys()) {
+    if (el.dataset.cam === id && el.isConnected &&
+        el.dataset.mounted === '1') targets.push(el);
+  }
+  if (!targets.length) { camSend({ ack: id }); return; }
+  (async () => {
+    for (const el of targets) {
+      await drawFrame(el, jpg);
+      el.dataset.frames = String(Number(el.dataset.frames || 0) + 1);
+    }
+    camSend({ ack: id }); // 画完才放下一帧
+  })();
+}
+
 function mountStream(el) {
-  const base = el.dataset.src;
-  if (!base || streamOf.has(el)) return;
+  if (!el.dataset.src) return;
   el.dataset.mounted = '1';
   el.dataset.since = String(Date.now()); // 第一次出帧的宽限期从这一刻算
   el.dataset.frames = '0';
-  streamWatch.delete(el.dataset.cam); // 新连接重新计时
-  const rec = { ctrl: new AbortController(), reader: null };
-  streamOf.set(el, rec);
-  pullStream(el, base, rec);
+  el.dataset.blind = '0';
+  streamWatch.delete(el.dataset.cam); // 新订阅重新计时
+  streamOf.set(el, { cam: el.dataset.cam });
+  camSyncSubs();
 }
 
-async function pullStream(el, base, rec) {
-  const url = base + (base.includes('?') ? '&' : '?') + 'v=' + Date.now();
-  try {
-    const res = await fetch(url, { signal: rec.ctrl.signal, cache: 'no-store' });
-    if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
-    const reader = res.body.getReader();
-    rec.reader = reader;
-    let buf = new Uint8Array(0);
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (!buf.length) {
-        buf = value;
-      } else {
-        const next = new Uint8Array(buf.length + value.length);
-        next.set(buf);
-        next.set(value, buf.length);
-        buf = next;
-      }
-      let f;
-      while ((f = takeJpeg(buf))) {
-        buf = f.rest;
-        if (!el.isConnected || streamOf.get(el) !== rec) return;
-        await drawFrame(el, f.jpg); // 解一张画一张, 慢就自然丢后面的帧
-        el.dataset.frames = String(Number(el.dataset.frames || 0) + 1);
-      }
-      // 攒了一堆都切不出完整帧 = 这条流不成帧, 别把内存吃光
-      if (buf.length > 4 * 1024 * 1024) buf = new Uint8Array(0);
-    }
-  } catch (_) {
-    // abort / 网络断 / 服务端关流都走这里, 下面统一收尾
-  }
-  if (rec.ctrl.signal.aborted || !el.isConnected || streamOf.get(el) !== rec) {
-    return;
-  }
-  streamOf.delete(el);
-  if (el.dataset.mounted !== '1') return;
-  setTimeout(() => {
-    if (el.isConnected && el.dataset.mounted === '1') mountStream(el);
-  }, streamBackoff(el.dataset.cam || ''));
-}
-
-// 从缓冲里切出第一张完整 JPEG (SOI FFD8 .. EOI FFD9), 返回 {jpg, rest}
-function takeJpeg(buf) {
-  let start = -1;
-  for (let i = 0; i + 1 < buf.length; i++) {
-    if (buf[i] === 0xff && buf[i + 1] === 0xd8) { start = i; break; }
-  }
-  if (start < 0) return null;
-  for (let i = start + 2; i + 1 < buf.length; i++) {
-    if (buf[i] === 0xff && buf[i + 1] === 0xd9) {
-      return { jpg: buf.slice(start, i + 2), rest: buf.slice(i + 2) };
-    }
-  }
-  return null;
+// 这一路卡住了: 让服务端重挂一份 (会先把缓存的最新一帧推过来)。
+function kickStream(el) {
+  const id = el.dataset.cam;
+  if (!id) return;
+  el.dataset.since = String(Date.now());
+  el.dataset.frames = '0';
+  camSend({ kick: id });
 }
 
 const imgBitmaps = typeof createImageBitmap === 'function';
@@ -1623,39 +1662,24 @@ async function drawFrame(el, jpg) {
 
 function unmountStream(el) {
   el.dataset.mounted = '0'; // 让待执行的重挂/重试自己放弃
-  const rec = streamOf.get(el);
-  if (!rec) return;
-  streamOf.delete(el);
-  try { rec.ctrl.abort(); } catch (_) {}
-  try { if (rec.reader) rec.reader.cancel(); } catch (_) {}
+  if (!streamOf.delete(el)) return;
+  camSyncSubs();
 }
 
-/* 挂流: 平时立即挂; 回前台的头几秒走错峰 (见 remountAll)。
-   iOS 同源只给 6 条连接, 一次性把 3 台画面全挂上去, 新的 <img> 一条都
-   收不到数据 —— 表现就是黑屏。 */
-let mountStagger = 0;   // >0: 这一轮每张画面之间隔多少毫秒
-let mountQueue = 0;
 function attachStream(img) {
-  if (mountStagger <= 0) { mountStream(img); return; }
-  const wait = (mountQueue++) * mountStagger;
-  setTimeout(() => { if (img.isConnected) mountStream(img); }, wait);
+  mountStream(img);
 }
 
-/* 锁屏/切后台再回来: iOS 会把 MJPEG 连接全掐掉, <img> 只剩一个问号,
-   而 src 属性还在 (浏览器不会自己重连)。回前台时重挂一遍,
-   顺手把断掉的 WebSocket 也接回来。
-
-   但不能一口气全挂: 旧连接在 WebKit 里还没释放, 立刻开 N 条新连接就超了
-   并发上限 —— 用户看到的是「锁屏再开就全黑, 怎么等都不回来」
-   (反馈 2026-10-26)。先等 400ms 让系统收掉旧连接, 再每 700ms 挂一台。 */
+/* 锁屏/切后台再回来: iOS 会把画面连接全掐掉, 回前台重挂一遍,
+   顺手把断掉的 WebSocket 也接回来 (主数据和画面各一条)。
+   先等 400ms 让系统把旧连接收掉, 别在过渡期里抢名额。 */
 function remountAll() {
   for (const el of document.querySelectorAll('canvas.cstream, audio.camaudio')) {
     if (!el.isConnected) continue;
     if (el.tagName === 'AUDIO') unmountAudio(el);
     else unmountStream(el);
   }
-  mountStagger = 700;
-  mountQueue = 0;
+  dropCamSocket();
   setTimeout(() => {
     syncWalls();
     syncCameras();
@@ -1663,21 +1687,30 @@ function remountAll() {
       attachStream(img);
     }
   }, 400);
-  // 错峰窗口够把当前所有画面排完就行, 之后恢复即时挂 (切页签不该等)。
-  setTimeout(() => { mountStagger = 0; mountQueue = 0; }, 400 + 700 * 6);
+}
+
+// 干净地放掉画面通道 (切后台时用; 前台挂载时会自己重连)。
+function dropCamSocket() {
+  const sock = camWS;
+  camWS = null;
+  camSubs = new Set();
+  camBackoff = 0;
+  camPingAt = 0;
+  try { sock && sock.close(); } catch (_) {}
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') {
     /* 切后台/锁屏时主动断流。iOS 会把页面冻住, 连接既不再读也关不掉;
        服务端 6s 后回收名额, 但那条 TCP 一直是 ESTABLISHED —— 手机经
        Cloudflare 隧道来时, 边缘那条流也跟着挂死, 连接级流控窗口被吃光,
-       回来以后所有画面一起黑 (反馈 2026-10-26)。这里干净地 abort 掉,
+       回来以后所有画面一起黑 (反馈 2026-10-26)。这里干净地关掉,
        隧道那头立刻结束, 前台再按 remountAll 重挂。 */
     for (const el of document.querySelectorAll('canvas.cstream, audio.camaudio')) {
       if (!el.isConnected) continue;
       if (el.tagName === 'AUDIO') unmountAudio(el);
       else unmountStream(el);
     }
+    dropCamSocket();
     return;
   }
   remountAll();
@@ -1731,6 +1764,11 @@ function unmountAudio(a) {
 function checkBlindStreams() {
   if (document.visibilityState !== 'visible') return;
   const now = Date.now();
+  // 通道本身断了 (还没到重连的时候): 先接回来, 不看单路。
+  if (!camWS || camWS.readyState !== WebSocket.OPEN) {
+    if (camWant().size) camSyncSubs();
+    return;
+  }
   for (const img of document.querySelectorAll('canvas[data-cam][data-mounted="1"]')) {
     if (!img.isConnected) continue;
     if (Number(img.dataset.frames || 0) > 0) { img.dataset.blind = '0'; continue; }
@@ -1738,8 +1776,7 @@ function checkBlindStreams() {
     const wait = Math.min(60000, 8000 * (tries + 1));
     if (now - Number(img.dataset.since || now) < wait) continue;
     img.dataset.blind = String(tries + 1);
-    unmountStream(img);
-    mountStream(img);
+    kickStream(img);
   }
 }
 setInterval(checkBlindStreams, 2000);
@@ -1760,19 +1797,16 @@ function checkStalls() {
     if (c.seq !== rec.seq) {
       rec.seq = c.seq;
       rec.movedAt = now;
-      streamFails.delete(c.id); // 出帧了, 失败计数清零
     }
     if (c.seq > 0 && now - rec.movedAt > 12000) {
       // 有帧号但 12 秒没动 = 这条流卡死了。
       rec.movedAt = now;
-      unmountStream(img);
-      mountStream(img);
+      kickStream(img);
     } else if (c.seq === 0 &&
         now - Number(img.dataset.since || now) > 20000) {
       // 服务端从来没出过一帧 (打印机离线 / 源还没就绪): 重挂一次, 让服务端
       // 重新解析源。服务端自己也每 5 秒重试, 这里是双保险。
-      unmountStream(img);
-      mountStream(img);
+      kickStream(img);
     }
     streamWatch.set(c.id, rec);
   }
@@ -1805,30 +1839,26 @@ function checkAudioStalls(now) {
   }
 }
 
-/* iOS WebKit 的 multipart/x-mixed-replace 有个老毛病: 服务端一直在推帧,
-   <img> 却会自己「定格」不再绘制 (锁屏、长时间播放之后尤其常见), 页面这
-   边完全感知不到 —— 帧号照常前进, 看门狗不会触发。唯一可靠的办法是隔一
-   段时间主动重挂一次: 服务端立刻回一帧缓存画面, 视觉上几乎无感, 顺带把
-   可能半死的连接换掉 (服务端 6 秒收不回就主动断开, 见 streamStallTimeout)。
-
-   以前是每 25 秒把**所有**流一起重挂。那等于每轮同时开 N 条新连接, 而
-   WebKit 收掉旧的多媒体请求要好几秒, iOS 同源又只给 6 条 —— 旧连接还挂
-   着、新的就排队, 超限以后新的 <img> 一条都不出帧, 表现是整页全黑
-   (反馈 2026-10-26)。改成每轮只轮换一台, 任何时刻最多多占一条连接。 */
-const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
-  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-let iosRotate = 0;
+/* 画面通道保活: iOS 把页面挂起 (锁屏/切后台回来) 时 WebSocket 会被静默
+   冻住 —— readyState 还是 OPEN, 但一个字节都过不来, 也不触发 close。
+   有帧在走就说明活着; 闲的时候每 10 秒发一个 ping, 20 秒收不到任何回音
+   就换一条连接。 */
 setInterval(() => {
-  if (!IS_IOS || document.visibilityState !== 'visible') return;
-  const imgs = [...document.querySelectorAll(
-      '#camwall canvas[data-cam], #cameras canvas[data-cam], #zoom canvas[data-cam]')]
-      .filter(el => streamOf.has(el));
-  if (!imgs.length) return;
-  const img = imgs[iosRotate++ % imgs.length];
-  unmountStream(img);
-  // 给 WebKit 一点时间把旧请求收掉, 再挂新的, 否则容易两条连接叠着。
-  setTimeout(() => { if (img.isConnected) mountStream(img); }, 200);
-}, 20000);
+  if (document.visibilityState !== 'visible') return;
+  if (!camWS || camWS.readyState !== WebSocket.OPEN) {
+    if (camWant().size) camSyncSubs();
+    return;
+  }
+  if (camPingAt && Date.now() - camPingAt > 20000) {
+    dropCamSocket();
+    camSyncSubs();
+    return;
+  }
+  if (!camPingAt) {
+    camPingAt = Date.now();
+    camSend({ ping: 1 });
+  }
+}, 10000);
 
 // 只重拉一台摄像头的画面 (换码流后服务端已经放掉旧 relay)。
 function reloadStream(camId) {
