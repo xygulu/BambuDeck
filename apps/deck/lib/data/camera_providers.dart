@@ -41,6 +41,14 @@ class CamerasNotifier extends AsyncNotifier<List<CameraProfile>> {
     ]);
     await store.save(state.valueOrNull ?? []);
   }
+
+  /// Replaces the whole list in the given order and persists (拖动排序
+  /// 2026-10-27)。
+  Future<void> replaceAll(List<CameraProfile> cameras) async {
+    final store = ref.read(cameraStoreProvider);
+    state = AsyncData(cameras);
+    await store.save(cameras);
+  }
 }
 
 final cameraStoreProvider = Provider<CameraStore>(

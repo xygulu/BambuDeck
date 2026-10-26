@@ -42,6 +42,7 @@ class CameraProfile {
     this.rotationDeg = 0,
     this.ptzInvertPan = false,
     this.ptzInvertTilt = false,
+    this.createdAt = 0,
   });
 
   final String id;
@@ -76,6 +77,10 @@ class CameraProfile {
   /// flip/rotation is carried by the pad widget instead.
   final bool ptzInvertPan;
   final bool ptzInvertTilt;
+
+  /// 加入时间 (毫秒时间戳, 列表排序 2026-10-27)。0 = 本功能之前的旧条目,
+  /// 视为最早且彼此保持原有顺序, 免迁移。
+  final int createdAt;
 
   CameraProfile copyWith({
     String? name,
@@ -151,6 +156,7 @@ class CameraProfile {
         'rotationDeg': rotationDeg,
         'ptzInvertPan': ptzInvertPan,
         'ptzInvertTilt': ptzInvertTilt,
+        'createdAt': createdAt,
       };
 
   factory CameraProfile.fromJson(Map<String, dynamic> j) {
@@ -173,6 +179,7 @@ class CameraProfile {
       rotationDeg: j['rotationDeg'] as int? ?? 0,
       ptzInvertPan: j['ptzInvertPan'] as bool? ?? false,
       ptzInvertTilt: j['ptzInvertTilt'] as bool? ?? false,
+      createdAt: j['createdAt'] as int? ?? 0,
     );
   }
 }

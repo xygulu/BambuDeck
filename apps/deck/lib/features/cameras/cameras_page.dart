@@ -8,11 +8,14 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 
 import '../../core/theme.dart';
+import '../../data/app_settings.dart';
 import '../../data/camera_profile.dart';
 import '../../data/camera_providers.dart';
+import '../../data/list_sort.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 import '../../data/rtsp_scanner.dart';
+import '../../data/settings_providers.dart';
 import '../../ui/camera_tile.dart';
 import '../monitor/overview_wall.dart';
 import 'ezviz_import_sheet.dart';
@@ -111,8 +114,11 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
       _zoomInit = true;
     }
     _zoom = _zoom.clamp(1.0, zMax);
+    final settings =
+        ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
+    final sortMode = settings.cameraSortMode;
     final k = math.min(n, math.max(1, (n / (_zoom * _zoom)).round()));
-    final shown = list.take(k).toList();
+    final shown = sortCameras(list, sortMode).take(k).toList();
     final canZoomIn = _zoom < zMax - 0.0001; // 放大 = 画面更少 (_zoom 还能加)
     final canZoomOut = _zoom > 1.0001; // 缩小 = 画面更多 (_zoom 还能减)
 
@@ -187,6 +193,27 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                 borderRadius: BorderRadius.circular(999),
               ),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
+                // 排序方式 (列表排序 2026-10-27); 手动模式可进拖动排序。
+                PopupMenuButton<ListSortMode>(
+                  tooltip: '排序方式',
+                  icon: const Icon(Icons.sort, size: 20, color: Colors.white),
+                  onSelected: (m) {
+                    final cur = ref.read(appSettingsProvider).valueOrNull ??
+                        const AppSettings();
+                    ref
+                        .read(appSettingsProvider.notifier)
+                        .set(cur.copyWith(cameraSortMode: m));
+                    if (m == ListSortMode.manual) _showReorderDialog(context);
+                  },
+                  itemBuilder: (_) => [
+                    for (final m in ListSortMode.values)
+                      CheckedPopupMenuItem(
+                        value: m,
+                        checked: m == sortMode,
+                        child: Text(m.label),
+                      ),
+                  ],
+                ),
                 IconButton(
                   icon: const Icon(Icons.cloud_download_outlined,
                       size: 20, color: Colors.white),
@@ -299,6 +326,60 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
       if (camera.printerIds.contains(p.id)) return p;
     }
     return null;
+  }
+
+  /// 拖动排序对话框: 拖手柄调整顺序, 保存写入存储顺序 (手动模式的顺序)。
+  Future<void> _showReorderDialog(BuildContext context) async {
+    final cameras =
+        ref.read(camerasProvider).valueOrNull ?? const <CameraProfile>[];
+    // 仅为拖动用的副本; removeAt/insert 原地改, 无需重新赋值。
+    final ordered = [...cameras];
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          backgroundColor: DeckColors.surface,
+          title: const Text('拖动排序'),
+          content: SizedBox(
+            width: 380,
+            height: 420,
+            child: ReorderableListView(
+              buildDefaultDragHandles: false,
+              onReorderItem: (o, n) {
+                final moved = ordered.removeAt(o);
+                ordered.insert(n, moved);
+                setD(() {});
+              },
+              children: [
+                for (var i = 0; i < ordered.length; i++)
+                  ListTile(
+                    key: ValueKey(ordered[i].id),
+                    leading: ReorderableDragStartListener(
+                      index: i,
+                      child: const Icon(Icons.drag_indicator, size: 18),
+                    ),
+                    title: Text(ordered[i].name,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text(ordered[i].sourceType.label,
+                        style: const TextStyle(fontSize: 11)),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('保存')),
+          ],
+        ),
+      ),
+    );
+    if (ok == true) {
+      await ref.read(camerasProvider.notifier).replaceAll(ordered);
+    }
   }
 }
 
@@ -689,6 +770,7 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
     rotationDeg: rotationDeg,
     ptzInvertPan: ptzInvertPan,
     ptzInvertTilt: ptzInvertTilt,
+    createdAt: DateTime.now().millisecondsSinceEpoch,
   );
   await ref.read(camerasProvider.notifier).add(camera);
 }

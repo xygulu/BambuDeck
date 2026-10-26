@@ -145,6 +145,7 @@ Future<void> showEditPrinterDialog(
           model: p.model,
           builtinCam: p.builtinCam,
           autoPlateSwap: autoPlateSwap,
+          createdAt: p.createdAt,
         )
       else
         p,

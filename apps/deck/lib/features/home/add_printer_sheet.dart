@@ -456,7 +456,8 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
       setState(() => _error = 'IP、序列号和访问码都不能为空');
       return;
     }
-    final id = 'p_${DateTime.now().millisecondsSinceEpoch}';
+    final stamp = DateTime.now().millisecondsSinceEpoch;
+    final id = 'p_$stamp';
     await ref.read(printersProvider.notifier).add(PrinterProfile(
           id: id,
           name: _nameCtrl.text.trim().isEmpty ? serial : _nameCtrl.text.trim(),
@@ -467,6 +468,7 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
           model: _lanModel == '其他/不确定'
               ? ''
               : (_lanModel ?? guessModelFromSerial(serial) ?? ''),
+          createdAt: stamp,
         ));
     if (mounted) Navigator.of(context).pop();
   }

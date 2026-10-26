@@ -4,8 +4,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/format.dart';
 import '../../core/theme.dart';
+import '../../data/app_settings.dart';
+import '../../data/list_sort.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
+import '../../data/settings_providers.dart';
 import '../../ui/widgets.dart';
 import '../dashboard/dashboard_page.dart';
 import '../printers/edit_printer_dialog.dart';
@@ -53,12 +56,16 @@ class _MonitorPageState extends ConsumerState<MonitorPage> {
         if (list.isEmpty) {
           return _EmptyState(onAdd: widget.onAddPrinter);
         }
+        // 列表排序 (2026-10-27): manual = 存储顺序 (可拖动), 其余是排序视图。
+        final settings =
+            ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
+        final sorted = sortPrinters(list, settings.printerSortMode);
         // Selection heals itself: a deleted printer falls back to the
         // first one so the right pane never goes blank on purpose.
         final selectedId =
             rawSelected != null && list.any((p) => p.id == rawSelected)
                 ? rawSelected
-                : list.first.id;
+                : sorted.first.id;
         return LayoutBuilder(builder: (context, constraints) {
           final wide = constraints.maxWidth >= _paneMinWidth;
           if (wide) {
@@ -68,7 +75,8 @@ class _MonitorPageState extends ConsumerState<MonitorPage> {
                 SizedBox(
                   width: _listWidth,
                   child: _PrinterList(
-                    printers: list,
+                    printers: sorted,
+                    sortMode: settings.printerSortMode,
                     selectedId: selectedId,
                     onAdd: widget.onAddPrinter,
                     onSelect: (id) => ref
@@ -93,7 +101,7 @@ class _MonitorPageState extends ConsumerState<MonitorPage> {
             // 卡片现在带完整状态详情 (2026-10-21), 放宽到更高的瓦片。
             childAspectRatio: 1.15,
             children: [
-              for (final p in list)
+              for (final p in sorted)
                 MonitorPrinterCard(
                   profile: p,
                   selected: p.id == selectedId,
@@ -115,12 +123,14 @@ class _MonitorPageState extends ConsumerState<MonitorPage> {
 class _PrinterList extends ConsumerWidget {
   const _PrinterList({
     required this.printers,
+    required this.sortMode,
     required this.selectedId,
     required this.onAdd,
     required this.onSelect,
   });
 
   final List<PrinterProfile> printers;
+  final ListSortMode sortMode;
   final String selectedId;
   final VoidCallback onAdd;
   final void Function(String id) onSelect;
@@ -137,6 +147,26 @@ class _PrinterList extends ConsumerWidget {
                 style: const TextStyle(
                     fontSize: 14, fontWeight: FontWeight.w700)),
             const Spacer(),
+            // 排序方式 (列表排序 2026-10-27): 手动模式下卡片带拖动手柄。
+            PopupMenuButton<ListSortMode>(
+              tooltip: '排序方式',
+              icon: const Icon(Icons.sort, size: 20),
+              onSelected: (m) {
+                final cur = ref.read(appSettingsProvider).valueOrNull ??
+                    const AppSettings();
+                ref.read(appSettingsProvider.notifier).set(
+                      cur.copyWith(printerSortMode: m),
+                    );
+              },
+              itemBuilder: (_) => [
+                for (final m in ListSortMode.values)
+                  CheckedPopupMenuItem(
+                    value: m,
+                    checked: m == sortMode,
+                    child: Text(m.label),
+                  ),
+              ],
+            ),
             IconButton(
               icon: const Icon(Icons.add, size: 20),
               tooltip: '添加打印机',
@@ -145,20 +175,61 @@ class _PrinterList extends ConsumerWidget {
           ]),
         ),
         Expanded(
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(10, 0, 10, 12),
-            children: [
-              for (final p in printers)
-                MonitorPrinterCard(
-                  profile: p,
-                  selected: p.id == selectedId,
-                  onTap: () => onSelect(p.id),
+          child: sortMode == ListSortMode.manual
+              ? ReorderableListView(
+                  padding: const EdgeInsets.fromLTRB(10, 0, 10, 12),
+                  buildDefaultDragHandles: false,
+                  onReorderItem: (oldI, newI) => _reorder(ref, oldI, newI),
+                  children: [
+                    for (var i = 0; i < printers.length; i++)
+                      _dragRow(context, i, printers[i],
+                          key: ValueKey(printers[i].id)),
+                  ],
+                )
+              : ListView(
+                  padding: const EdgeInsets.fromLTRB(10, 0, 10, 12),
+                  children: [
+                    for (final p in printers)
+                      MonitorPrinterCard(
+                        profile: p,
+                        selected: p.id == selectedId,
+                        onTap: () => onSelect(p.id),
+                      ),
+                  ],
                 ),
-            ],
-          ),
         ),
       ],
     );
+  }
+
+  /// 手动模式的一行: 拖动手柄 + 状态卡 (拖动手柄排序, 点卡片选择)。
+  Widget _dragRow(BuildContext context, int i, PrinterProfile p,
+          {required Key key}) =>
+      Row(key: key, children: [
+        ReorderableDragStartListener(
+          index: i,
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 1, vertical: 14),
+            child: Icon(Icons.drag_indicator,
+                size: 16, color: DeckColors.textSecondary),
+          ),
+        ),
+        Expanded(
+          child: MonitorPrinterCard(
+            profile: p,
+            selected: p.id == selectedId,
+            onTap: () => onSelect(p.id),
+          ),
+        ),
+      ]);
+
+  /// 拖动落点写入存储顺序并持久化 (顺序即手动排序结果;
+  /// onReorderItem 已修正移除元素后的落点下标, 直接插入即可)。
+  void _reorder(WidgetRef ref, int oldI, int newI) {
+    final items = [...printers];
+    final moved = items.removeAt(oldI);
+    items.insert(newI, moved);
+    ref.read(printersProvider.notifier).replaceAll(items);
   }
 }
 

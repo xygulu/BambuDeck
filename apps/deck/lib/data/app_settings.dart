@@ -19,6 +19,18 @@ enum KioskMode {
   KioskMode get next => KioskMode.values[(index + 1) % KioskMode.values.length];
 }
 
+/// 列表排序方式 (打印机列表 / 摄像头墙 2026-10-27)。manual = 存储顺序
+/// (手动拖动得出的顺序); 其余是对该顺序的实时排序视图, 不改存储。
+enum ListSortMode {
+  manual('手动拖动'),
+  name('按名称'),
+  type('按类型'),
+  addedTime('按加入时间');
+
+  const ListSortMode(this.label);
+  final String label;
+}
+
 /// User preferences (PRD FR-10). JSON blob in the same OS secure store as
 /// the printer list; everything defaults on so first run needs no setup.
 class AppSettings {
@@ -42,6 +54,8 @@ class AppSettings {
     this.hubToken = '',
     this.helperUrl = '',
     this.helperToken = '',
+    this.printerSortMode = ListSortMode.manual,
+    this.cameraSortMode = ListSortMode.manual,
   });
 
   final bool notifyOnFinish;
@@ -93,6 +107,10 @@ class AppSettings {
   final String helperUrl;
   final String helperToken;
 
+  /// 打印机列表 / 摄像头墙的排序方式 (2026-10-27)。
+  final ListSortMode printerSortMode;
+  final ListSortMode cameraSortMode;
+
   AppSettings copyWith({
     bool? notifyOnFinish,
     bool? notifyOnError,
@@ -113,6 +131,8 @@ class AppSettings {
     String? hubToken,
     String? helperUrl,
     String? helperToken,
+    ListSortMode? printerSortMode,
+    ListSortMode? cameraSortMode,
   }) =>
       AppSettings(
         notifyOnFinish: notifyOnFinish ?? this.notifyOnFinish,
@@ -134,6 +154,8 @@ class AppSettings {
         hubToken: hubToken ?? this.hubToken,
         helperUrl: helperUrl ?? this.helperUrl,
         helperToken: helperToken ?? this.helperToken,
+        printerSortMode: printerSortMode ?? this.printerSortMode,
+        cameraSortMode: cameraSortMode ?? this.cameraSortMode,
       );
 
   Map<String, dynamic> toJson() => {
@@ -156,6 +178,8 @@ class AppSettings {
         'hubToken': hubToken,
         'helperUrl': helperUrl,
         'helperToken': helperToken,
+        'printerSortMode': printerSortMode.name,
+        'cameraSortMode': cameraSortMode.name,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) => AppSettings(
@@ -180,6 +204,12 @@ class AppSettings {
         hubToken: j['hubToken'] as String? ?? '',
         helperUrl: j['helperUrl'] as String? ?? '',
         helperToken: j['helperToken'] as String? ?? '',
+        printerSortMode: ListSortMode.values.firstWhere(
+            (m) => m.name == j['printerSortMode'],
+            orElse: () => ListSortMode.manual),
+        cameraSortMode: ListSortMode.values.firstWhere(
+            (m) => m.name == j['cameraSortMode'],
+            orElse: () => ListSortMode.manual),
       );
 }
 

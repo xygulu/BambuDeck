@@ -200,6 +200,7 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
             name: d.name.isEmpty ? d.serial : d.name,
             sourceType: CameraSourceType.rtsp,
             url: url,
+            createdAt: DateTime.now().millisecondsSinceEpoch,
           ));
       added.add(d.name.isEmpty ? d.serial : d.name);
     }

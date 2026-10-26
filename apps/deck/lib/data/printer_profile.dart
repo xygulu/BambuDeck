@@ -23,6 +23,7 @@ class PrinterProfile {
     this.model = '',
     this.builtinCam = BuiltinCamSetting.follow,
     this.autoPlateSwap = false,
+    this.createdAt = 0,
   });
 
   final String id;
@@ -52,6 +53,10 @@ class PrinterProfile {
   /// 自动换盘): shows the 一键换盘 button that prints the bundled swap model
   /// (its tail gcode shakes the print off and ejects the plate).
   final bool autoPlateSwap;
+
+  /// 加入时间 (毫秒时间戳, 列表排序 2026-10-27)。0 = 本功能之前的旧条目,
+  /// 视为最早且彼此保持原有顺序, 免迁移。
+  final int createdAt;
 
   String get modeLabel => mode == PrinterMode.lan ? '局域网' : '云端';
 
@@ -83,6 +88,7 @@ class PrinterProfile {
         'model': model,
         'builtinCam': builtinCam.name,
         'autoPlateSwap': autoPlateSwap,
+        'createdAt': createdAt,
       };
 
   factory PrinterProfile.fromJson(Map<String, dynamic> j) => PrinterProfile(
@@ -103,6 +109,7 @@ class PrinterProfile {
                 orElse: () => BuiltinCamSetting.follow)
             : BuiltinCamSetting.follow,
         autoPlateSwap: j['autoPlateSwap'] as bool? ?? false,
+        createdAt: j['createdAt'] as int? ?? 0,
       );
 
   BambuMqttConfig toMqttConfig() => mode == PrinterMode.lan
