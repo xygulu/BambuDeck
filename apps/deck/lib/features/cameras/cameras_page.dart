@@ -271,8 +271,24 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                   const TextStyle(fontSize: 13, color: DeckColors.textSecondary),
             ),
           ),
-        if (linked != null)
-          Positioned(left: 8, top: 8, child: FeedStatusChip(printer: linked)),
+        // 绑定了几个打印机就挂几枚状态角标 (多对多绑定 2026-10-26),
+        // 竖排在左上角; 机内摄像头只绑一台, 自然只有一枚。
+        if (printers.any((p) => camera.printerIds.contains(p.id)))
+          Positioned(
+            left: 8,
+            top: 8,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final p in printers)
+                  if (camera.printerIds.contains(p.id))
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: FeedStatusChip(printer: p),
+                    ),
+              ],
+            ),
+          ),
       ]),
     );
   }
