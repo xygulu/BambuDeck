@@ -238,17 +238,39 @@ class _CameraListCard extends StatelessWidget {
 
 /// Right pane: selected camera's live feed first, bound printers' status
 /// cards below; tapping a card jumps to the printer perspective.
-class _CameraPane extends ConsumerWidget {
+/// 点画面放大占满本栏 (隐藏绑定卡), 缩小回「画面 + 打印机信息」排布
+/// (2026-10-26 放大缩小需求)。放大态支持捏合/滚轮缩放拖移, 缩到阈值
+/// 以下松手即回原排布。
+class _CameraPane extends ConsumerStatefulWidget {
   const _CameraPane({required this.cameraId});
 
   final String cameraId;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_CameraPane> createState() => _CameraPaneState();
+}
+
+class _CameraPaneState extends ConsumerState<_CameraPane> {
+  bool _zoomed = false;
+  final _transform = TransformationController();
+
+  @override
+  void dispose() {
+    _transform.dispose();
+    super.dispose();
+  }
+
+  void _exitZoom() {
+    _transform.value = Matrix4.identity();
+    setState(() => _zoomed = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final cameras = ref.watch(camerasProvider).valueOrNull ?? const [];
     CameraProfile? camera;
     for (final c in cameras) {
-      if (c.id == cameraId) camera = c;
+      if (c.id == widget.cameraId) camera = c;
     }
     if (camera == null) return const Center(child: Text('摄像头不存在'));
     final c = camera;
@@ -265,6 +287,27 @@ class _CameraPane extends ConsumerWidget {
       }
     }
     final url = c.resolveUrl(linked);
+    final hasFeed = c.enabled && url != null && url.isNotEmpty;
+
+    final feed = hasFeed
+        ? VisibleOnlyTile(
+            key: ValueKey(c.id),
+            streamId: c.id,
+            child: CameraTile(
+              streamUrl: url,
+              showLabel: false,
+              cameraId: c.id,
+              frameSlot: _zoomed ? 'monitor-pane-zoom' : 'monitor-pane',
+              onToggleQuality: qualityToggler(ref, c),
+              flipH: c.flipH,
+              rotationDeg: c.rotationDeg,
+              ptzInvertPan: c.ptzInvertPan,
+              ptzInvertTilt: c.ptzInvertTilt,
+              onToggleFlip: flipToggler(ref, c),
+              onSetRotation: rotationSetter(ref, c),
+            ),
+          )
+        : _unavailableBox(c, url);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -290,60 +333,97 @@ class _CameraPane extends ConsumerWidget {
           ]),
         ),
         Expanded(
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-            children: [
-              c.enabled && url != null && url.isNotEmpty
-                  ? VisibleOnlyTile(
-                      key: ValueKey(c.id),
-                      streamId: c.id,
-                      child: CameraTile(
-                        streamUrl: url,
-                        showLabel: false,
-                        cameraId: c.id,
-                        frameSlot: 'monitor-pane',
-                        onToggleQuality: qualityToggler(ref, c),
-                        flipH: c.flipH,
-                        rotationDeg: c.rotationDeg,
-                        ptzInvertPan: c.ptzInvertPan,
-                        ptzInvertTilt: c.ptzInvertTilt,
-                        onToggleFlip: flipToggler(ref, c),
-                        onSetRotation: rotationSetter(ref, c),
+          child: _zoomed
+              ? ClipRRect(
+                  borderRadius: BorderRadius.circular(14),
+                  child: Stack(fit: StackFit.expand, children: [
+                    InteractiveViewer(
+                      transformationController: _transform,
+                      minScale: 0.5,
+                      maxScale: 6.0,
+                      onInteractionEnd: (_) {
+                        if (_transform.value.getMaxScaleOnAxis() < 0.85) {
+                          _exitZoom();
+                        }
+                      },
+                      child: Container(color: Colors.black, child: feed),
+                    ),
+                    Positioned(
+                      left: 10,
+                      bottom: 10,
+                      child: IconButton.filledTonal(
+                        icon: const Icon(Icons.close_fullscreen, size: 18),
+                        tooltip: '缩小',
+                        onPressed: _exitZoom,
                       ),
-                    )
-                  : _unavailableBox(c, url),
-              const Padding(
-                padding: EdgeInsets.only(top: 14, bottom: 6),
-                child: Text('绑定的打印机',
-                    style:
-                        TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-              ),
-              for (final p in bound)
-                MonitorPrinterCard(
-                  profile: p,
-                  selected: false,
-                  onTap: () {
-                    ref.read(monitorSelectedPrinterProvider.notifier).state =
-                        p.id;
-                    ref.read(monitorPerspectiveProvider.notifier).state =
-                        MonitorPerspective.printers;
-                  },
+                    ),
+                  ]),
+                )
+              : ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                  children: [
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: hasFeed ? () => setState(() => _zoomed = true) : null,
+                      child: Stack(children: [
+                        feed,
+                        if (hasFeed)
+                          Positioned(
+                            left: 10,
+                            bottom: 10,
+                            child: _zoomHintPill(),
+                          ),
+                      ]),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.only(top: 14, bottom: 6),
+                      child: Text('绑定的打印机',
+                          style: TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600)),
+                    ),
+                    for (final p in bound)
+                      MonitorPrinterCard(
+                        profile: p,
+                        selected: false,
+                        onTap: () {
+                          ref
+                              .read(monitorSelectedPrinterProvider.notifier)
+                              .state = p.id;
+                          ref
+                              .read(monitorPerspectiveProvider.notifier)
+                              .state = MonitorPerspective.printers;
+                        },
+                      ),
+                    if (bound.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8),
+                        child: Text(
+                          '未绑定打印机 - 点右上「绑定打印机」选择要一起监控的打印机',
+                          style: TextStyle(
+                              fontSize: 12, color: DeckColors.textSecondary),
+                        ),
+                      ),
+                  ],
                 ),
-              if (bound.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 8),
-                  child: Text(
-                    '未绑定打印机 - 点右上「绑定打印机」选择要一起监控的打印机',
-                    style: TextStyle(
-                        fontSize: 12, color: DeckColors.textSecondary),
-                  ),
-                ),
-            ],
-          ),
         ),
       ],
     );
   }
+
+  /// 「放大」提示胶囊 - 裸图标太隐蔽 (摄像头 tab 用户实测找不到入口)。
+  Widget _zoomHintPill() => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.55),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.open_in_full,
+              size: 12, color: Colors.white.withValues(alpha: 0.9)),
+          const SizedBox(width: 4),
+          const Text('放大', style: TextStyle(fontSize: 11, color: Colors.white)),
+        ]),
+      );
 
   Widget _unavailableBox(CameraProfile c, String? url) => ClipRRect(
         borderRadius: BorderRadius.circular(14),

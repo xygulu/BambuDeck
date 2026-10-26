@@ -11,10 +11,12 @@ import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 import '../../data/rtsp_scanner.dart';
 import '../../ui/camera_tile.dart';
+import '../monitor/overview_wall.dart';
 
 /// Cameras tab body (PRD FR-3): a wall of live tiles that auto-fits the
-/// screen, tap a feed to zoom it to fill the page, pinch / scroll to zoom
-/// and pan the enlarged picture, 缩小 returns to the wall.
+/// screen, tap a feed (或左下「放大」胶囊) to zoom it to fill the page,
+/// pinch / scroll to zoom and pan the enlarged picture, 缩到阈值以下松手
+/// (或缩小按钮) 回到自动排布的墙。
 class CamerasPage extends ConsumerStatefulWidget {
   const CamerasPage({super.key, required this.onAdd});
 
@@ -29,6 +31,18 @@ class CamerasPage extends ConsumerStatefulWidget {
 class _CamerasPageState extends ConsumerState<CamerasPage> {
   /// Id of the feed zoomed to fill the page; null shows the wall.
   String? _zoomedId;
+  final _zoomTransform = TransformationController();
+
+  @override
+  void dispose() {
+    _zoomTransform.dispose();
+    super.dispose();
+  }
+
+  void _exitZoom() {
+    _zoomTransform.value = Matrix4.identity();
+    setState(() => _zoomedId = null);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -88,16 +102,7 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
       final n = list.length;
       final w = box.maxWidth > 0 ? box.maxWidth : 1.0;
       final h = box.maxHeight > 0 ? box.maxHeight : 1.0;
-      var bestCols = 1;
-      var bestErr = double.infinity;
-      for (var cols = 1; cols <= n; cols++) {
-        final rows = (n / cols).ceil();
-        final err = ((w / cols) / (h / rows) / (16 / 9) - 1).abs();
-        if (err < bestErr) {
-          bestErr = err;
-          bestCols = cols;
-        }
-      }
+      final bestCols = bestFitColumns(n, w, h);
       final rows = (n / bestCols).ceil();
       return Padding(
         padding: const EdgeInsets.all(12),
@@ -123,7 +128,9 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
     });
   }
 
-  /// One wall cell: the feed fills the cell, tap to zoom.
+  /// One wall cell: the feed fills the cell, tap / double-tap / 左下
+  /// 「放大」胶囊 to zoom; 绑定打印机时左上角挂状态角标 (缩小态的
+  /// 「其他打印机信息」)。
   Widget _wallCell(CameraProfile camera, List<PrinterProfile> printers) {
     final linked = _linkedPrinter(camera, printers);
     final url = camera.resolveUrl(linked);
@@ -132,6 +139,7 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: () => setState(() => _zoomedId = camera.id),
+        onDoubleTap: () => setState(() => _zoomedId = camera.id),
         child: Stack(fit: StackFit.expand, children: [
           if (url != null && camera.enabled)
             CameraTile(
@@ -156,11 +164,25 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                     fontSize: 13, color: DeckColors.textSecondary),
               ),
             ),
+          if (linked != null)
+            Positioned(left: 8, top: 8, child: FeedStatusChip(printer: linked)),
           Positioned(
             left: 8,
             bottom: 8,
-            child: Icon(Icons.open_in_full,
-                size: 13, color: Colors.white.withValues(alpha: 0.75)),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.55),
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.open_in_full,
+                    size: 12, color: Colors.white.withValues(alpha: 0.9)),
+                const SizedBox(width: 4),
+                const Text('放大',
+                    style: TextStyle(fontSize: 11, color: Colors.white)),
+              ]),
+            ),
           ),
         ]),
       ),
@@ -191,7 +213,7 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
           IconButton.filledTonal(
             icon: const Icon(Icons.close_fullscreen, size: 18),
             tooltip: '缩小',
-            onPressed: () => setState(() => _zoomedId = null),
+            onPressed: _exitZoom,
           ),
         ]),
       ),
@@ -200,33 +222,52 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(14),
-            child: InteractiveViewer(
-              minScale: 1.0,
-              maxScale: 6.0,
-              child: Container(
-                color: Colors.black,
-                child: url != null && camera.enabled
-                    ? CameraTile(
-                        streamUrl: url,
-                        label: camera.name,
-                        expand: true,
-                        onToggleQuality: qualityToggler(ref, camera),
-                        cameraId: camera.id,
-                        frameSlot: 'cameras-zoom',
-                        flipH: camera.flipH,
-                        rotationDeg: camera.rotationDeg,
-                        ptzInvertPan: camera.ptzInvertPan,
-                        ptzInvertTilt: camera.ptzInvertTilt,
-                      )
-                    : Center(
-                        child: Text(
-                          !camera.enabled ? '已停用' : '未配置视频源',
-                          style: const TextStyle(
-                              fontSize: 14, color: DeckColors.textSecondary),
+            child: Stack(fit: StackFit.expand, children: [
+              InteractiveViewer(
+                transformationController: _zoomTransform,
+                // minScale < 1: 捏合/滚轮缩到 0.85 以下松手 = 退出放大,
+                // 自动回到排布好的墙 (2026-10-26 缩小需求)。
+                minScale: 0.5,
+                maxScale: 6.0,
+                onInteractionEnd: (_) {
+                  if (_zoomTransform.value.getMaxScaleOnAxis() < 0.85) {
+                    _exitZoom();
+                  }
+                },
+                child: Container(
+                  color: Colors.black,
+                  child: url != null && camera.enabled
+                      ? CameraTile(
+                          streamUrl: url,
+                          label: camera.name,
+                          expand: true,
+                          onToggleQuality: qualityToggler(ref, camera),
+                          cameraId: camera.id,
+                          frameSlot: 'cameras-zoom',
+                          flipH: camera.flipH,
+                          rotationDeg: camera.rotationDeg,
+                          ptzInvertPan: camera.ptzInvertPan,
+                          ptzInvertTilt: camera.ptzInvertTilt,
+                        )
+                      : Center(
+                          child: Text(
+                            !camera.enabled ? '已停用' : '未配置视频源',
+                            style: const TextStyle(
+                                fontSize: 14, color: DeckColors.textSecondary),
+                          ),
                         ),
-                      ),
+                ),
               ),
-            ),
+              Positioned(
+                left: 10,
+                bottom: 10,
+                child: IconButton.filledTonal(
+                  icon: const Icon(Icons.close_fullscreen, size: 18),
+                  tooltip: '缩小',
+                  onPressed: _exitZoom,
+                ),
+              ),
+            ]),
           ),
         ),
       ),

@@ -12,6 +12,10 @@ import '../../data/settings_providers.dart';
 import '../../ui/camera_tile.dart';
 import '../../ui/visible_tile.dart';
 import '../cameras/cameras_page.dart';
+import '../monitor/monitor_page.dart'
+    show MonitorPerspective, monitorPerspectiveProvider,
+        monitorSelectedPrinterProvider;
+import '../monitor/overview_wall.dart';
 
 /// Single source of truth for the built-in camera default-load choice of
 /// one printer: the persisted per-printer tri-state. The card switch, the
@@ -372,11 +376,10 @@ class _OpenBuiltinTile extends StatelessWidget {
   }
 }
 
-/// Camera wall for the compact monitoring pane (反馈 2026-10-20): the
-/// printer's feeds arranged into the best-fitting grid for the available
-/// space so everything fits one screen regardless of camera count.
-/// Tapping a feed zooms it to fill the pane; the 缩小 button (or nothing
-/// else - the wall is gone while zoomed) returns to the grid.
+/// Camera area for the compact monitoring pane. 缩小态 = 总览墙
+/// ([OverviewWall]: 所有打印机机内画面 + 所有启用摄像头 + 无画面打印机
+/// 状态卡, 2026-10-26 需求「缩小时自动显示其他打印机和摄像头画面信息」),
+/// 点任意画面放大占满本栏, 缩小回总览; 放大态隐藏头部行让画面占满。
 class CameraWallSection extends ConsumerStatefulWidget {
   const CameraWallSection({super.key, required this.profileId});
 
@@ -387,8 +390,7 @@ class CameraWallSection extends ConsumerStatefulWidget {
 }
 
 class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
-  /// Id of the zoomed feed; null shows the grid.
-  String? _zoomedId;
+  bool _zoomed = false;
 
   @override
   Widget build(BuildContext context) {
@@ -399,199 +401,27 @@ class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
         if (p.id == widget.profileId) p,
     ];
     if (matches.isEmpty) return const SizedBox.shrink();
-    // Final local so the promoted non-null type survives into the
-    // closures below (LayoutBuilder builder, button callbacks).
     final profile = matches.first;
-    final settings =
-        ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
-    final specs = buildCameraSpecs(ref, profile);
-    final builtinOfferable = profile.mode == PrinterMode.lan &&
-        !profile.builtinCamDefaultOn(settings.builtinCamDefault);
-
-    CameraTileSpec? zoomed;
-    if (_zoomedId != null) {
-      for (final s in specs) {
-        if (s.id == _zoomedId) zoomed = s;
-      }
-      if (zoomed == null) {
-        // Zoom target vanished (unbound/disabled) - fall back to the wall.
-        _zoomedId = null;
-      }
-    }
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (zoomed == null)
-            cameraSectionHeader(context, ref, profile)
-          else
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(children: [
-                Text(zoomed.label,
-                    style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600)),
-              ]),
-            ),
+          if (!_zoomed) cameraSectionHeader(context, ref, profile),
           Expanded(
-            child: zoomed != null
-                ? _zoomedView(zoomed)
-                : LayoutBuilder(
-                    builder: (context, box) =>
-                        _wall(context, box, profile, specs, builtinOfferable)),
+            child: OverviewWall(
+              frameSlot: 'dash-overview',
+              onZoomChanged: (z) => setState(() => _zoomed = z),
+              onSelectPrinter: (id) {
+                ref.read(monitorSelectedPrinterProvider.notifier).state = id;
+                ref.read(monitorPerspectiveProvider.notifier).state =
+                    MonitorPerspective.printers;
+              },
+            ),
           ),
         ],
       ),
-    );
-  }
-
-  /// Grid with the column count whose cell aspect lands closest to 16:9,
-  /// so the wall always uses the whole pane however many cameras there
-  /// are (反馈 2026-10-20 自动缩放).
-  Widget _wall(BuildContext context, BoxConstraints box, PrinterProfile profile,
-      List<CameraTileSpec> specs, bool builtinOfferable) {
-    final cells = <Widget>[
-      if (builtinOfferable)
-        ClipRRect(
-          borderRadius: BorderRadius.circular(14),
-          child: Container(
-            color: Colors.black,
-            alignment: Alignment.center,
-            child: FilledButton.tonalIcon(
-              onPressed: () => setBuiltinCam(ref, profile, true),
-              icon: const Icon(Icons.videocam_outlined, size: 18),
-              label: const Text('打开机内摄像头'),
-            ),
-          ),
-        ),
-      for (final spec in specs) _cell(spec),
-    ];
-    if (cells.isEmpty) {
-      return Center(
-        child: Text(
-          '暂无画面 - 点右上角添加摄像头,或在绑定设置里开启机内摄像头',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-              fontSize: 12,
-              color: DeckColors.textSecondary.withValues(alpha: 0.9)),
-        ),
-      );
-    }
-
-    final n = cells.length;
-    final w = box.maxWidth > 0 ? box.maxWidth : 1.0;
-    final h = box.maxHeight > 0 ? box.maxHeight : 1.0;
-    var bestCols = 1;
-    var bestErr = double.infinity;
-    for (var cols = 1; cols <= n; cols++) {
-      final r = (n / cols).ceil();
-      final err = ((w / cols) / (h / r) / (16 / 9) - 1).abs();
-      if (err < bestErr) {
-        bestErr = err;
-        bestCols = cols;
-      }
-    }
-    final rows = (n / bestCols).ceil();
-
-    return Column(
-      children: [
-        for (var r = 0; r < rows; r++)
-          Expanded(
-            child: Row(
-              children: [
-                for (var i = r * bestCols; i < (r + 1) * bestCols && i < n; i++)
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.all(4),
-                      child: cells[i],
-                    ),
-                  ),
-                // Invisible spacers keep the last (partial) row's cells the
-                // same width as the rows above.
-                for (var i = n; i < (r + 1) * bestCols; i++)
-                  const Expanded(child: SizedBox()),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-
-  /// One wall cell: the feed filling the cell, tap to zoom.
-  Widget _cell(CameraTileSpec spec) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(14),
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: () => setState(() => _zoomedId = spec.id),
-        child: Stack(fit: StackFit.expand, children: [
-          VisibleOnlyTile(
-            key: ValueKey(spec.id),
-            streamId: spec.id,
-            child: CameraTile(
-              streamUrl: spec.url,
-              label: spec.label,
-              expand: true,
-              cameraId: spec.id,
-              frameSlot: 'dash-zoom',
-              onToggleQuality: spec.onToggleQuality,
-              flipH: spec.flipH,
-              rotationDeg: spec.rotationDeg,
-              ptzInvertPan: spec.ptzInvertPan,
-              ptzInvertTilt: spec.ptzInvertTilt,
-              onToggleFlip: spec.onToggleFlip,
-              onSetRotation: spec.onSetRotation,
-            ),
-          ),
-          Positioned(
-            // Bottom-left: bottom-right is the PTZ pad's spot.
-            left: 8,
-            bottom: 8,
-            child: Icon(Icons.open_in_full,
-                size: 13, color: Colors.white.withValues(alpha: 0.75)),
-          ),
-        ]),
-      ),
-    );
-  }
-
-  /// Zoomed feed filling the pane, with a shrink button back to the wall.
-  Widget _zoomedView(CameraTileSpec spec) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(14),
-      child: Stack(fit: StackFit.expand, children: [
-        VisibleOnlyTile(
-          key: ValueKey(spec.id),
-          streamId: spec.id,
-          child: CameraTile(
-            streamUrl: spec.url,
-            label: spec.label,
-            expand: true,
-            cameraId: spec.id,
-            frameSlot: 'dash-zoom2',
-            onToggleQuality: spec.onToggleQuality,
-            flipH: spec.flipH,
-            rotationDeg: spec.rotationDeg,
-            ptzInvertPan: spec.ptzInvertPan,
-            ptzInvertTilt: spec.ptzInvertTilt,
-            onToggleFlip: spec.onToggleFlip,
-            onSetRotation: spec.onSetRotation,
-          ),
-        ),
-        Positioned(
-          // Bottom-left: top-right is the quality chip, bottom-right the
-          // PTZ pad.
-          left: 10,
-          bottom: 10,
-          child: IconButton.filledTonal(
-            icon: const Icon(Icons.close_fullscreen, size: 18),
-            tooltip: '缩小',
-            onPressed: () => setState(() => _zoomedId = null),
-          ),
-        ),
-      ]),
     );
   }
 }
