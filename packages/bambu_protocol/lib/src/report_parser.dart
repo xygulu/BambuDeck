@@ -244,11 +244,10 @@ BambuState parsePrintSection(Map<dynamic, dynamic> print_,
 
   // ---- AMS ------------------------------------------------------------------
   // Frame-level keep: a frame without an ams section reuses the last parsed
-  // AMS state whole (per-tray merging is future work). The external spool
-  // (`vt_tray`) is a sibling of `ams` at the print level, so a frame carrying
-  // only vt_tray must still re-parse (and not be treated as "no AMS at all").
+  // AMS state whole. Partial frames (only vt_tray, or ams without the unit
+  // list) merge per-section inside _parseAms — 空小节不再是「没有 AMS」。
   final ams = has('ams') || has('vt_tray')
-      ? _parseAms(print_, snowAmsId, snowTrayIdx)
+      ? _parseAms(print_, snowAmsId, snowTrayIdx, previous?.ams)
       : previous?.ams;
 
   // ---- calibration job flags -------------------------------------------------
@@ -309,20 +308,41 @@ BambuState parsePrintSection(Map<dynamic, dynamic> print_,
   );
 }
 
-AmsState? _parseAms(Map<dynamic, dynamic> print_, int snowAmsId, int snowTrayIdx) {
+/// 解析 AMS 小节。固件的 `ams` 小节是**增量**的：外部料卷余量变化只推
+/// `vt_tray`、进料换槽只推 `ams.tray_now`，两 种帧都不带 unit 列表 —— 直接
+/// 解析会得到空 units，页面整块闪成「未检测到 AMS」(2026-10-27 稳定性整改)。
+/// 所以凡是这一帧没报的部分，都沿用 [previous]：
+///   - 没有 unit 列表 → 整体沿用 previous.units；
+///   - unit 在但 `tray` 数组缺失/为空 → 料盘沿用 previous 同 id unit；
+///   - 没有 `vt_tray` 且也不带 unit 列表（部分帧）→ 沿用 previous.vtTray；
+///     带 unit 列表（全量帧）时没有就是真没有（外部料卷被取下）。
+AmsState? _parseAms(
+    Map<dynamic, dynamic> print_, int snowAmsId, int snowTrayIdx,
+    [AmsState? previous]) {
   final raw = print_['ams'];
+  final prevUnits = previous?.units ?? const <AmsUnit>[];
   final units = <AmsUnit>[];
+  var haveUnitList = false;
   if (raw is Map) {
     final rawUnits = raw['ams'] ?? raw['unit'];
     if (rawUnits is List) {
+      haveUnitList = true;
       for (final u in rawUnits) {
         if (u is! Map) continue;
         final id = _intOr(u['id'], units.length);
-        final trays = <AmsTray>[];
+        var trays = <AmsTray>[];
         final rawTrays = u['tray'];
         if (rawTrays is List) {
           for (final t in rawTrays) {
             trays.add(_parseTray(t));
+          }
+        }
+        // 这帧没报料盘就别把上次的数据抹掉（拔掉整个 AMS 时 unit 会从
+        // 列表里消失，不会只清空 tray 数组）。
+        if (trays.isEmpty) {
+          final prev = prevUnits.where((x) => x.id == id).toList();
+          if (prev.isNotEmpty && prev.first.trays.isNotEmpty) {
+            trays = prev.first.trays;
           }
         }
         units.add(AmsUnit(
@@ -336,6 +356,7 @@ AmsState? _parseAms(Map<dynamic, dynamic> print_, int snowAmsId, int snowTrayIdx
       }
     }
   }
+  if (!haveUnitList) units.addAll(prevUnits);
 
   // External spool (virtual tray) sits at the PRINT level (`print.vt_tray`),
   // NOT inside `print.ams` (后者没有这个键, 2026-10-23 实测)。
@@ -344,6 +365,8 @@ AmsState? _parseAms(Map<dynamic, dynamic> print_, int snowAmsId, int snowTrayIdx
   if (rawVt is Map) {
     final t = _parseTray(rawVt);
     if (t.present) vtTray = t;
+  } else if (!haveUnitList) {
+    vtTray = previous?.vtTray; // 部分帧：没报就是没变
   }
 
   // Active tray: snow (what the nozzle is actually feeding) wins,

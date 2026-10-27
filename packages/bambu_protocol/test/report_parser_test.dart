@@ -192,6 +192,71 @@ void main() {
     });
   });
 
+  group('parseReport - AMS partial frames keep last state', () {
+    // 固件的 AMS 小节是增量的：这些帧过去会把 units 清空、页面闪成
+    // 「未检测到 AMS」(2026-10-27)。每条用例都先解析 P1 全量帧做 previous。
+    test('vt_tray-only frame keeps previous units', () {
+      final base = parseReport(jsonDecode(_idleReport))!;
+      final next = parseReport(
+        jsonDecode(
+            '{"print": {"vt_tray": {"tray_type": "PLA", "tray_color": '
+            '"ABCDEF01", "remain": 66}}}'),
+        previous: base,
+      )!;
+      final ams = next.ams!;
+      expect(ams.units, hasLength(1));
+      expect(ams.units.first.trays, hasLength(4));
+      expect(ams.vtTray, isNotNull);
+      expect(ams.vtTray!.remain, 66);
+    });
+
+    test('ams without unit list keeps units, refreshes tray_now', () {
+      final base = parseReport(jsonDecode(_idleReport))!;
+      expect(base.ams!.activeSource, ActiveTraySource.trayNow);
+      final next = parseReport(
+        jsonDecode('{"print": {"ams": {"tray_now": "3"}}}'),
+        previous: base,
+      )!;
+      final ams = next.ams!;
+      expect(ams.units, hasLength(1));
+      expect(ams.units.first.trays, hasLength(4));
+      expect(ams.activeSource, ActiveTraySource.trayNow);
+      expect(ams.activeTrayId, 0);
+      expect(ams.activeTrayIndex, 3);
+    });
+
+    test('unit present with empty tray array keeps previous trays', () {
+      final base = parseReport(jsonDecode(_idleReport))!;
+      final next = parseReport(
+        jsonDecode('{"print": {"ams": {"tray_now": "1", "ams": '
+            '[{"id": "0", "humidity": "4", "humidity_raw": "42", '
+            '"temp": "26.5"}]}}}'),
+        previous: base,
+      )!;
+      final unit = next.ams!.units.single;
+      expect(unit.trays, hasLength(4)); // 这帧没报料盘，沿用上一帧
+      expect(unit.humidityRaw, 42); // 报了的部分用新值
+      expect(unit.tempC, 26.5);
+    });
+
+    test('full unit list without vt_tray drops the external spool', () {
+      final base = parseReport(jsonDecode(_vtTrayReport))!;
+      expect(base.ams!.vtTray, isNotNull);
+      final next = parseReport(jsonDecode(_idleReport), previous: base)!;
+      expect(next.ams!.units, hasLength(1));
+      expect(next.ams!.vtTray, isNull);
+    });
+
+    test('explicit empty unit list is authoritative', () {
+      final base = parseReport(jsonDecode(_runningReport))!;
+      final next = parseReport(
+        jsonDecode('{"print": {"ams": {"ams": []}}}'),
+        previous: base,
+      )!;
+      expect(next.ams!.units, isEmpty);
+    });
+  });
+
   group('edge cases', () {
     test('rejects non-print envelopes', () {
       expect(parseReport('not json'), isNull);
