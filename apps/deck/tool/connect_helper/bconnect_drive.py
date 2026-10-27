@@ -307,9 +307,12 @@ def _percent_items(items: list[dict]) -> list[dict]:
 def _speed_trigger() -> dict | None:
     """控制面板里那个「速度图标 + NN%」的触发器。
 
-    实测（2026-10-26, A1 打印中）：控制面板一行是 [速度 124%] [LED灯] [热床]，
-    打印进度百分比在页面更上面。所以用「LED灯」锚定行、取同行最近的那个
-    百分比 —— 不能只看值（100% 可能是打印进度）。
+    实测（2026-10-27 复核, A1 打印中）：控制条还是 [速度 NN%] [LED灯] [热床]
+    一行，速度百分比就在 **LED灯 同一行**、它左边 ~120px —— 行锚定仍是对的。
+    真正的干扰项是**打印进度环的百分比**（会经过任意值，任务完成时恰好 100%，
+    和「标准」档撞车）——所以只认 LED 行，绝不裸看值。LED行没读到百分比多半是
+    Electron 把数字文本懒加载掉了（「跳过」在、数字不在），靠 set_speed 里的
+    视觉兜底救。
     """
     items = ax.text_items()
     pcts = _percent_items(items)
@@ -323,6 +326,22 @@ def _speed_trigger() -> dict | None:
     # 没有 LED灯（老版本/英文界面没渲染）: 值是档位百分比且只有一个才认。
     known = [c for c in pcts if c["value"] in set(_SPEED_PCT.values())]
     return known[0] if len(known) == 1 else None
+
+
+def _on_device_page(name: str) -> bool:
+    """Connect 当前详情页是不是 name 这台机器。
+
+    设备页头部是「<机名> 在线」同一行。不校验会拿**别的机器**页面上那颗
+    （可能已禁用的）调速按钮当目标 —— 任务打完的机器控制条直接禁用
+    （「仅在打印过程中有效」），点了永远弹不出菜单（2026-10-27 嘉兴实测）。
+    """
+    items = ax.text_items()
+    online = next((t for t in items if t["text"].strip() in ("在线", "Online")),
+                  None)
+    if not online:
+        return False
+    return any(t["text"].strip() == name and abs(_cy(t) - _cy(online)) <= 12
+               for t in items)
 
 
 def _speed_menu() -> list[dict]:
@@ -353,6 +372,42 @@ def _wait_menu(timeout: float) -> list[dict]:
         prev = m or None
         time.sleep(0.2)
     return _speed_menu()
+
+
+def _ocr_rows() -> list[dict]:
+    """对当前截图(SHOT)跑本地 OCR，返回 [{t,x,y,w,h}]（坐标=屏幕像素）。
+
+    Electron 的 AX 文本层会懒加载甚至阶段性掏空（菜单刚弹出时尤其常见），
+    本地 Vision OCR 不依赖 AX，是读「画面上到底有什么」的兜底。
+    """
+    try:
+        import bconnect_print as bp  # 借它管 deck_ocr 的编译/路径（避免环依赖放函数内）
+
+        binp = bp._ocr_bin()
+        if not binp:
+            return []
+        r = subprocess.run([binp, shot()], capture_output=True, text=True,
+                           timeout=15)
+        out = []
+        for ln in r.stdout.splitlines():
+            try:
+                out.append(json.loads(ln))
+            except ValueError:
+                continue
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _menu_from_ocr() -> list[dict]:
+    """OCR 版档位菜单项：AX 读不到菜单时的几何兜底（和 _speed_menu 同构）。"""
+    out = []
+    for d in _ocr_rows():
+        t = (d.get("t") or "").strip()
+        if t in _SPEED_NAMES and d.get("w", 0) > 0:
+            out.append({"text": t, "pos": [float(d["x"]), float(d["y"])],
+                        "size": [float(d["w"]), float(d["h"])]})
+    return out
 
 
 def _close_speed_menu() -> bool:
@@ -417,9 +472,18 @@ def set_speed(identifier: str, level: int) -> dict:
                 "printer": name, "serial": serial,
                 "elapsed": round(time.time() - t0, 2), "steps": steps}
 
+    # Connect 没在跑时 AX 全空、activate 也无效 —— 先确保它在跑（print 流程同款）。
+    try:
+        import bconnect_print as bp
+
+        bp.ensure_app(timeout=10)
+    except Exception:  # noqa: BLE001
+        pass  # 起不来不在这报错，后面各步会给出具体原因
+
     ax.enable_ax()
-    # 档位在详情页；已经在详情页就别乱点列表（少一次跳转）。
-    trig = _speed_trigger()
+    # 档位在详情页；页面正是这台机才直接用，否则（连"有控件"都是别的机器的）
+    # 先导航过去。已经在详情页就别乱点列表（少一次跳转）。
+    trig = _speed_trigger() if _on_device_page(name) else None
     if not trig:
         _enter(name)
         deadline = time.time() + 4.0
@@ -427,21 +491,29 @@ def set_speed(identifier: str, level: int) -> dict:
             time.sleep(0.12)
     mark("enter")
     if not trig:
+        # AX 数字文本懒加载时上面全空（「跳过」在、百分比不在 —— Electron 老毛病）。
+        # 置前 + 视觉兜底：点名「LED灯 左边」防抓到打印进度环的百分比。
+        activate_connect()
+        time.sleep(0.4)
+        shot()
+        c = vis.ask_coords(SHOT, "打印控制条里 LED灯 文字左边的速度百分比"
+                                 "（图标+NN%，例如 100%）。不是打印进度环的百分比")
+        if c:
+            trig = {"text": "?%", "pos": [float(c[0]), float(c[1])],
+                    "size": [0.0, 0.0]}
+    if not trig:
         return {"ok": False,
                 "error": "%s 的设备页上没找到调速控件（Connect 版本或页面不同？）"
                          % name,
                 "printer": name, "serial": serial,
                 "elapsed": round(time.time() - t0, 2), "steps": steps}
 
-    # 触发器上的百分比就是当前档位（spd_mag），已经是这一档就不用点。
+    # 触发器上的百分比只是展示（spd_mag），滞后 10-20s —— 不能拿它判
+    # 「已经是这一档」（会把刚点过的旧档当成当前档直接跳过点击）。
+    # 权威预检在 service 层用 LAN spd_lvl 做过了，这里一律照点。
     m = _PCT_RX.match(trig["text"].strip())
     before = int(m.group(1)) if m else None
     want = _SPEED_PCT[level]
-    if before == want:
-        return {"ok": True, "command": "speed", "level": level,
-                "printer": name, "serial": serial, "method": "already",
-                "from": trig["text"].strip(), "to": trig["text"].strip(),
-                "elapsed": round(time.time() - t0, 2), "steps": steps}
 
     # 1) 点开档位菜单。刚激活 Connect 时第一次注入点击可能被窗口还没 key 吞掉，
     #    所以失败就再点一次（不用固定 sleep）。
@@ -451,7 +523,7 @@ def set_speed(identifier: str, level: int) -> dict:
         if attempt == 2:
             trig = _speed_trigger() or trig
         ax.click_at(*_ctr(trig))
-        menu = _wait_menu(wait)
+        menu = _wait_menu(wait) or _menu_from_ocr()
         if menu:
             break
     mark("open")
@@ -461,7 +533,7 @@ def set_speed(identifier: str, level: int) -> dict:
         c = vis.ask_coords(SHOT, "控制栏里的速度百分比（例如 100%）")
         if c:
             ax.click_at(*c)
-            menu = _wait_menu(2.0)
+            menu = _wait_menu(2.0) or _menu_from_ocr()
     if not menu:
         return {"ok": False,
                 "error": "%s 的调速菜单点不开（Connect 窗口没在前台，或不在打印中?）"
@@ -484,13 +556,21 @@ def set_speed(identifier: str, level: int) -> dict:
             time.sleep(0.3)  # 等下拉进场动画落定
             ax.click_at(*_ctr(opts[0]))
         else:
-            shot()
-            c = vis.ask_coords(SHOT, target)
-            if not c:
-                return {"ok": False, "error": "档位菜单里没找到「%s」" % target,
-                        "printer": name, "serial": serial,
-                        "elapsed": round(time.time() - t0, 2), "steps": steps}
-            ax.click_at(*c)
+            # 本地 OCR 兜底（AX 读不到菜单项时；比云视觉快且不出图）。
+            ocr_menu = [t for t in _menu_from_ocr()
+                        if t["text"].strip() in
+                        (_SPEED_LABELS[level][0], _SPEED_LABELS[level][1])]
+            if ocr_menu:
+                time.sleep(0.3)  # 等下拉进场动画落定
+                ax.click_at(*_ctr(ocr_menu[0]))
+            else:
+                shot()
+                c = vis.ask_coords(SHOT, target)
+                if not c:
+                    return {"ok": False, "error": "档位菜单里没找到「%s」" % target,
+                            "printer": name, "serial": serial,
+                            "elapsed": round(time.time() - t0, 2), "steps": steps}
+                ax.click_at(*c)
         time.sleep(0.4)
         if not _speed_menu():
             delivered = True

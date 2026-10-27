@@ -657,16 +657,20 @@ class LogPage extends StatelessWidget {
               ? const Center(
                   child: Text('暂无日志',
                       style: TextStyle(color: DeckColors.textSecondary)))
-              : ListView.builder(
-                  padding: const EdgeInsets.all(12),
-                  itemCount: lines.length,
-                  itemBuilder: (context, i) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 1),
-                    child: Text(lines[i],
-                        style: const TextStyle(
-                            fontSize: 11,
-                            fontFamily: 'monospace',
-                            color: DeckColors.textSecondary)),
+              // SelectionArea：鼠标可以划选任意几行/半行，⌘C 或右键拷贝；
+              // 右上角「复制全部」按钮保留（2026-10-27）。
+              : SelectionArea(
+                  child: ListView.builder(
+                    padding: const EdgeInsets.all(12),
+                    itemCount: lines.length,
+                    itemBuilder: (context, i) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 1),
+                      child: Text(lines[i],
+                          style: const TextStyle(
+                              fontSize: 11,
+                              fontFamily: 'monospace',
+                              color: DeckColors.textSecondary)),
+                    ),
                   ),
                 );
         },

@@ -177,6 +177,78 @@ def lan_control(serial: str, command: str) -> dict:
             "error": "%s 超时（打印机局域网无响应，可能离线或 8883 卡死）" % command}
 
 
+def current_speed_level(serial: str, wait: float = 5.0) -> int | None:
+    """云 pushall 读 spd_lvl —— 权威当前档位（帧到早退，实测 ~2s）。
+
+    Connect 界面的百分比要 10~20s 才刷新，拿它判「已经是这一档」会用旧值
+    误判（2026-10-27 实测：运动→标准 被滞后的 100% 骗成 already）。
+    局域网 report 只有稀疏心跳帧（温度/wifi，没 spd_lvl），完整帧走云端。
+    None = 读不到（离线/超时），调用方自行退化。
+    """
+    box: dict = {}
+    ev = threading.Event()
+
+    def worker() -> None:
+        import ssl as _ssl
+        import uuid as _uuid
+
+        import paho.mqtt.client as _mqtt
+
+        c = None
+        try:
+            token = cloud.load_session()
+            uid = cloud.resolve_uid(token)
+            if not uid:
+                return
+            c = _mqtt.Client(_mqtt.CallbackAPIVersion.VERSION1,
+                             client_id="spd" + _uuid.uuid4().hex[:8],
+                             protocol=_mqtt.MQTTv311)
+            c.username_pw_set("u_" + uid, token)
+            c.tls_set_context(_ssl.create_default_context())
+
+            def on_connect(cl, _u, _f, _rc):
+                cl.subscribe("device/%s/report" % serial, qos=0)
+                cl.publish("device/%s/request" % serial,
+                           json.dumps({"pushing": {"sequence_id": "99002",
+                                                   "command": "pushall"}}), qos=0)
+
+            def on_message(_cl, _u, m):
+                if ev.is_set():
+                    return
+                try:
+                    p = (json.loads(m.payload) or {}).get("print") or {}
+                except Exception:  # noqa: BLE001
+                    return
+                lvl = p.get("spd_lvl")
+                if lvl is not None:
+                    try:
+                        box["lvl"] = int(lvl)
+                    except (TypeError, ValueError):
+                        pass
+                    ev.set()
+
+            c.on_connect = on_connect
+            c.on_message = on_message
+            c.connect(cloud.MQTT_HOST, cloud.MQTT_PORT, 30)
+            c.loop_start()
+            ev.wait(wait)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            # 只 disconnect()：loop_stop 会 join 网络线程，卡在 stalled
+            # CONNACK 上会把服务挂死（LAN MQTT 踩过的坑，云上同防）。
+            try:
+                if c is not None:
+                    c.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(wait + 3)
+    return box.get("lvl")
+
+
 def _lan_command(ip: str, code: str, serial: str, command: str,
                  box: dict, conn_timeout: float = 6.0,
                  ack_timeout: float = 4.0) -> None:
@@ -437,10 +509,32 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         cmd = _COMMAND_ALIASES.get(command, command)
+        global _BUSY
         mutating = cmd in ("print", "pause", "resume", "stop", "speed")
-        if mutating and not _BUSY.acquire(blocking=False):
-            self._send(409, {"ok": False, "error": "已有命令在执行，请稍后重试"})
-            return
+        if mutating:
+            # print 抢锁失败就别排了（后面 check 阶段也会因冲突失败）；
+            # 控制/调速撞上换盘（~7-15s）时等一把再上，比直接 409 可用性好。
+            if not _BUSY.acquire(timeout=0 if cmd == "print" else 20):
+                self._send(409, {"ok": False, "error": "已有命令在执行，请稍后重试"})
+                return
+        if cmd == "speed":
+            # 权威预检：云 pushall 的 spd_lvl 就是当前档位（~2s）。已在这档
+            # 直接返回，连 Connect 窗口都不弹；界面百分比滞后 10-20s，不可信。
+            try:
+                want = int(params.get("level"))
+            except (TypeError, ValueError):
+                want = 0
+            cur = current_speed_level(serial) if want in (1, 2, 3, 4) else None
+            if cur is not None and cur == want:
+                dev = cloud.resolve_device(serial) or {}
+                self._send(200, {
+                    "ok": True, "command": "speed", "level": want,
+                    "printer": dev.get("name") or serial, "serial": serial,
+                    "method": "already", "from": "%d档" % cur,
+                    "to": "%d档" % cur, "confirmed": True,
+                    "elapsed": 0.0, "steps": {"cloud_precheck": True},
+                })
+                return
         # 打印和调速都要真实鼠标点击（Connect 是 Electron，档位下拉/百分比不是
         # AXButton，AXPress 点不动），点像素坐标必须 Connect 在最前；控制按钮走
         # AXPress，后台也能按，省掉两次 osascript 前台查询/还原（~0.3s）。
@@ -448,15 +542,55 @@ class Handler(BaseHTTPRequestHandler):
         prev = _frontmost_app() if need_click else None
         if need_click:
             _activate_connect()
-        try:
-            res = dispatch(serial, command, params)
-        except Exception as e:  # noqa: BLE001
-            res = {"ok": False, "error": str(e)}
-        finally:
-            if mutating:
-                _BUSY.release()
-            _restore_frontmost(prev)
+        # 看门狗：dispatch 全链路都有界，但真机见过命令卡 10+ 分钟把锁占死、
+        # 之后所有命令全 409（2026-10-27）。daemon 线程跑 dispatch，超时就
+        # 弃线程、换新锁，服务绝不陪葬。print 整流程最慢（导入等待+任务落库）
+        # 给 300s，其余 120s。
+        budget = 300.0 if cmd == "print" else 120.0
+        box: dict = {}
+        held = _BUSY if mutating else None
 
+        def _run() -> None:
+            try:
+                box["res"] = dispatch(serial, command, params)
+            except Exception as e:  # noqa: BLE001
+                box["res"] = {"ok": False, "error": str(e)}
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(budget)
+        if t.is_alive():
+            _BUSY = threading.Lock()  # 僵尸线程抱着旧锁，服务换新锁继续
+            res = {"ok": False,
+                   "error": "命令 %s 执行超过 %ds 没有返回，已放弃（服务已解锁）"
+                            % (command, int(budget))}
+            print("[watchdog] %s %s 超时被弃" % (serial, command), flush=True)
+        else:
+            res = box.get("res") or {"ok": False, "error": "命令无返回结果"}
+        try:
+            if held is not None and held is _BUSY:
+                held.release()
+        except Exception:  # noqa: BLE001
+            pass
+        _restore_frontmost(prev)
+
+        if cmd == "speed":
+            if res.get("ok"):
+                # 权威确认：spd_lvl 变了才算数；没变则保留「未确认」提示
+                # （界面/机器回传都有滞后，交给调用方的 awaitSpeedLevel 兜底）。
+                after = current_speed_level(serial, wait=4)
+                if after is not None:
+                    res["confirmed"] = (after == res.get("level"))
+                    if res["confirmed"]:
+                        res.pop("note", None)
+                    else:
+                        res["spd_lvl_now"] = after
+            # 调速步骤只活在返回 JSON 里，之前日志里啥都不留，出问题没法查。
+            print("[speed] %s L%s ok=%s method=%s confirmed=%s elapsed=%s err=%s"
+                  % (serial, params.get("level"), res.get("ok"),
+                     res.get("method"), res.get("confirmed"),
+                     res.get("elapsed"), res.get("error") or "-"),
+                  flush=True)
         self._send(200 if res.get("ok") else 502, res)
 
 

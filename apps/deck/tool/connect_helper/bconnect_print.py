@@ -795,8 +795,11 @@ def run(path: str, stop_before_send: bool = False,
     # SILENT：导入弹窗已出现（Connect 自己弹到了最前），立刻把焦点压回用户原来的 app。
     if SILENT:
         _restore_frontmost(frontmost)
-    if not press_text("导入Gcode"):
-        if not press_desc("confirm"):
+    # desc=confirm 是这颗按钮稳定的英文标识（发送/导入共用）；新弹层的按钮
+    # **标题**要几秒才进 AX 树（Electron 懒序列化），按标题点会白重试 ~5s 才
+    # 落到 desc 兜底 —— 所以 desc 先行（2026-10-27 换盘导入 5s 优化）。
+    if not press_desc("confirm"):
+        if not press_text("导入Gcode"):
             result["error"] = "导入弹窗里点不到「导入Gcode 3MF文件」"
             rec("click-import", False, result["error"])
             return result
