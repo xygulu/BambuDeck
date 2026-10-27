@@ -44,6 +44,11 @@ Future<void> main(List<String> args) async {
     plateSwapFile: resolvePlateSwap(),
   );
 
+  // 服务状态页的隧道全链路探测地址 (2026-10-27): GET 一次 = CF 边缘 →
+  // 隧道 → 本机 8787 整条链路都验过。可用 HUB_TUNNEL_URL 覆盖, 置空串跳过。
+  service.hub.tunnelProbeUrl =
+      env('HUB_TUNNEL_URL').isNotEmpty ? env('HUB_TUNNEL_URL') : 'https://bambu.miller.ink';
+
   await service.start();
   if (!service.hub.running) {
     LogBuffer.instance.add('[独立服务] 端口 ${service.hub.settings.hubPort} '

@@ -10,6 +10,7 @@ import 'app_settings.dart';
 import 'bambu_mjpeg.dart';
 import 'bambu_mjpeg_hub.dart';
 import 'camera_profile.dart';
+import 'cloud_print_helper.dart';
 import 'hub_ptz.dart';
 import 'log_buffer.dart';
 import 'printer_profile.dart';
@@ -621,6 +622,13 @@ class HubServer {
   /// 立刻跟着变; 网页端自己那一路 `<audio>` 也按这个开关启停。
   Future<void> Function(bool muted)? muteHandler;
 
+  /// 服务状态 (2026-10-27): `/api/health` 会 GET 这条公网地址, 走 CF 边缘
+  /// 进隧道再回本机, 一发探测整条链路。空 = 跳过隧道项 (App 内置网页服务
+  /// 不注入; 独立 deck_hub 由 bin/hub.dart 按环境变量 HUB_TUNNEL_URL 给)。
+  String tunnelProbeUrl = '';
+
+  DateTime? _startedAt;
+
   /// 云台: 网页方向键经这里驱动 ONVIF / HCNetSDK。可注入假客户端测试。
   HubPtz ptz = HubPtz();
 
@@ -662,6 +670,7 @@ class HubServer {
       return;
     }
     final srv = _server!;
+    _startedAt ??= DateTime.now();
     _log('[网页] 网页访问已开启: http://0.0.0.0:${srv.port}'
         ' (token 见设置)');
     srv.listen(_handle, onError: (Object e) => _log('[网页] $e'));
@@ -738,6 +747,10 @@ class HubServer {
           await _handleCamera(req);
         case '/api/ptz':
           await _handlePtz(req);
+        case '/api/health':
+          req.response.headers.contentType = ContentType.json;
+          req.response.write(jsonEncode(await _healthSnapshot()));
+          await req.response.close();
         default:
           final m = RegExp(r'^/stream/([^/]+)$').firstMatch(path);
           final am = RegExp(r'^/audio/([^/]+)$').firstMatch(path);
@@ -761,6 +774,85 @@ class HubServer {
   bool _checkToken(HttpRequest req) {
     final t = settings.hubToken;
     return t.isNotEmpty && req.uri.queryParameters['token'] == t;
+  }
+
+  // -- health (服务状态 2026-10-27) ---------------------------------------
+  //
+  // 四项自检给网页端的「服务」chip: hub 自身 / 控制 helper / cloudflared
+  // 进程 / 隧道全链路。token 鉴权与 /api/state 相同。数值字段机器读,
+  // detail 是稳定枚举串, 中文展示由页面翻译。三项探测并发跑, 总耗时 =
+  // 最慢一项; 每项都有界, 接口最迟 ~6s 必答。
+
+  Future<Map<String, dynamic>> _healthSnapshot() async {
+    final results = await Future.wait([
+      _checkHelper(),
+      _checkCloudflared(),
+      _checkTunnel(),
+    ]);
+    final up = _startedAt;
+    return <String, dynamic>{
+      'hub': <String, dynamic>{
+        'ok': true,
+        if (up != null) 'uptimeSec': DateTime.now().difference(up).inSeconds,
+      },
+      'helper': results[0],
+      'cloudflared': results[1],
+      'tunnel': results[2],
+    };
+  }
+
+  Future<Map<String, dynamic>> _checkHelper() async {
+    try {
+      final ok = await CloudPrintHelper.instance
+          .health()
+          .timeout(const Duration(seconds: 6));
+      return {'ok': ok, 'detail': ok ? 'online' : 'no_response'};
+    } catch (_) {
+      return {'ok': false, 'detail': 'no_response'};
+    }
+  }
+
+  Future<Map<String, dynamic>> _checkCloudflared() async {
+    // 单次 pgrep 会把 KeepAlive 崩溃循环里的瞬时进程误判成「运行中」
+    // (每 5s 拉起、秒退), 芯片就忽绿忽红。隔 1.5s 采两次, 两次都在才算
+    // 稳定运行; 第一次就不在直接判停。
+    Future<bool> once() async {
+      final r = await Process.run('pgrep', const <String>['-x', 'cloudflared'])
+          .timeout(const Duration(seconds: 3));
+      return r.exitCode == 0;
+    }
+
+    try {
+      final a = await once();
+      if (!a) return {'ok': false, 'detail': 'stopped'};
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      final b = await once();
+      return {'ok': b, 'detail': b ? 'running' : 'stopped'};
+    } catch (_) {
+      // 非 macOS/Unix 或 pgrep 不可用 (App 内置服务也可能跑在 Windows)。
+      return {'ok': null, 'detail': 'unknown'};
+    }
+  }
+
+  Future<Map<String, dynamic>> _checkTunnel() async {
+    if (tunnelProbeUrl.isEmpty) {
+      return {'ok': null, 'detail': 'not_configured'};
+    }
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+    try {
+      final req = await client
+          .getUrl(Uri.parse(tunnelProbeUrl))
+          .timeout(const Duration(seconds: 6));
+      final res = await req.close().timeout(const Duration(seconds: 6));
+      final code = res.statusCode;
+      await res.drain<void>().timeout(const Duration(seconds: 2));
+      final ok = code >= 200 && code < 300;
+      return {'ok': ok, 'detail': 'http_$code'};
+    } catch (_) {
+      return {'ok': false, 'detail': 'unreachable'};
+    } finally {
+      client.close(force: true);
+    }
   }
 
   // -- actions ----------------------------------------------------------

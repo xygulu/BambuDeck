@@ -82,6 +82,31 @@
   .conn.bad i { background: var(--error); }
   #clock { font-size: 12px; color: var(--text2); font-variant-numeric: tabular-nums; }
 
+  /* 服务状态 chip (2026-10-27): 与 .conn 同款圆点语言, 点击看四项详情。 */
+  .svc {
+    display: flex; align-items: center; gap: 6px;
+    border: 0; background: transparent; color: var(--text2);
+    font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer;
+    padding: 4px 6px; border-radius: 8px;
+  }
+  .svc:hover, .svc:active { background: rgba(255, 255, 255, .07); color: var(--text); }
+  .svc i { width: 7px; height: 7px; border-radius: 50%; background: var(--text2); }
+  .svc.ok i { background: var(--running); }
+  .svc.bad i { background: var(--error); }
+  .svc:focus-visible { outline: 2px solid var(--running); outline-offset: 1px; }
+  .svc-row {
+    display: flex; align-items: baseline; gap: 10px; padding: 9px 2px;
+    border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .svc-row:last-child { border-bottom: 0; }
+  .svc-row i { width: 8px; height: 8px; border-radius: 50%; background: var(--text2); flex: none; }
+  .svc-row.ok i { background: var(--running); }
+  .svc-row.bad i { background: var(--error); }
+  .svc-row .k { width: 150px; flex: none; color: var(--text); }
+  .svc-row .v { color: var(--text2); flex: 1; min-width: 0; }
+  .svc-checked { font-size: 12px; color: var(--text2); padding: 2px 2px 10px; }
+  .svc-checked a { color: var(--prepare); text-decoration: none; }
+
   main { max-width: 1600px; margin: 0 auto; }
   section { display: none; }
   body[data-tab="printers"] #s-printers { display: block; }
@@ -741,6 +766,9 @@
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
   </button>
   <span class="conn" id="conn"><i></i><span class="txt">连接中…</span></span>
+  <button class="svc" id="svc" type="button" aria-label="服务状态" title="服务状态">
+    <i></i><span class="txt">服务</span>
+  </button>
   <span id="clock"></span>
 </header>
 
@@ -963,7 +991,7 @@ function showHms(p) {
   $('modal').classList.add('show');
 }
 
-function closeModal() { $('modal').classList.remove('show'); }
+function closeModal() { $('modal').classList.remove('show'); svcModalOpen = false; }
 $('modal-close').addEventListener('click', closeModal);
 $('modal').addEventListener('click', e => { if (e.target === $('modal')) closeModal(); });
 document.addEventListener('keydown', e => {
@@ -2329,7 +2357,94 @@ async function boot() {
     apply(await r.json());
   } catch (_) { /* ws 重连会给出连接状态 */ }
   if (!ws) connect();
+  refreshSvc();
 }
+
+// ---- 服务状态 (2026-10-27): hub / helper / cloudflared / 隧道 四项自检。
+// 30 秒一查 (页面可见时), 芯片给总览红绿, 点击弹四项详情。
+let svcData = null;
+let svcModalOpen = false;
+const SVC_LABELS = {
+  hub: '网页服务', helper: '控制 helper',
+  cloudflared: 'cloudflared 进程', tunnel: '隧道 bambu.miller.ink',
+};
+async function refreshSvc() {
+  if (document.visibilityState !== 'visible') return;
+  try {
+    const r = await fetch(api('/api/health'));
+    if (!r.ok) return;
+    svcData = await r.json();
+    renderSvc();
+  } catch (_) {}
+}
+function svcCls(ok) { return ok === true ? 'ok' : ok === false ? 'bad' : 'warn'; }
+function fmtUp(sec) {
+  if (sec < 90) return sec + ' 秒';
+  if (sec < 5400) return Math.round(sec / 60) + ' 分钟';
+  return (sec / 3600).toFixed(1) + ' 小时';
+}
+function svcText(k, s) {
+  if (k === 'hub') {
+    if (!s) return '未知';
+    const up = s.uptimeSec ? ' · 已运行 ' + fmtUp(s.uptimeSec) : '';
+    return '运行中' + up;
+  }
+  if (!s) return '未知';
+  switch (s.detail) {
+    case 'online': return '在线 (127.0.0.1:8799)';
+    case 'no_response': return '无响应(没在跑或端口不通)';
+    case 'running': return '进程运行中';
+    case 'stopped': return '进程未运行(反复重启起不来, 查 launchd 日志)';
+    case 'unknown': return '无法探测(非 macOS 或缺少 pgrep)';
+    case 'not_configured': return '未配置探测地址';
+    case 'unreachable': return '无响应(DNS/网络异常或隧道断开)';
+    default:
+      if (String(s.detail).startsWith('http_')) {
+        const code = String(s.detail).slice(5);
+        return s.ok ? 'HTTP ' + code + ' · 隧道全链路通'
+                    : 'HTTP ' + code + '(Cloudflare 报隧道不可达 → 查本机 cloudflared)';
+      }
+      return String(s.detail);
+  }
+}
+function renderSvc() {
+  if (!svcData) return;
+  const keys = Object.keys(SVC_LABELS);
+  const down = keys.filter(k => svcData[k] && svcData[k].ok === false);
+  const chip = $('svc');
+  chip.classList.remove('ok', 'bad');
+  chip.classList.add(down.length ? 'bad' : 'ok');
+  chip.title = down.length
+    ? '服务异常: ' + down.map(k => SVC_LABELS[k]).join('、')
+    : '服务全部正常';
+  if (svcModalOpen) renderSvcModal();
+}
+function openSvcModal() {
+  svcModalOpen = true;
+  $('modal-title').textContent = '服务状态';
+  renderSvcModal();
+  $('modal').classList.add('show');
+}
+function renderSvcModal() {
+  const rows = Object.keys(SVC_LABELS).map(k => {
+    const s = svcData && svcData[k];
+    const cls = svcCls(s && s.ok);
+    return `<div class="svc-row ${cls}"><i></i><span class="k">${SVC_LABELS[k]}</span>` +
+      `<span class="v">${esc(svcText(k, s))}</span></div>`;
+  }).join('');
+  const head = svcData
+    ? `<div class="svc-checked">检查于 ${new Date().toLocaleTimeString()} · ` +
+      `<a href="#" id="svc-retry">重新检查</a></div>`
+    : '<div class="svc-checked">正在检查…</div>';
+  $('modal-body').innerHTML = head + rows;
+  const retry = $('svc-retry');
+  if (retry) retry.addEventListener('click', e => {
+    e.preventDefault();
+    refreshSvc();
+  });
+}
+$('svc').addEventListener('click', openSvcModal);
+setInterval(refreshSvc, 30000);
 /* iPhone 壳 (DeckShell) 会注入 deckServer 消息桥。只有桥在的时候才露出
    齿轮 —— 浏览器和 Mac App 没有这个桥, 改服务器地址走 App 自己的设置。 */
 (function () {

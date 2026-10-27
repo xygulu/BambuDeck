@@ -165,6 +165,43 @@ void main() {
       expect(bad.statusCode, 401);
     });
 
+    test('/api/health reports hub self, skips unconfigured tunnel',
+        () async {
+      hub.settings = hubSettings();
+      await hub.start();
+      final res = await get('/api/health');
+      expect(res.statusCode, 200);
+      final m =
+          jsonDecode(await res.transform(utf8.decoder).join())
+              as Map<String, dynamic>;
+      expect((m['hub'] as Map)['ok'], true);
+      expect((m['hub'] as Map)['uptimeSec'], isA<int>());
+      // tunnelProbeUrl 未注入 → 隧道项如实报「未配置」, 不误报成挂了。
+      expect((m['tunnel'] as Map)['ok'], isNull);
+      expect((m['tunnel'] as Map)['detail'], 'not_configured');
+      expect((m['helper'] as Map)['ok'], isA<bool>());
+      expect((m['cloudflared'] as Map)['detail'],
+          isIn(['running', 'stopped', 'unknown']));
+    });
+
+    test('/api/health probes the configured tunnel URL end to end',
+        () async {
+      final probe = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      probe.listen((rq) {
+        rq.response.write('ok');
+        rq.response.close();
+      });
+      addTearDown(probe.close);
+      hub.tunnelProbeUrl = 'http://127.0.0.1:${probe.port}';
+      hub.settings = hubSettings();
+      await hub.start();
+      final m = jsonDecode(await (await get('/api/health'))
+          .transform(utf8.decoder)
+          .join()) as Map<String, dynamic>;
+      expect((m['tunnel'] as Map)['ok'], true);
+      expect((m['tunnel'] as Map)['detail'], 'http_200');
+    });
+
     // 令牌由用户在设置里自定义: hub 每个请求都读 settings, 改完不用重启服务。
     test('a user-defined token applies without restarting the server',
         () async {
