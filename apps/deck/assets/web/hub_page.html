@@ -431,7 +431,11 @@
   /* 画面放大 */
   #zoom {
     position: fixed; inset: 0; z-index: 25; background: rgba(0,0,0,.9);
-    display: none; align-items: center; justify-content: center; padding: 16px;
+    display: none; align-items: center; justify-content: center;
+    /* iPhone 全面屏开了 viewport-fit=cover, 16px 固定内边距会让画面伸到
+       Home 指示条/工具栏底下被截 (反馈 2026-10-27: 放大显示不完全)。 */
+    padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px))
+             max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
     overflow: hidden;
   }
   #zoom.show { display: flex; }
@@ -439,8 +443,18 @@
     max-width: 100%; max-height: 100%; object-fit: contain;
     background: #000; border-radius: 10px; cursor: zoom-out;
   }
-  /* 90/270° 时画面绕中心转了 90°, 用视口的高宽互换后再放得下。 */
+  /* 90/270° 时画面绕中心转了 90°, 用视口的高宽互换后再放得下。
+     dvh/dvw 跟随 Safari 工具栏收放, 比 vh/vw 更贴近 inset:0 的实际可用区。 */
   #zoom .shot.rot { max-width: calc(100vh - 32px); max-height: calc(100vw - 32px); }
+  @supports (height: 100dvh) {
+    #zoom .shot.rot { max-width: calc(100dvh - 32px); max-height: calc(100dvw - 32px); }
+  }
+  /* 手机上墙里的芯片改成 static 排在格子下面; 放大层里没有「下面」,
+     必须仍浮在画面右上 —— 不然会变成 flex 兄弟节点把画面挤到一边
+     (反馈 2026-10-27: 放大显示不完全)。#zoom 自带 safe-area 内边距,
+     这里相对它的 padding box 定位, 别再加 env() 免得双份。 */
+  #zoom .camchips { position: absolute; padding: 0; top: 8px; right: 8px; }
+  #zoom .camchips .chip { white-space: nowrap; }
 
   /* 状态占位 */
   .placeholder {
@@ -1935,8 +1949,13 @@ function paintCam() {
   for (const img of document.querySelectorAll('canvas[data-cam]')) {
     const c = byCam(img.dataset.cam);
     if (!c) continue;
-    img.style.transform = camTransform(c);
-    img.classList.toggle('rot', c.rotation === 90 || c.rotation === 270);
+    // 墙里 16:9 格子装不下转了 90° 的画面 (footprint 竖过来会超高, 被格子
+    // overflow:hidden 裁掉近一半): 补一个 9/16 缩小让整幅落回格子。
+    // 放大层的 canvas 不在 .camview 里, 走自己的 .rot 高宽互换, 不受影响。
+    const rot90 = c.rotation === 90 || c.rotation === 270;
+    const wallScale = img.closest('.camview') && rot90 ? ' scale(0.5625)' : '';
+    img.style.transform = camTransform(c) + wallScale;
+    img.classList.toggle('rot', rot90);
   }
   // 云台盘和画面用同一个变换: 方向键跟着画面一起旋转/翻转。
   for (const pad of document.querySelectorAll('.ptz[data-cam]')) {
@@ -2120,6 +2139,12 @@ $('zoom').addEventListener('click', e => {
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && $('zoom').classList.contains('show')) closeZoom();
+});
+// iOS Safari 的双指捏合放大的是**整个页面**, fixed 的放大层会跟视觉视口
+// 错位, 画面被截成一块。放大层开着时拦掉页面捏合 —— 想看细节点墙里格子
+// 进放大层就是最大尺寸; 点背景或画面退出。
+document.addEventListener('gesturestart', e => {
+  if ($('zoom').classList.contains('show')) e.preventDefault();
 });
 
 /* ---------------- 控制动作 ---------------- */
