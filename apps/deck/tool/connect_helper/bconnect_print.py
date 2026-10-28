@@ -44,8 +44,10 @@ JSON 输出契约（--json）:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -66,10 +68,17 @@ import bconnect_ax as ax  # noqa: E402
 import bconnect_cloud as cloud  # noqa: E402
 
 
+_IS_WIN = os.name == "nt"  # Windows 移植 (2026-10-28): 进程探测/启动走 tasklist/exe
+
+
 # ---------------------------------------------------------------- 应用控制
 def _frontmost_app() -> str | None:
     """当前最前 app 名。SILENT 模式下 Connect 收到 deep link 会自己弹到最前，
     用它把焦点还给用户原来的 app。"""
+    if _IS_WIN:
+        # Windows 不做焦点还原: helper 面向无人值守 console 会话 (autologon),
+        # 没有「用户原来的 app」可还; RDP 在看的场景焦点被 Connect 拿走无伤大雅。
+        return None
     r = subprocess.run(
         ["osascript", "-e",
          'tell application "System Events" to get name of first process '
@@ -80,16 +89,13 @@ def _frontmost_app() -> str | None:
 
 def _restore_frontmost(prev: str | None) -> None:
     """把焦点还给 prev（若不是 Connect）。绝不抛异常。"""
-    if not prev or prev == APP:
+    if _IS_WIN or not prev or prev == APP:
         return
     try:
         subprocess.run(["osascript", "-e", 'tell application "%s" to activate' % prev],
                        capture_output=True, text=True, timeout=30)
     except Exception:  # noqa: BLE001
         pass
-
-
-_IS_WIN = os.name == "nt"  # Windows 移植 (2026-10-28): 进程探测/启动走 tasklist/exe
 
 
 def app_running() -> bool:
@@ -264,8 +270,13 @@ def open_deeplink(path: str, name: str | None = None) -> str:
     url = "bambu-connect://import-file?path=%s&name=%s&version=1.0.0" % (
         urllib.parse.quote(os.path.abspath(path), safe=""),
         urllib.parse.quote(name, safe=""))
-    # SILENT 时 -g 后台打开（不抢焦点）；否则默认前台激活 Connect。
-    subprocess.run(["open", "-g", url] if SILENT else ["open", url], check=False)
+    if _IS_WIN:
+        # Windows: scheme 已注册 (HKCU\Software\Classes\bambu-connect,
+        # 2026-10-29 实测), startfile 即 ShellExecute url, 会顺带激活 Connect。
+        os.startfile(url)  # noqa: S606
+    else:
+        # SILENT 时 -g 后台打开（不抢焦点）；否则默认前台激活 Connect。
+        subprocess.run(["open", "-g", url] if SILENT else ["open", url], check=False)
     return url
 
 
@@ -305,9 +316,40 @@ _DROP_OPEN_DELTA = 4.0
 
 def _activate_connect() -> bool:
     """把 Connect 置前（SILENT 模式下仅在选机这几秒临时置前，选完还原焦点）。"""
+    if _IS_WIN:
+        return ax.activate()
     r = subprocess.run(["osascript", "-e", 'tell application "%s" to activate' % APP],
                        capture_output=True, text=True, timeout=30)
     return r.returncode == 0
+
+
+def _screen_mean_win(x: int, y: int, w: int, h: int) -> float | None:
+    """Windows 版亮度采样: PIL ImageGrab 一次截矩形; PIL 缺失退 GDI GetPixel
+    稀采样 (步长 3, 150x50 矩形 ~830 点, 判开合足够)。坐标系是物理像素
+    (bconnect_uia 导入时已声明 DPI 感知), 与 UIA 矩形一致。"""
+    try:
+        from PIL import ImageGrab
+        img = ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True)
+        hist = img.convert("L").histogram()
+        total = sum(i * v for i, v in enumerate(hist))
+        n = sum(hist)
+        return total / n if n else None
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        gdi32 = ctypes.windll.gdi32
+        hdc = ctypes.windll.user32.GetDC(0)
+        total = cnt = 0
+        for yy in range(y, min(y + h, y + 60), 3):
+            for xx in range(x, x + w, 3):
+                c = gdi32.GetPixel(hdc, xx, yy) & 0xFFFFFF
+                total += ((c & 0xFF) * 114 + ((c >> 8) & 0xFF) * 587
+                          + ((c >> 16) & 0xFF) * 299) // 1000
+                cnt += 1
+        ctypes.windll.user32.ReleaseDC(0, hdc)
+        return total / cnt if cnt else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _screen_mean(x: int, y: int, w: int, h: int) -> float | None:
@@ -315,8 +357,11 @@ def _screen_mean(x: int, y: int, w: int, h: int) -> float | None:
 
     为什么需要：下拉是 JS 浮层，AX 树里完全看不到（展开前后树结构一模一样），
     而刚切到发送页时注入的点击会被吞掉（浮层不出现）。与其猜 sleep 多长，不如
-    用「展开前后这块矩形亮度变了没有」做确定性判断。截图为 BMP，纯 Python 解码。
+    用「展开前后这块矩形亮度变了没有」做确定性判断。macOS 截图为 BMP，纯
+    Python 解码；Windows 走 PIL/GDI。
     """
+    if _IS_WIN:
+        return _screen_mean_win(x, y, w, h)
     path = os.path.join(tempfile.gettempdir(), "bc_probe.bmp")
     try:
         subprocess.run(["screencapture", "-x", "-R", "%d,%d,%d,%d" % (x, y, w, h),
@@ -431,13 +476,61 @@ def _match_row(rows: list[tuple[str, int, int]],
     return fuzzy[0] if len(fuzzy) == 1 else None
 
 
+def _ocr_rows_win(group: dict, row_limit: int) -> list[tuple[str, int, int]]:
+    """Windows 读下拉选项, 两级:
+      1) UIA 树原生选项 (bconnect_uia.dropdown_options) —— 若 Chromium a11y 把
+         浮层映射进了树, 这是最快路径, 零视觉零坐标猜测;
+      2) PIL 截下拉区域 + 云端视觉模型问「每行文字和行中心坐标」(bconnect_vision,
+         MiniMax/Qwen-VL, ~/.bambudeck/models.json 配 key 才可用)。
+    都不行返回空列表, 调用方退回逐行几何点击 (点完读回机名验证, 不靠视觉)。
+    坐标一律换算回屏幕物理像素; _snap_row 还会把命中点吸附到已知行几何上。
+    """
+    try:
+        opts = ax.dropdown_options(group, row_limit=row_limit)
+    except Exception:  # noqa: BLE001
+        opts = []
+    if opts:
+        return [(o["name"], int(o["x"]), int(o["y"])) for o in opts]
+    rx = int(group["x"] - 24)
+    ry = int(group["y"] + group["h"] - 4)
+    rw = int(group["w"] + 48)
+    rh = int(_DROP_FIRST_DY + max(3, row_limit) * _DROP_ROW + 10)
+    path = os.path.join(tempfile.gettempdir(), "bc_dropdown_win.png")
+    try:
+        from PIL import ImageGrab
+        import bconnect_vision as vision
+        if not (vision.resolve_model("vision").get("api_key")):
+            return []
+        ImageGrab.grab(bbox=(rx, ry, rx + rw, ry + rh),
+                       all_screens=True).save(path)
+        ans = vision.ask_vision(path, (
+            "这是打印机设备下拉列表的截图。列出每个选项的文字和该行中心的像素"
+            "坐标，只回 JSON 数组 [{\"t\":\"机名\",\"x\":中心x,\"y\":中心y},"
+            " ...]，不要其它文字。"))
+    except Exception:  # noqa: BLE001
+        return []
+    rows: list[tuple[str, int, int]] = []
+    for m in re.finditer(r"\{[^{}]*\}", ans or ""):
+        try:
+            item = json.loads(m.group(0))
+        except ValueError:
+            continue
+        t = str(item.get("t") or "").strip()
+        x, y = item.get("x"), item.get("y")
+        if t and isinstance(x, (int, float)) and isinstance(y, (int, float)):
+            rows.append((t, rx + int(x), ry + int(y)))
+    return rows
+
+
 def _ocr_dropdown_rows(group: dict, row_limit: int) -> list[tuple[str, int, int]]:
     """截图已展开的下拉浮层 + 本地 OCR，返回 [(文字, 屏幕 x, 屏幕 y)]。
 
     读不到（截图没权限 / 没有 swiftc / 识别失败）返回空列表，调用方退回逐行试。
     一次读取覆盖整个列表，打印机再多也只花一次 OCR 的时间（2026-10-25 用户反馈：
-    逐行试选在机器多时太慢）。
+    逐行试选在机器多时太慢）。Windows 走 _ocr_rows_win (UIA 原生/云端视觉)。
     """
+    if _IS_WIN:
+        return _ocr_rows_win(group, row_limit)
     binary = _ocr_bin()
     if binary is None:
         return []

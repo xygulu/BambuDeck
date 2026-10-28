@@ -1,3 +1,13 @@
-# 唯一第三方依赖：云端 MQTT 快照 + 局域网 MQTT 控制（bconnect_cloud / bconnect_service）。
-# 其余 import 全是标准库。代码用到 paho-mqtt 2.x 的 CallbackAPIVersion，需 >=2.0。
+# 依赖说明（按平台）
+# 通用: 云端 MQTT 快照 + 局域网 MQTT 控制（bconnect_cloud / bconnect_service）。
+#   代码用到 paho-mqtt 2.x 的 CallbackAPIVersion，需 >=2.0。
 paho-mqtt>=2.0,<3
+
+# macOS: 其余 import 全是标准库（AX 走 ctypes + JXA，OCR 用系统 Vision，
+# 首次用时 swiftc 编译到 ~/.bambudeck/bin，不进仓库）。
+
+# Windows（bconnect_uia / 阶段3 派单）:
+#   pywinauto  —— UIA 后端必需（bconnect_uia.py 遍历/点击/焦点）
+#   Pillow     —— 可选，阶段3 下拉选机的亮度开合检测与视觉兜底截图
+#                 （缺了会退 GDI GetPixel 稀采样 + 逐行几何点击，能跑但慢些）
+#   box runtime python 安装: runtime\python\python.exe -m pip install pywinauto Pillow

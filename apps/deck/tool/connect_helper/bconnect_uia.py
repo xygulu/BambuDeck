@@ -21,6 +21,18 @@ import time
 
 _user32 = ctypes.windll.user32
 
+# 坐标系统一 (阶段3 前置): UIA 返回的是物理像素, 但进程不声明 DPI 感知时
+# SetCursorPos/GetPixel 会按虚拟化坐标处理 —— 125%/150% 缩放屏上注入点击
+# 会整体错位。阶段2 的控制按钮走 UIA Invoke 不受影响, 阶段3 的下拉选机
+# 全靠真实坐标点击, 必须先把感知声明出来。
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_DPI_AWARE
+except Exception:
+    try:
+        _user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 
 def _hwnd_of(w) -> int | None:
     try:
@@ -115,6 +127,24 @@ def app_ready() -> bool:
     if w is not None:
         _wrap = w
     return w is not None
+
+
+def activate() -> bool:
+    """把 Connect 置前并等它拿到焦点 (等价 macOS 版 _activate_connect)。
+
+    坐标点击 (pywinauto mouse.click = SetCursorPos + 真实按键) 注入的是
+    「该坐标最顶层窗口」, 下拉选机前必须让 Connect 在最前, 否则点在别的
+    窗口上。只等 app 在最前不够 —— 刚激活时窗口还没 key, 点击会被吞,
+    调用方 (select_device) 会在激活后轮询 app_ready。"""
+    global _wrap
+    if _wrap is None and not enable_ax():
+        return False
+    try:
+        _wrap.set_focus()
+        return True
+    except Exception as e:
+        _log('set_focus fail:', e)
+        return False
 
 
 def fast_available() -> bool:
@@ -262,8 +292,11 @@ def press_desc(desc: str) -> bool:
         c = _find_named_prefix(desc)
     if c is not None:
         return _click(c)
-    # 停止确认框兜底: 名字可能是 确定/确认 (结构待真机验证, 打日志摸清)
-    for alt in ('确定', '确认', 'OK', '是'):
+    # 停止确认框兜底: 名字可能是 确定/确认 (结构待真机验证, 打日志摸清)。
+    # 「发送」殿后: 阶段3 发送页派单按钮 desc=confirm 在 Windows UIA 上未必
+    # 带 automationId, 文字「发送」是它最后的稳定特征; 导入弹窗没有「发送」
+    # 按钮, 所以不会误伤导入流程。
+    for alt in ('确定', '确认', 'OK', '是', '发送'):
         c = _find_named(alt)
         if c is not None:
             _log('press_desc fallback named', alt)
@@ -340,12 +373,81 @@ def press_control(name: str, cmd: str, slow: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------- 发送页 (阶段3)
+# 选择器识别: Mac 版靠 AXDescription「{机名} chevron_down」的 AXGroup, Windows
+# 走同一套 Chromium a11y (DOM 同源), 期望 UIA Name/AutomationId 里同样带
+# chevron_down 字样。真机结构以发送页探测为准, 有出入再对齐。
+_SELECTOR_DROP_FIRST_DY = 26   # 与 bconnect_print._DROP_* 保持一致
+_SELECTOR_ROW = 36
+
+
+def _selector_scan() -> dict | None:
+    """单遍历找发送页设备选择器 -> {name, group{x,y,w,h}, chevron{x,y}|None}。
+
+    group = Name/AutomationId 含 chevron_down 的元素 (发送页唯一);
+    chevron = 组内的图标节点, 找不到时调用方按几何兜底 (组右缘-24, 垂直居中)。
+    """
+    snap = _snapshot()
+    hit = None
+    for (c, t, n, au, r) in snap:
+        blob = ' '.join(x for x in (n, au) if x)
+        if 'chevron_down' in blob and r:
+            hit = (c, blob, r)
+            break
+    if hit is None:
+        return None
+    c, blob, r = hit
+    g = {'x': float(r.left), 'y': float(r.top),
+         'w': float(r.right - r.left), 'h': float(r.bottom - r.top)}
+    chev = None
+    for (cc, tt, nn, au, rr) in snap:
+        if cc is c or rr is None:
+            continue
+        cx = (rr.left + rr.right) / 2
+        cy = (rr.top + rr.bottom) / 2
+        if not (g['x'] <= cx <= g['x'] + g['w']
+                and g['y'] <= cy <= g['y'] + g['h']):
+            continue
+        blob2 = ' '.join(x for x in (nn, au) if x).lower()
+        if tt == 'Image' or 'chevron' in blob2:
+            chev = {'x': cx, 'y': cy}
+            break
+    return {'name': blob.replace('chevron_down', '').strip(),
+            'group': g, 'chevron': chev}
+
+
 def send_target_device() -> str:
-    return ''  # TODO(阶段3): 读发送页当前选中设备
+    return (_selector_scan() or {}).get('name') or ''
 
 
 def selector_frame() -> dict | None:
-    return None  # TODO(阶段3): 发送页设备下拉几何
+    return _selector_scan()
+
+
+def dropdown_options(group: dict, row_limit: int = 8,
+                     first_dy: int = _SELECTOR_DROP_FIRST_DY,
+                     row_h: int = _SELECTOR_ROW) -> list[dict]:
+    """下拉展开后的选项读法 (Windows 特有尝试): UIA 树直接暴露选项节点。
+
+    macOS 的 AX 树对下拉浮层完全无感 (展开前后树一模一样), 但 Windows 的
+    Chromium a11y 有可能把 listbox/option 映射成 ListItem/Text —— 若成立,
+    选机可以全程零坐标点击、零视觉。按「选择器下方一行几何带内」筛选,
+    坐标给节点中心; 读不到返回空列表, 调用方走几何点击兜底。
+    """
+    snap = _snapshot()
+    gx, gw = group['x'], group['w']
+    origin = group['y'] + group['h']
+    band_bottom = origin + first_dy + max(1, row_limit) * row_h + 30
+    out = []
+    for (c, t, n, au, r) in snap:
+        if not n or r is None:
+            continue
+        cx = (r.left + r.right) / 2
+        cy = (r.top + r.bottom) / 2
+        if not (gx - 30 <= cx <= gx + gw + 30):
+            continue
+        if origin + 8 <= cy <= band_bottom:
+            out.append({'name': n, 'x': cx, 'y': cy, 'type': t})
+    return out
 
 
 if __name__ == '__main__':
