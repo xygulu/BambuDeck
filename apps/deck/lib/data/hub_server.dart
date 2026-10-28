@@ -1294,6 +1294,10 @@ class HubServer {
         'cameraMuted': settings.cameraMuted,
         'printers': [for (final p in printers) _printerJson(p)],
         'cameras': [for (final c in cameras) _cameraJson(c)],
+        // 这个服务端有没有接云登录后端。App 内嵌的服务端没接（登录在 App 自己的
+        // UI 里做），页面据此决定首屏要不要弹登录向导 —— 否则 App 用户刚打开
+        // 页面就看到一个必然失败的向导。
+        'cloudLogin': cloudLoginHandler != null,
         // 登录账号（脱敏，无 token）：页面据此判断「首次启动」弹登录向导，
         // 用户管理面板要同步详情时再走 GET /api/accounts。
         'accounts': [

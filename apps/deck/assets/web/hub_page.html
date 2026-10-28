@@ -2375,10 +2375,14 @@ function apply(data) {
   lastPrinters = data.printers || [];
   lastCameras = data.cameras || [];
   // 产品化: 首次启动(没账号也没打印机)自动弹登录向导, 一次会话只弹一次。
-  if (!(data.accounts || []).length && !lastPrinters.length && !wizardShown) {
+  // 服务端没接云登录后端时(App 内嵌服务)不弹 —— 弹了也是必然失败。
+  if (data.cloudLogin !== false &&
+      !(data.accounts || []).length && !lastPrinters.length && !wizardShown) {
     wizardShown = true;
     openWizard();
   }
+  // 同理: 没有云登录后端就不露「账号」入口(App 里登录走 App 自己的界面)。
+  $('acctbtn').hidden = data.cloudLogin === false;
   const wasMuted = cameraMuted;
   cameraMuted = data.cameraMuted === true;
   if (wasMuted !== cameraMuted) {
