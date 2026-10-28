@@ -13,14 +13,13 @@ if not exist "%~dp0hub.exe" (
   pause
   exit /b 1
 )
-if not exist "%~dp0config\hub.json" (
-  echo [ERROR] config\hub.json not found.
-  echo.
-  echo         Copy hub.json from the Mac ^(its location: ~/.bambudeck/hub.json^)
-  echo         into the config folder next to this script, then run again.
-  pause
-  exit /b 1
-)
+rem No config yet? (Product setup, 2026-10-28) Create a fresh one with a
+rem random token - the user finishes setup by logging in on the web page.
+if exist "%~dp0config\hub.json" goto hasconfig
+echo [SETUP] config\hub.json not found. Creating a fresh one.
+echo         Finish setup by clicking the account button on the web page.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$t = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 24 | ForEach-Object {[char]$_}); New-Item -ItemType Directory -Force -Path '%~dp0config' | Out-Null; @{settings=@{hubPort=8787;hubToken=$t};printers=@();cameras=@();accounts=@()} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath '%~dp0config\hub.json' -Encoding UTF8; Write-Host ('[KEY] Access token for the web page: ' + $t)"
+:hasconfig
 if not exist "%~dp0logs" mkdir "%~dp0logs"
 if not exist "%~dp0ffmpeg" mkdir "%~dp0ffmpeg" >nul 2>&1
 

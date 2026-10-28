@@ -6,6 +6,7 @@ import 'package:bambu_protocol/bambu_protocol.dart';
 import 'camera_profile.dart';
 import 'cloud_device_sync.dart';
 import 'cloud_print_helper.dart';
+import 'lan_printer_probe.dart';
 import 'hub_config.dart';
 import 'hub_server.dart';
 import 'log_buffer.dart';
@@ -85,6 +86,112 @@ class HubService {
       _cloudSyncTimer = Timer.periodic(
           const Duration(minutes: 5), (_) => unawaited(_runCloudSync()));
     }
+
+    // 云同步来的 LAN 打印机可能缺 IP (见 _resolveLanIps): 补完落盘触发
+    // mtime 重启, 重启后再进来就是补齐状态, 不发散。
+    unawaited(_resolveLanIps());
+  }
+
+  /// LAN 发现 (2026-10-28): 云端只给序列号, LAN 直连还缺 IP 的打印机在
+  /// 这里补上。两段: SSDP 组播 (同网段, 零流量) → 8883 扫网+访问码认证
+  /// (跨网段; 组播不过路由, A1 也不回单播 M-SEARCH, 只有 MQTT 必通)。
+  /// 补不到就下次重启再试, 不重试风暴。
+  Future<void> _resolveLanIps() async {
+    final need = config.printers
+        .where((p) =>
+            p.mode == PrinterMode.lan &&
+            p.serial.trim().isNotEmpty &&
+            p.ip.trim().isEmpty)
+        .toList();
+    if (need.isEmpty) return;
+    final bySerial = <String, SsdpHit>{};
+
+    // (1) SSDP 组播。
+    try {
+      final hits = await ssdpDiscoverPrinters(
+          wait: const Duration(seconds: 6)).timeout(const Duration(seconds: 40));
+      for (final h in hits) {
+        bySerial[h.serial] = h;
+      }
+    } catch (e) {
+      LogBuffer.instance.add('[云同步] SSDP 发现失败: ${_oneLine(e)}');
+    }
+
+    // (2) 8883 扫网认证, 只补 SSDP 没认出来且有访问码的。
+    final rest = need
+        .where((p) =>
+            !bySerial.containsKey(p.serial.trim()) && p.accessCode.isNotEmpty)
+        .toList();
+    if (rest.isNotEmpty) {
+      final prefixes = await _subnetSeeds();
+      if (prefixes.isNotEmpty) {
+        try {
+          final found = await locateLanPrinters(
+            targets: [
+              for (final p in rest)
+                LanProbeTarget(serial: p.serial.trim(), accessCode: p.accessCode),
+            ],
+            subnetPrefixes: prefixes,
+          ).timeout(const Duration(minutes: 3));
+          for (final e in found.entries) {
+            bySerial[e.key] = SsdpHit(ip: e.value, serial: e.key);
+          }
+          LogBuffer.instance.add('[云同步] 8883 扫网: '
+              '${prefixes.join("/")} → 认出 ${found.length}/${rest.length}');
+        } catch (e) {
+          LogBuffer.instance.add('[云同步] 8883 扫网失败: ${_oneLine(e)}');
+        }
+      }
+    }
+
+    if (bySerial.isEmpty) return;
+    final printers = [...config.printers];
+    var changed = false;
+    for (var i = 0; i < printers.length; i++) {
+      final p = printers[i];
+      if (p.mode != PrinterMode.lan ||
+          p.serial.trim().isEmpty ||
+          p.ip.trim().isNotEmpty) {
+        continue;
+      }
+      final hit = bySerial[p.serial.trim()];
+      if (hit == null) continue;
+      printers[i] = p.copyWith(ip: hit.ip);
+      changed = true;
+      LogBuffer.instance.add(
+          '[云同步] LAN 发现补上 ${p.name} (${p.serial}) 的 IP ${hit.ip}');
+    }
+    if (!changed) return;
+    config = HubConfig(
+      settings: config.settings,
+      printers: printers,
+      cameras: config.cameras,
+      accounts: config.accounts,
+    );
+    hub.printers = printers;
+    await saveHubConfig(config, configFile);
+    LogBuffer.instance.add('[云同步] IP 已补齐, 重启加载');
+  }
+
+  /// 扫网种子子网: 已知打印机的网段 (同站点打印机通常同网段) + 本机各网卡
+  /// 的网段。
+  Future<List<String>> _subnetSeeds() async {
+    final out = <String>{};
+    for (final p in config.printers) {
+      final parts = p.ip.split('.');
+      if (parts.length == 4) out.add(parts.sublist(0, 3).join('.'));
+    }
+    try {
+      for (final iface in await NetworkInterface.list()) {
+        for (final a in iface.addresses) {
+          final parts = a.address.split('.');
+          if (parts.length == 4 && a.type == InternetAddressType.IPv4) {
+            out.add(parts.sublist(0, 3).join('.'));
+          }
+        }
+      }
+    } catch (_) {}
+    return out.toList();
   }
 
   Future<void> _runCloudSync() async {
