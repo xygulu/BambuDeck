@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:deck/data/hub_service.dart';
@@ -59,10 +60,32 @@ Future<void> main(List<String> args) async {
     plateSwapFile: resolvePlateSwap(),
   );
 
-  // 服务状态页的隧道全链路探测地址 (2026-10-27): GET 一次 = CF 边缘 →
-  // 隧道 → 本机 8787 整条链路都验过。可用 HUB_TUNNEL_URL 覆盖, 置空串跳过。
-  service.hub.tunnelProbeUrl =
-      env('HUB_TUNNEL_URL').isNotEmpty ? env('HUB_TUNNEL_URL') : 'https://bambu.miller.ink';
+  // 服务状态页的探测参数 (2026-10-29 起全部配置驱动, 不再写死域名 ——
+  // 公网隧道域名每台机器各不相同: Mac 的 bambu.miller.ink 指向 Mac,
+  // Windows 隧道在 CF 控制台绑了哪个域名就探哪个。此前 Windows 把 Mac
+  // 的隧道探成了自己的「绿」, 是假阳性)。优先级: 环境变量 > hub.json
+  // settings.* > 平台默认 (mac 沿用既有域名; Windows 无配置则跳过隧道
+  // 探测, 诚实报 not_configured, 不冒别人的绿)。
+  String? configSetting(String key) {
+    try {
+      final raw = jsonDecode(File(configPath).readAsStringSync());
+      if (raw is! Map<String, dynamic>) return null;
+      final s = raw['settings'];
+      if (s is! Map<String, dynamic>) return null;
+      final v = s[key];
+      return v?.toString();
+    } catch (_) {
+      return null; // 配置还没生成: 一旦存在, mtime 轮询重启后即生效。
+    }
+  }
+
+  final envTunnel = env('HUB_TUNNEL_URL');
+  final cfgTunnel = configSetting('tunnelProbeUrl');
+  service.hub.tunnelProbeUrl = envTunnel.isNotEmpty
+      ? envTunnel
+      : (cfgTunnel ?? (Platform.isWindows ? '' : 'https://bambu.miller.ink'));
+  service.hub.cloudflaredServiceName =
+      configSetting('cloudflaredService') ?? '';
 
   await service.start();
   if (!service.hub.running) {

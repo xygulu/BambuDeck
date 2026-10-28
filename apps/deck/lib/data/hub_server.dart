@@ -651,6 +651,12 @@ class HubServer {
   /// 不注入; 独立 deck_hub 由 bin/hub.dart 按环境变量 HUB_TUNNEL_URL 给)。
   String tunnelProbeUrl = '';
 
+  /// cloudflared 在 Windows 上跑成系统服务 (token 模式的 "Cloudflared
+  /// agent"), pgrep 不存在 —— 配了服务名就走 `sc query`, 否则按进程名兜底。
+  /// macOS 忽略此字段, 沿用 pgrep。(2026-10-29, 检测改配置驱动: 每台机器
+  /// 在 hub.json settings.cloudflaredService 里写自己的服务名。)
+  String cloudflaredServiceName = '';
+
   DateTime? _startedAt;
 
   /// 云台: 网页方向键经这里驱动 ONVIF / HCNetSDK。可注入假客户端测试。
@@ -845,6 +851,31 @@ class HubServer {
   }
 
   Future<Map<String, dynamic>> _checkCloudflared() async {
+    // Windows: pgrep 不存在 (曾因此永远 unknown, 2026-10-29 实测)。cloudflared
+    // 以系统服务跑 (token 模式), 配了服务名用 `sc query` 看状态最准; 没配就
+    // 按进程名 tasklist 兜底。服务状态是稳定态, 单次采样即可。
+    if (Platform.isWindows) {
+      Future<bool> once() async {
+        final name = cloudflaredServiceName.trim();
+        if (name.isNotEmpty) {
+          final r = await Process.run('sc', <String>['query', name])
+              .timeout(const Duration(seconds: 3));
+          return r.exitCode == 0 && (r.stdout as String).contains('RUNNING');
+        }
+        final r = await Process.run(
+                'tasklist', <String>['/fi', 'imagename eq cloudflared.exe'])
+            .timeout(const Duration(seconds: 3));
+        return r.exitCode == 0 &&
+            (r.stdout as String).contains('cloudflared.exe');
+      }
+
+      try {
+        final ok = await once();
+        return {'ok': ok, 'detail': ok ? 'running' : 'stopped'};
+      } catch (_) {
+        return {'ok': null, 'detail': 'unknown'};
+      }
+    }
     // 单次 pgrep 会把 KeepAlive 崩溃循环里的瞬时进程误判成「运行中」
     // (每 5s 拉起、秒退), 芯片就忽绿忽红。隔 1.5s 采两次, 两次都在才算
     // 稳定运行; 第一次就不在直接判停。
