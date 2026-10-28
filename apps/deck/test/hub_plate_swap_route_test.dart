@@ -41,19 +41,19 @@ void main() {
       );
     });
 
-    test('还没连上(状态未知) → Connect, 不冒险直发', () {
+    test('还没连上(状态未知) → Connect, 不冒险直发（签名问题 MQTT 绕不过）', () {
       expect(
         HubService.plateSwapRoute(lan(), null, hasLink: true),
         PlateSwapRoute.connect,
       );
     });
 
-    test('固件不报 fun(A1 老固件) → 先试纯协议, 没接上再退 Connect', () {
+    test('固件不报 fun(A1 老固件) → Connect(状态读不出来不赌)', () {
       final state = BambuState(updatedAt: DateTime.fromMillisecondsSinceEpoch(0));
       expect(state.developerModeOff, isNull);
       expect(
         HubService.plateSwapRoute(lan(), state, hasLink: true),
-        PlateSwapRoute.tryLanThenConnect,
+        PlateSwapRoute.connect,
       );
     });
 

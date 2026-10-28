@@ -17,18 +17,16 @@ import 'rtsp_quality.dart';
 
 /// 一键换盘走哪条路 (2026-10-28)。
 ///
-/// [lanFtps] = 纯协议: FTPS 上传换盘模型 + LAN MQTT 派发 project_file。
-/// 不需要 Bambu Connect 自动化 —— Windows 那台机器上没有 helper, 局域网
-/// 打印机的一键换盘靠这条路。前提是打印机在局域网、有 IP、连上了, 且
-/// 开发者模式确认为开(固件对未签名的 print 帧回 84033543)。
+/// 签名问题 MQTT 绕不过去(固件不信任过期私钥, 签名路线已废弃), 所以
+/// **默认一律走 [connect]**: 云模式没有可达的 FTP 端点; 开发者模式关/未知时
+/// LAN 直发会被固件拦(84033543)或静默丢弃。这些都只能靠 Connect 派单
+/// (官方客户端持有拓竹合法的签名身份)。
 ///
-/// [tryLanThenConnect] = 开发者模式状态未知(A1 固件不报 `print.fun`, 读不出
-/// bit29): 先试纯协议, 并等打印机回报新任务确认真接单了; 没接上(固件静默
-/// 丢弃)再退回 Connect。
-///
-/// [connect] = 云端派单: 云模式打印机没有可达的 FTP 端点, 开发者模式关的
-/// 打印机 LAN 直发会被固件拦, 两者都只能靠 Connect(持有拓竹合法客户端身份)。
-enum PlateSwapRoute { lanFtps, tryLanThenConnect, connect }
+/// [lanFtps] = 唯一的捷径例外: 固件**明确报告**开发者模式开(`print.fun`
+/// bit29 清零)时, FTPS 上传换盘模型 + LAN MQTT 派发 project_file 是通的,
+/// 省掉 Connect 自动化的开销。状态读不出来(A1 固件不报 `print.fun`)不赌,
+/// 直接走 Connect。
+enum PlateSwapRoute { lanFtps, connect }
 
 /// 独立网页服务：不依赖 GUI app，直接读 `~/.bambudeck/hub.json` 起一套
 /// [HubServer]，并自己管理每台打印机的 MQTT 连接。
@@ -66,9 +64,8 @@ class HubService {
 
   bool get running => hub.running;
 
-  /// 路由判定 (纯函数, 便于单测): 局域网 + 有 IP + 连上了 → 纯协议优先。
-  /// 开发者模式确认为关 → 直接 Connect(固件会拦); 状态未知(A1 不报 fun)
-  /// → 先试纯协议并确认接单, 没接上再退回 Connect。
+  /// 路由判定 (纯函数, 便于单测): **默认 Connect**。只有局域网 + 有 IP +
+  /// 连上了 + 固件明确报告开发者模式开, 才允许纯协议直发这条捷径。
   static PlateSwapRoute plateSwapRoute(
     PrinterProfile profile,
     BambuState? state, {
@@ -77,19 +74,8 @@ class HubService {
     if (profile.mode != PrinterMode.lan) return PlateSwapRoute.connect;
     if (profile.ip.trim().isEmpty) return PlateSwapRoute.connect;
     if (!hasLink) return PlateSwapRoute.connect;
-    switch (state?.developerModeOff) {
-      case true:
-        return PlateSwapRoute.connect;
-      case false:
-        return PlateSwapRoute.lanFtps;
-      case null:
-        // 还没连上(状态未知)或固件不报 fun(A1) —— 都属于「不知道」, 但
-        // 连不上时派发必然失败, 白试一次不如直接 Connect; 固件不报 fun 时
-        // 值得试(用户那台 A1 的局域网直发历史上是通的)。
-        return state == null
-            ? PlateSwapRoute.connect
-            : PlateSwapRoute.tryLanThenConnect;
-    }
+    if (state?.developerModeOff == false) return PlateSwapRoute.lanFtps;
+    return PlateSwapRoute.connect;
   }
 
   Future<void> start() async {
@@ -330,16 +316,13 @@ class HubService {
       };
     }
 
-    // 局域网直连的打印机: 纯协议换盘(FTPS 上传 + MQTT 派发), 不需要
-    // Bambu Connect 自动化 —— Windows 那台机器上没有 helper, 走这条路才有一键
-    // 换盘 (2026-10-28)。开发者模式关的打印机会被固件拦(84033543), 那种
-    // 情况才退回 Connect 派单。
+    // 捷径(2026-10-28): 固件明确报告开发者模式开的局域网打印机走纯协议
+    // 换盘(FTPS 上传 + MQTT 派发), 省掉 Connect 自动化。其余一律 Connect
+    // 派单 —— 签名问题 MQTT 绕不过, 未签名帧会被固件拦/静默丢弃。
     final link = _links[p.id];
     final state = _stateOf(p);
     final route = plateSwapRoute(p, state, hasLink: link != null);
-    if (link != null &&
-        (route == PlateSwapRoute.lanFtps ||
-            route == PlateSwapRoute.tryLanThenConnect)) {
+    if (link != null && route == PlateSwapRoute.lanFtps) {
       final ams = pickSwapAmsSlot(state?.ams);
       final taskBefore = state?.taskId ?? '';
       try {
