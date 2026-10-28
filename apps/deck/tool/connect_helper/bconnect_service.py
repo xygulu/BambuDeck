@@ -430,10 +430,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
+            # Windows 移植 (2026-10-28): 子系统缺失时降级为 False, 健康检查不能崩
+            # (app_running 无进程探测 / resolve_uid 无云会话文件都会抛异常)。
+            def _safe(fn) -> bool:
+                try:
+                    return bool(fn())
+                except Exception:  # noqa: BLE001
+                    return False
             self._send(200, {
                 "ok": True, "busy": _BUSY.locked(),
-                "app_running": bp.app_running(),
-                "uid_resolved": bool(cloud.resolve_uid()),
+                "app_running": _safe(bp.app_running),
+                "uid_resolved": _safe(cloud.resolve_uid),
             })
             return
         if self.path == "/identity":

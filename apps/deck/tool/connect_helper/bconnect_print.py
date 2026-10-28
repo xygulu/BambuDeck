@@ -89,7 +89,14 @@ def _restore_frontmost(prev: str | None) -> None:
         pass
 
 
+_IS_WIN = os.name == "nt"  # Windows 移植 (2026-10-28): 进程探测/启动走 tasklist/exe
+
+
 def app_running() -> bool:
+    if _IS_WIN:
+        r = subprocess.run(["tasklist", "/fi", "imagename eq %s.exe" % APP],
+                           capture_output=True, text=True)
+        return "%s.exe" % APP in (r.stdout or "")
     r = subprocess.run(["pgrep", "-f",
                         "%s.app/Contents/MacOS/%s" % (APP, APP)],
                        capture_output=True, text=True)
@@ -99,17 +106,23 @@ def app_running() -> bool:
 def ensure_app(timeout: int = 30) -> str:
     """确保 Connect 在跑；默认并置前，BAMBU_SILENT=1 时保持后台。返回 'already'/'launched'。"""
     if app_running():
-        if not SILENT:
+        if not SILENT and not _IS_WIN:
             subprocess.run(["osascript", "-e", 'tell application "%s" to activate' % APP],
                            capture_output=True, text=True)
         return "already"
-    subprocess.run(["open", "-a", "/Applications/%s.app" % APP], check=False)
+    if _IS_WIN:
+        exe = os.path.expandvars(
+            r"%LOCALAPPDATA%\Programs\bambu-connect\Bambu Connect.exe")
+        subprocess.Popen([exe], cwd=os.path.dirname(exe))
+    else:
+        subprocess.run(["open", "-a", "/Applications/%s.app" % APP], check=False)
     for _ in range(timeout):
         time.sleep(1)
         if app_running():
             time.sleep(3)
-            if not SILENT:
-                subprocess.run(["osascript", "-e", 'tell application "%s" to activate' % APP],
+            if not SILENT and not _IS_WIN:
+                subprocess.run(["osascript", "-e",
+                                'tell application "%s" to activate' % APP],
                                capture_output=True, text=True)
             return "launched"
     raise RuntimeError("Bambu Connect 启动失败")

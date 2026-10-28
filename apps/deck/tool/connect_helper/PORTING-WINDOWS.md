@@ -61,14 +61,30 @@ macOS 版靠**中文标签**定位控件（「跳过」是锚、控制图标是�
 
 - **阶段 0（已做）**：hub 侧把换盘路由定死为「默认 Connect，确认开发者模式开
   才直发」—— Windows 上 helper 是必需品，不再是可选项。
-- **阶段 1**：`bconnect_uia.py` 落地（UIA 遍历 + 打印控件树 dump），在真机上把
-  Bambu Connect 的控件树结构摸清楚，确定选择器。
-- **阶段 2**：控制（暂停/恢复/停止）跑通 —— 这是最有价值的一环，label 无关的
-  desc/几何定位在这里定型。
-- **阶段 3**：打印派单（导入 → 打印 → 发送）。deep link 与「导入」交互要重做，
-  风险最高，放最后。
-- **阶段 4**：调速档位菜单（AX 版靠「LED灯 同行百分比」锚定，Windows 上要找等价锚）。
-- **阶段 5**：自启 + 打包成 Windows 部署包的一部分（跟 `deck_hub` 同一个目录）。
+- **阶段 1（已做，2026-10-28）**：`bconnect_uia.py` 落地。真机摸清的结构：
+  - **会话隔离是硬约束**：SSH/服务进程（session 0）看不到桌面窗口，UIA 必须
+    跑在交互会话里 → 用「登录时触发 + /it」的计划任务挂 helper（不能用服务）。
+  - 主窗口 `Chrome_WidgetWin_1`，标题 `Bambu Connect (Beta)`；主页即设备列表，
+    列表标记 = Text `设备名称`；卡片 = Hyperlink `<名> 热床: ..`。
+  - 详情页标记 = Text `打印进度` + 面包屑；**打印中**才渲染控制行：
+    Button `跳过` 锚点 + 同行（y±6, 高 24..40）两个**无名图标按钮**，x 序 =
+    [暂停(绿⏸), 停止(红■)]，截图放大可肉眼复核。
+  - 停止二次确认框结构**未验证**（需要一次真实打印中的停止）；
+    `press_desc('confirm')` 会兜底找 确定/确认/OK 并打日志列候选。
+- **阶段 2（代码就绪，真机验证待一次打印）**：`bconnect_uia.py` 顶替
+  `bconnect_ax` 接口（drive/service/print 上层零改动）；service 已在目标机
+  `127.0.0.1:8799` 跑通（守护循环 + 登录自启任务，`/health` 全绿：
+  app_running/uid_resolved）。Windows 适配点：`app_running` 走 tasklist、
+  `ensure_app` 走 exe 直启、`/health` 对缺失子系统安全降级、helper.json 与
+  printers.json 由引导脚本从包内 hub.json 派生。
+- **阶段 3（未做）**：打印派单（导入 → 打印 → 发送）。deep link 与「导入」交互
+  要重做；`send_target_device`/`selector_frame` 目前是 stub；打印流程还需要
+  云会话（已从 Mac 复制）+ 目标机选择交互。
+- **阶段 4（未做）**：调速档位菜单（详情页温度/风扇区已在 dump 中，
+  `triangle_up/down` 与 ± 按钮带文字，锚定应比 Mac 简单）。
+- **阶段 5（部分）**：目标机已挂 `BambuDeckHelper`（登录自启 + 守护循环）；
+  打包进 deck-hub-windows 部署包待做（嵌入式 Python 已就位：
+  `runtime\python\`，依赖 paho-mqtt/pywinauto/comtypes/requests/pillow）。
 
 ## 怎么验
 
