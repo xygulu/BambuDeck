@@ -71,12 +71,29 @@ macOS 版靠**中文标签**定位控件（「跳过」是锚、控制图标是�
     [暂停(绿⏸), 停止(红■)]，截图放大可肉眼复核。
   - 停止二次确认框结构**未验证**（需要一次真实打印中的停止）；
     `press_desc('confirm')` 会兜底找 确定/确认/OK 并打日志列候选。
-- **阶段 2（代码就绪，真机验证待一次打印）**：`bconnect_uia.py` 顶替
-  `bconnect_ax` 接口（drive/service/print 上层零改动）；service 已在目标机
+- **阶段 2（已真机验证，2026-10-28）**：`bconnect_uia.py` 顶替
+  `bconnect_ax` 接口（drive/service/print 上层零改动）；service 在目标机
   `127.0.0.1:8799` 跑通（守护循环 + 登录自启任务，`/health` 全绿：
-  app_running/uid_resolved）。Windows 适配点：`app_running` 走 tasklist、
-  `ensure_app` 走 exe 直启、`/health` 对缺失子系统安全降级、helper.json 与
-  printers.json 由引导脚本从包内 hub.json 派生。
+  app_running/uid_resolved）。**真实打印中暂停已打通**：hub 同款
+  `POST /command {serial, command: pause}` 全链路 4.56s 点击成功，
+  云端交叉确认 `gcode_state=PAUSE`。Windows 适配点：`app_running` 走
+  tasklist、`ensure_app` 走 exe 直启、`/health` 对缺失子系统安全降级、
+  helper.json 与 printers.json 由引导脚本（`tool/hub-windows/bootstrap_helper.ps1`）
+  从包内 hub.json 派生。真机暴露并已修复的坑：
+  1. **PowerShell 导出带 BOM**：`Set-Content -Encoding UTF8` 写的 helper.json
+     带 BOM，`json.load` 直接炸 → service 重新生成 token → 与 hub.json 里的
+     对不上，控制命令全 401。bootstrap 用 .NET `WriteAllText` 无 BOM 落盘，
+     service 读配置用 `utf-8-sig`。
+  2. **401 前 body 不排空**：POST 校验失败直接 close，TCP 发 RST 把错误响应
+     从客户端缓冲冲掉，Dart 端看到「Connection closed while receiving data」
+     而不是 401 原文。do_POST 在 401 路径先 `rfile.read(n)` 排空。
+  3. **Connect 窗口最小化**：UIA IsOffscreen=True、几何 -32000、Chromium 降级
+     a11y 树（全树遍历 20s+，控制流程耗尽看门狗）。find_window 遇最小化
+     主窗口先 `ShowWindow(SW_RESTORE)` 再用；还原后全树遍历 <0.5s。
+  4. **标记/卡片名匹配**：列表头实为「设备名称 ↑」（probe 需子串匹配）；
+     卡片文本是「<名> 状态」拼接（点击名需 startswith 兜底）。
+  5. **视觉兜底截图**：`screencapture` 是 macOS 命令，Windows 走 PIL ImageGrab。
+  另：pywinauto `UIAWrapper` 没有 `is_iconic/restore`，直接 ctypes user32。
 - **阶段 3（未做）**：打印派单（导入 → 打印 → 发送）。deep link 与「导入」交互
   要重做；`send_target_device`/`selector_frame` 目前是 stub；打印流程还需要
   云会话（已从 Mac 复制）+ 目标机选择交互。
