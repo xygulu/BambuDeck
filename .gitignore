@@ -32,3 +32,6 @@ local.properties
 *.iml
 *.ipr
 *.iws
+
+# hub deploy package assembled by CI
+apps/deck/deploy/

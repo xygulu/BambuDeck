@@ -57,10 +57,20 @@ jobs:
         working-directory: apps/deck
       - run: dart build cli -o build/hub
         working-directory: apps/deck
+      # 组装免配置部署包:hub.exe + assets + 服务脚本 打成一个 zip,
+      # 拷到 Windows 机器解压即可 install-service.bat 注册成开机自启服务。
+      - name: Assemble hub deploy package
+        shell: pwsh
+        run: |
+          $d = 'deploy/deck-hub-windows'
+          New-Item -ItemType Directory -Force -Path "$d/assets/web","$d/assets/plate_swap" | Out-Null
+          Copy-Item build/hub/bundle/bin/hub.exe "$d/"
+          Copy-Item assets/web/hub_page.html "$d/assets/web/"
+          Copy-Item assets/plate_swap/auto_plate_swap.3mf "$d/assets/plate_swap/"
+          Copy-Item tool/hub-windows/*.cmd, tool/hub-windows/*.bat, tool/hub-windows/README.md "$d/"
+          Compress-Archive -Path "$d/*" -DestinationPath deploy/deck-hub-windows.zip -Force
+        working-directory: apps/deck
       - uses: actions/upload-artifact@v4
         with:
           name: deck-hub-windows
-          path: |
-            apps/deck/build/hub/bundle/**
-            apps/deck/assets/web/hub_page.html
-            apps/deck/assets/plate_swap/auto_plate_swap.3mf
+          path: apps/deck/deploy/deck-hub-windows.zip
