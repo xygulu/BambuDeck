@@ -87,7 +87,10 @@ def load_token() -> None:
     """优先复用已持久化的 token，重启不失效；否则新生成。"""
     global TOKEN
     try:
-        with open(_INFO) as f:
+        # utf-8-sig：PowerShell 导出的配置常带 BOM，直接 json.load 会炸
+        # （2026-10-28 Windows 机实测：BOM 让 load_token 失败 → 服务重新
+        # 生成 token → 和 hub.json 里的对不上，控制全 401）。
+        with open(_INFO, encoding="utf-8-sig") as f:
             tok = json.load(f).get("token")
         if tok:
             TOKEN = tok
@@ -470,6 +473,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._auth_ok():
+            # 401 前先把 body 读干净：不读完就 close，TCP 会发 RST 而不是 FIN，
+            # RST 会把刚写出的错误响应从客户端接收缓冲里冲掉 —— Dart 端看到的
+            # 是「Connection closed while receiving data」而不是 401 原文
+            # （2026-10-28 Windows hub 调 helper 实测）。只在不通过时排空，
+            # 正常路径的 body 仍交给 _body() 读。
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                if 0 < n <= 256 * 1024 * 1024:
+                    self.rfile.read(n)
+            except Exception:  # noqa: BLE001
+                pass
             self._send(401, {"ok": False, "error": "bad or missing X-Deck-Token"})
             return
         payload = self._body()

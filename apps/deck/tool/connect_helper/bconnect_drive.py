@@ -51,7 +51,12 @@ def _cloud_busy(serial: str) -> bool:
 
 
 def shot(path: str = SHOT) -> str:
-    subprocess.run(["screencapture", "-x", path], check=False)
+    if os.name == "nt":
+        # Windows 没有 screencapture; 视觉兜底用 PIL 的 ImageGrab (依赖 pillow)
+        from PIL import ImageGrab
+        ImageGrab.grab().save(path)
+    else:
+        subprocess.run(["screencapture", "-x", path], check=False)
     return path
 
 
@@ -60,7 +65,8 @@ def known_printers() -> list[dict]:
     """合并本地 LAN 配置 + 云端设备表 → [{serial, name}]。name 以云端为准（Connect 显示云端名）。"""
     reg: dict[str, dict] = {}
     try:
-        with open(LAN_CONF) as f:
+        # utf-8-sig：PowerShell 写的 printers.json 可能带 BOM（见 service.load_token）
+        with open(LAN_CONF, encoding="utf-8-sig") as f:
             for serial, v in json.load(f).items():
                 reg[serial] = {"serial": serial, "name": (v or {}).get("name") or serial}
     except Exception:

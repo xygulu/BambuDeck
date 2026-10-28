@@ -14,9 +14,19 @@ bconnect_drive/bconnect_service/bconnect_print 无需改动。
 """
 from __future__ import annotations
 
+import ctypes
 import os
 import subprocess
 import time
+
+_user32 = ctypes.windll.user32
+
+
+def _hwnd_of(w) -> int | None:
+    try:
+        return int(w.handle)
+    except Exception:  # noqa: BLE001
+        return None
 
 _EXE = os.path.expandvars(
     r"%LOCALAPPDATA%\Programs\bambu-connect\Bambu Connect.exe")
@@ -55,10 +65,28 @@ def find_window(timeout: float = 20.0):
             wins = []
         for w in wins:
             ei = w.element_info
-            if ei.class_name != _WIN_CLASS or not _safe(w.is_visible):
+            if ei.class_name != _WIN_CLASS:
                 continue
-            if 'bambu' in (ei.name or '').lower():
+            named = 'bambu' in (ei.name or '').lower()
+            hwnd = _hwnd_of(w)
+            iconic = bool(hwnd is not None and _user32.IsIconic(hwnd))
+            if named and iconic:
+                # 最小化时 UIA IsOffscreen=True、几何 -32000、Chromium 会把
+                # a11y 树降级 —— 先还原再用（2026-10-28 实测：最小化让窗口
+                # 匹配不上、全树遍历 20s+，控制流程耗尽看门狗预算）。
+                # (UIAWrapper 没有 is_iconic/restore，直接走 user32。)
+                try:
+                    _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    time.sleep(1.5)
+                except Exception:  # noqa: BLE001
+                    pass
+                named = 'bambu' in (w.element_info.name or '').lower()
+            if named:
                 return w
+            visible = (hwnd is not None and bool(_user32.IsWindowVisible(hwnd))) \
+                or bool(_safe(w.is_visible))
+            if not visible or iconic:
+                continue
             r = _safe(w.rectangle)
             if fallback is None and r and (r.right - r.left) > 300 \
                     and (r.bottom - r.top) > 300:
@@ -190,7 +218,9 @@ def probe(texts: list[str] | None = None,
     bset = {n for (_, t, n, _, _) in snap
             if t in ('Button', 'MenuItem', 'Hyperlink') and n}
     return {
-        'texts': {t: (t in tset) for t in (texts or [])},
+        # 文本用子串匹配: 标记常带装饰后缀 (列表头实际是「设备名称 ↑」,
+        # 精确匹配永远 False, 2026-10-28 实测把 _enter 卡死在列表探测上)
+        'texts': {t: any(t in n for n in tset) for t in (texts or [])},
         'buttons': {b: (b in bset) for b in (buttons or [])},
     }
 
@@ -205,6 +235,22 @@ def _find_named(want: str):
     return None
 
 
+def _find_named_prefix(want: str):
+    """宽松兜底: 卡片文本是「<名> 热床: .. 状态」拼接, 名字在前。
+
+    startswith 而不是 in —— 避免撞上正文里恰好包含名字的长句
+    (如停止确认框标题「您确定要…」)。(2026-10-28)
+    """
+    if not want:
+        return None
+    cands = [x for x in _snapshot() if x[2] and x[2].startswith(want)]
+    for prefer in ('Hyperlink', 'Button', 'MenuItem', 'Text', 'ListItem'):
+        for (c, t, n, au, r) in cands:
+            if t == prefer:
+                return c
+    return cands[0][0] if cands else None
+
+
 def press_text(want: str) -> bool:
     c = _find_named(want)
     return bool(c and _click(c))
@@ -212,6 +258,8 @@ def press_text(want: str) -> bool:
 
 def press_desc(desc: str) -> bool:
     c = _find_named(desc)
+    if c is None:
+        c = _find_named_prefix(desc)
     if c is not None:
         return _click(c)
     # 停止确认框兜底: 名字可能是 确定/确认 (结构待真机验证, 打日志摸清)
