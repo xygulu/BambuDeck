@@ -15,6 +15,21 @@ import 'printer_link.dart';
 import 'printer_profile.dart';
 import 'rtsp_quality.dart';
 
+/// 一键换盘走哪条路 (2026-10-28)。
+///
+/// [lanFtps] = 纯协议: FTPS 上传换盘模型 + LAN MQTT 派发 project_file。
+/// 不需要 Bambu Connect 自动化 —— Windows 那台机器上没有 helper, 局域网
+/// 打印机的一键换盘靠这条路。前提是打印机在局域网、有 IP、连上了, 且
+/// 开发者模式确认为开(固件对未签名的 print 帧回 84033543)。
+///
+/// [tryLanThenConnect] = 开发者模式状态未知(A1 固件不报 `print.fun`, 读不出
+/// bit29): 先试纯协议, 并等打印机回报新任务确认真接单了; 没接上(固件静默
+/// 丢弃)再退回 Connect。
+///
+/// [connect] = 云端派单: 云模式打印机没有可达的 FTP 端点, 开发者模式关的
+/// 打印机 LAN 直发会被固件拦, 两者都只能靠 Connect(持有拓竹合法客户端身份)。
+enum PlateSwapRoute { lanFtps, tryLanThenConnect, connect }
+
 /// 独立网页服务：不依赖 GUI app，直接读 `~/.bambudeck/hub.json` 起一套
 /// [HubServer]，并自己管理每台打印机的 MQTT 连接。
 ///
@@ -50,6 +65,32 @@ class HubService {
   Timer? _cloudSyncTimer;
 
   bool get running => hub.running;
+
+  /// 路由判定 (纯函数, 便于单测): 局域网 + 有 IP + 连上了 → 纯协议优先。
+  /// 开发者模式确认为关 → 直接 Connect(固件会拦); 状态未知(A1 不报 fun)
+  /// → 先试纯协议并确认接单, 没接上再退回 Connect。
+  static PlateSwapRoute plateSwapRoute(
+    PrinterProfile profile,
+    BambuState? state, {
+    required bool hasLink,
+  }) {
+    if (profile.mode != PrinterMode.lan) return PlateSwapRoute.connect;
+    if (profile.ip.trim().isEmpty) return PlateSwapRoute.connect;
+    if (!hasLink) return PlateSwapRoute.connect;
+    switch (state?.developerModeOff) {
+      case true:
+        return PlateSwapRoute.connect;
+      case false:
+        return PlateSwapRoute.lanFtps;
+      case null:
+        // 还没连上(状态未知)或固件不报 fun(A1) —— 都属于「不知道」, 但
+        // 连不上时派发必然失败, 白试一次不如直接 Connect; 固件不报 fun 时
+        // 值得试(用户那台 A1 的局域网直发历史上是通的)。
+        return state == null
+            ? PlateSwapRoute.connect
+            : PlateSwapRoute.tryLanThenConnect;
+    }
+  }
 
   Future<void> start() async {
     config = await loadHubConfig(configFile);
@@ -288,10 +329,55 @@ class HubService {
         'error': '「${p.name}」未配置序列号, Connect 自动化无法定位打印机',
       };
     }
+
+    // 局域网直连的打印机: 纯协议换盘(FTPS 上传 + MQTT 派发), 不需要
+    // Bambu Connect 自动化 —— Windows 那台机器上没有 helper, 走这条路才有一键
+    // 换盘 (2026-10-28)。开发者模式关的打印机会被固件拦(84033543), 那种
+    // 情况才退回 Connect 派单。
+    final link = _links[p.id];
+    final state = _stateOf(p);
+    final route = plateSwapRoute(p, state, hasLink: link != null);
+    if (link != null &&
+        (route == PlateSwapRoute.lanFtps ||
+            route == PlateSwapRoute.tryLanThenConnect)) {
+      final ams = pickSwapAmsSlot(state?.ams);
+      final taskBefore = state?.taskId ?? '';
+      try {
+        await startPlateSwap(
+          p,
+          sendPrint: link.printProjectFile,
+          ams: ams,
+        );
+        // 固件对未签名的 print 帧会**静默丢弃**(开发者模式关的打印机)：
+        // MQTT publish 成功不代表打印机接单了。等它回报新任务/进入打印态
+        // 才算真的接上, 没接上就退回 Connect 派单。
+        final took =
+            await _waitForPrintStart(p, taskBefore, const Duration(seconds: 5));
+        if (took) {
+          LogBuffer.instance.add('[网页] 换盘 ${p.name}: 局域网直发已派单'
+              '${ams == null ? '(外置料)' : '(AMS${ams.amsId} 槽${ams.slot + 1})'}');
+          return <String, dynamic>{
+            'ok': true,
+            'printer': p.name,
+            'method': 'lan-ftps',
+            if (ams != null) 'ams': ams.amsId,
+            if (ams != null) 'slot': ams.slot,
+          };
+        }
+        LogBuffer.instance.add('[网页] 换盘 ${p.name}: 局域网直发没被接单'
+            '(开发者模式可能关着), 退回云端派单');
+      } catch (e) {
+        LogBuffer.instance
+            .add('[网页] 换盘 ${p.name}: 局域网直发失败 ${_oneLine(e)}');
+        // 不直接失败: helper 在的话还有云端派单这条路。
+      }
+    }
+
     if (!await CloudPrintHelper.instance.health()) {
       return <String, dynamic>{
         'ok': false,
-        'error': '打印服务不可用（本机 bconnect_service.py 没在跑）',
+        'error': '打印服务不可用（本机 bconnect_service.py 没在跑）'
+            '${p.mode == PrinterMode.lan ? '；局域网直发也没成功' : ''}',
       };
     }
     final r = await startCloudPlateSwap(p);
@@ -300,12 +386,40 @@ class HubService {
     return <String, dynamic>{
       'ok': r.ok,
       'printer': p.name,
+      'method': 'connect',
       if (r.taskId != null) 'task': r.taskId,
       if (r.taskStatus != null) 'taskStatus': r.taskStatus,
       if (r.elapsedTotal != null) 'elapsed': r.elapsedTotal,
       if (r.error != null) 'error': r.error,
       'steps': r.steps.map((s) => s.toJson()).toList(),
     };
+  }
+
+  /// 等打印机接下刚派的换盘任务: 回报新的 taskId, 或进入打印态。
+  /// 有界超时(不挂死)—— MQTT 派发成功但固件静默丢弃时这里会等满。
+  Future<bool> _waitForPrintStart(
+      PrinterProfile p, String taskBefore, Duration timeout) async {
+    final link = _links[p.id];
+    if (link == null) return false;
+    final completer = Completer<bool>();
+    late final StreamSubscription<BambuState> sub;
+    final timer = Timer(timeout, () {
+      if (!completer.isCompleted) completer.complete(false);
+    });
+    sub = link.states.listen((s) {
+      if (completer.isCompleted) return;
+      final newTask = s.taskId.isNotEmpty && s.taskId != taskBefore;
+      if (newTask || s.printing) {
+        timer.cancel();
+        completer.complete(true);
+      }
+    });
+    try {
+      return await completer.future;
+    } finally {
+      timer.cancel();
+      await sub.cancel();
+    }
   }
 
   Future<Map<String, dynamic>> _set(PrinterProfile p,
