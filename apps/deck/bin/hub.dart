@@ -20,12 +20,24 @@ Future<void> main(List<String> args) async {
 
   String env(String name) => Platform.environment[name]?.trim() ?? '';
 
+  // 默认配置：程序目录下的 config/hub.json 优先（CWD，其次 exe 所在目录；
+  // Windows 部署包布局——用户要求 json 一律放运行程序目录、不读 ~/.bambudeck，
+  // 裸跑 hub 也要读到包内配置），都没有才退回家目录（macOS launchd 部署的
+  // 既有路径，App 导出的 hub.json 在那里）。
+  String defaultConfigPath() {
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    final sep = Platform.pathSeparator;
+    for (final base in [Directory.current.path, exeDir]) {
+      final f = '$base${sep}config${sep}hub.json';
+      if (File(f).existsSync()) return f;
+    }
+    return '$home/.bambudeck/hub.json';
+  }
+
   final configArg = args.isNotEmpty ? args[0].trim() : '';
   final configPath = configArg.isNotEmpty
       ? configArg
-      : (env('HUB_CONFIG').isNotEmpty
-          ? env('HUB_CONFIG')
-          : '$home/.bambudeck/hub.json');
+      : (env('HUB_CONFIG').isNotEmpty ? env('HUB_CONFIG') : defaultConfigPath());
 
   String resolvePage() {
     final e = env('HUB_PAGE');
@@ -84,9 +96,21 @@ Future<void> main(List<String> args) async {
   });
 
   // 阻塞到收到 SIGINT / SIGTERM, 然后优雅收尾（关 MQTT 连接 + HTTP 监听）。
+  // Windows 只支持 SIGINT（CTRL+C），SIGTERM 监听会抛 SignalException
+  // （errno 50, 2026-10-28 实测：服务刚启动就被这个未处理异常崩掉）；
+  // 计划任务/无控制台场景两种信号都收不到，由守护循环 taskkill 兜底，
+  // 所以监听失败只记一条日志、服务照常常驻。
   final stop = Completer<void>();
-  ProcessSignal.sigint.watch().listen((_) => stop.complete());
-  ProcessSignal.sigterm.watch().listen((_) => stop.complete());
+  void watch(ProcessSignal signal) {
+    try {
+      signal.watch().listen((_) => stop.complete());
+    } on SignalException {
+      LogBuffer.instance.add('[独立服务] $signal 监听不可用，退出交给 taskkill');
+    }
+  }
+
+  watch(ProcessSignal.sigint);
+  if (!Platform.isWindows) watch(ProcessSignal.sigterm);
   await stop.future;
 
   LogBuffer.instance.add('[独立服务] 正在退出');
