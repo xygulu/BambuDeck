@@ -232,6 +232,10 @@
   }
   .pane-head .ptitle { font-size: 16px; font-weight: 700; }
   .phead-main { flex: 1; min-width: 0; }
+  /* 标题行 = 名字 + 打印状态徽章 (和列表卡同一套 STATE 配色)。 */
+  .ptitle-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .ptitle-row .ptitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ptitle-row .badge { flex: none; font-size: 12px; padding: 3px 9px; }
   /* 窄屏详情页没有左栏卡片, 任务/进度/剩余补到标题下面; 宽屏左栏已经有。 */
   .pjob {
     display: none; margin-top: 3px; font-size: 12px; color: var(--text2);
@@ -806,7 +810,10 @@
         <div class="pane-head">
           <button class="back" id="back" aria-label="返回列表">←</button>
           <div class="phead-main">
-            <div class="ptitle" id="ptitle"></div>
+            <div class="ptitle-row">
+              <div class="ptitle" id="ptitle"></div>
+              <span class="badge idle" id="pbadge" hidden></span>
+            </div>
             <div class="pjob" id="pjob"></div>
           </div>
           <div class="pnet" id="pnet"></div>
@@ -1175,14 +1182,23 @@ function markScrollables(root) {
 function updatePane(p) {
   const s = p.state;
   const job = $('pjob');
+  const badge = $('pbadge');
   if (!s) {
     // 还没收到状态推送 (打印机离线/正在连): 头部只留名字和「未连接」。
     if (job) job.textContent = '';
+    if (badge) badge.hidden = true;
     $('pnet').textContent = '未连接';
     return;
   }
   const net = [s.wifi != null ? `WiFi ${s.wifi} dBm` : '', s.ip || ''].filter(Boolean).join(' · ');
   $('pnet').textContent = net;
+  // 监控页头部与列表卡同款状态徽章: 打印中/准备中/已暂停/已完成/失败/空闲。
+  if (badge) {
+    const [zh, cls] = stateOf(s.gcode);
+    badge.hidden = false;
+    badge.className = 'badge ' + cls;
+    badge.textContent = zh;
+  }
   if (job) {
     // 只有模型名会超长, 让它自己缩 (见 .pjob .jname), 进度和剩余时间不截。
     const bits = [];
