@@ -257,10 +257,21 @@ def probe(texts: list[str] | None = None,
 
 # ---------------------------------------------------------------- 点击
 def _find_named(want: str):
-    for (c, t, n, au, r) in _snapshot():
+    """精确匹配 name/automationId, 按「可点击性」择优。
+
+    同名元素会重复 (2026-10-29 探测实测: 左侧导航『打印』页签 Hyperlink 和
+    选项页右下『打印』按钮同名, 且页签在树序里靠前) —— press_text 要的是
+    按钮, 点到导航页签发送页永远出不来。所以两段式: 先找 Button, 找不到
+    再退其它类型。
+    """
+    snap = _snapshot()
+    for (c, t, n, au, r) in snap:
+        if (n == want or au == want) and t == 'Button':
+            return c
+    for (c, t, n, au, r) in snap:
         if n == want or au == want:
-            if t in ('Button', 'MenuItem', 'Hyperlink', 'Text', 'Image',
-                     'Group', 'ListItem', 'Pane', 'Document'):
+            if t in ('MenuItem', 'Hyperlink', 'Text', 'Image', 'Group',
+                     'ListItem', 'Pane', 'Document'):
                 return c
     return None
 
@@ -306,6 +317,29 @@ def press_desc(desc: str) -> bool:
 
 def click_desc(want: str) -> bool:
     return press_desc(want)
+
+
+def press_confirm_strict() -> bool:
+    """只按名为 confirm/确定/确认/OK 的 Button (导入/派单确认专用)。
+
+    不走 press_desc 的兜底链 (那会落到 是/发送 等宽松候选) —— 确认类点击
+    必须「树里看到了按钮才按」, 绝不盲按 (2026-10-29 P22 误派教训)。"""
+    for want in ('confirm', '确定', '确认', 'OK'):
+        c = _find_named(want)
+        if c is not None:
+            return _click(c)
+    return False
+
+
+def press_cancel_strict() -> bool:
+    """只按名为 cancel/取消 的按钮 (关弹窗专用), 没有再 ESC。
+
+    绝不落到 确定/confirm 一类兜底 —— 关弹窗按错方向就是误派单。"""
+    for want in ('cancel', '取消'):
+        c = _find_named(want)
+        if c is not None:
+            return _click(c)
+    return press_escape()
 
 
 def press_at(x: float, y: float) -> bool:
@@ -390,7 +424,10 @@ def _selector_scan() -> dict | None:
     hit = None
     for (c, t, n, au, r) in snap:
         blob = ' '.join(x for x in (n, au) if x)
-        if 'chevron_down' in blob and r:
+        # 宽度守卫 (2026-10-29 探测实测): 右上角账号菜单同样带 chevron_down
+        # (『Xygulu Xygulu chevron_down』 101x32), 点开是登出/设置 —— 打印
+        # 目标选择器比它宽得多 (mac 上 320px), 太窄的一律不认。
+        if 'chevron_down' in blob and r and (r.right - r.left) >= 140:
             hit = (c, blob, r)
             break
     if hit is None:

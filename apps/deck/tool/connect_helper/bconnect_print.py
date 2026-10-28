@@ -289,6 +289,9 @@ def open_deeplink(path: str, name: str | None = None) -> str:
 SEND_PAGE = "发送打印任务至"
 IMPORT_PAGE = "导入文件"
 _PAGE_LABEL = {SEND_PAGE: "发送页", IMPORT_PAGE: "导入弹窗"}
+# Windows (2026-10-29 P17–P22 实测): 选项页「浏览换文件」按钮与导入弹窗确认钮
+# 文案同名, 按按钮名探弹窗必假阳性 —— 弹窗探测只能用正文标记。
+WIN_IMPORT_TEXT = "您将导入文件"
 
 # 下拉布局偏移（2026-10-24 实测标定，Bambu Connect 2.5.0-beta.15）。
 # 发送页设备选择器的下拉选项不暴露在 macOS AX 树（AXShowMenu/AXRows/children 都
@@ -818,6 +821,157 @@ def select_device(want_name: str, cur_target: str | None = None) -> bool:
             _restore_frontmost(prev)
 
 
+def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
+             before_id, stop_before_send: bool, select_only: bool,
+             filament: list[str] | None, verbose: bool, t0: float) -> dict:
+    """Windows 派单流程 (2026-10-29 P17–P22 真机全链路实测)。
+
+    与 Mac 的差异: 深链直达打印选项页(文件预载), 没有 Mac 的导入弹窗、
+    「发送打印任务至」发送页和下拉选机。实测链:
+      选项页「打印」钮 -> 导入确认弹窗(正文「您将导入文件"x"」, 确认钮
+      name='confirm') -> 确认后 ~2s 内自动接打印确认弹窗 -> 第二次 confirm
+      = 真派单 -> 直跳设备详情页(『123』『打印进度』『0 / 46 | -11m』)。
+
+    目标机校验因此换了位置: 派单 confirm 前必须在弹窗文字里核对到目标机名
+    (名→序列号反查==serial)。核对不到(懒加载/结构未知/选机弹窗语义未验证)
+    一律 press_cancel_strict 放弃 —— 宁可这次换盘失败, 不能把任务打进别的
+    机器 (P22 误派教训)。选机弹窗的真机结构待首次授权实测捕获后放行。
+    """
+    base = os.path.basename(path)
+
+    # 1) 选项页 (深链直达; 「打印」钮 = 页面标记)
+    if not wait_probe(40, buttons=["打印"]):
+        result["error"] = "打印选项页未出现「打印」按钮"
+        rec("options-page", False, result["error"])
+        return result
+    # 文件核对: 选项页文字里必须看得到该文件名, 防止预载失败后按错文件。
+    if not wait_probe(8, texts=[base]):
+        result["error"] = "选项页文字里核对不到打印文件「%s」" % base
+        rec("check-file-page", False, result["error"])
+        return result
+    rec("options-page", True, "已进选项页, 文件「%s」已预载" % base)
+    if filament:
+        rec("filament", True, "Windows 选项页无耗材入口(未实现), 已忽略")
+
+    # 2) 目标机在派单前没有 UI 落点, 只能先备好「可核对机名表」:
+    #    只收名→序列号反查唯一的机器, 重名机不进表(防误配)。
+    want_name = ((dev or {}).get("name") or "").strip()
+    known = {}
+    for d in cloud.device_list() or []:
+        n = (d.get("name") or "").strip()
+        s = d.get("serial")   # device_list 已把云端的 dev_id 规范成 serial
+        if n and s and cloud.serial_for_name(n) == s:
+            known[n] = s
+
+    if stop_before_send or select_only:
+        # Windows 没有发送页: 最后的安全停靠点 = 选项页(文件已预载、未按
+        # 「打印」)。再往下任何一次 confirm 都等于真派单。
+        rec("stop-before-send", True, "已停在选项页, 未派单")
+        result["ok"] = True
+        return result
+
+    # 3) 派单: 按「打印」-> 弹窗循环 (导入确认可能多轮, 打印确认=派单)。
+    if not press_text("打印"):
+        result["error"] = "点不到「打印」按钮"
+        rec("click-print", False, result["error"])
+        return result
+    rec("click-print", True, "已按「打印」, 等确认弹窗")
+
+    dispatched = False
+    for rnd in range(1, 5):
+        # 弹窗出现探测: 用 confirm 钮在树里出现兜底(选项页/详情页都没有
+        # confirm 钮, v9 实测空操作), 再等 1.5s 让正文懒加载刷出来。
+        # 注意不能用按钮名「导入Gcode 3MF文件」探弹窗 —— 选项页的「浏览
+        # 换文件」按钮同名, 永远假阳性 (v9 教训)。
+        if not wait_probe(20 if rnd == 1 else 8, buttons=["confirm"]):
+            break  # 没弹窗: 可能直接派单了, 交给云端任务回读裁决
+        time.sleep(1.5)
+        # 分类只认内容: 机名命中=打印确认/选机弹窗; 正文标记=导入弹窗;
+        # 两者都不沾=未知弹窗, 一律取消放弃 —— 绝不盲按 confirm (P22 教训)。
+        ts = set()
+        hit = []
+        for _ in range(3):
+            ts = {t for t in ax.texts() if t}
+            hit = [n for n in known if n in ts]
+            if hit:
+                break
+            time.sleep(1.2)
+        if WIN_IMPORT_TEXT in ts and not hit:
+            # 导入确认弹窗(正文已核对): strict confirm, 一次懒加载重试
+            ok = ax.press_confirm_strict()
+            if not ok:
+                time.sleep(1.5)
+                ok = ax.press_confirm_strict()
+            if not ok:
+                result["error"] = "导入确认弹窗(第%d轮)点不到确认键" % rnd
+                rec("click-import", False, result["error"])
+                return result
+            rec("click-import", True, "第%d轮: 已确认导入(正文已核对)" % rnd)
+            time.sleep(1.5)  # 实测 ~2s 内自动接打印确认弹窗
+            continue
+        verified = None
+        if len(hit) == 1 and known[hit[0]] == serial:
+            verified = hit[0]
+        elif len(hit) > 1:
+            # 选机弹窗(兼容机不止一台): 结构与选中态语义未验证, 不赌 ——
+            # 取消并附上弹窗文字, 待首次授权实测捕获后再放行自动选机。
+            ax.press_cancel_strict()
+            result["error"] = ("选机弹窗(可见:%s)语义未验证, 已取消未派单; "
+                               "目标「%s」需人工选择或待结构捕获后自动处理"
+                               % (sorted(hit), want_name or serial))
+            rec("select-device", False, result["error"])
+            return result
+        if verified is None:
+            ax.press_cancel_strict()
+            result["error"] = ("确认弹窗内容未知(可见文字:%s), 已取消未派单; "
+                               "若这是打印确认框说明机名未暴露, 结构待捕获"
+                               % sorted(ts)[:10])
+            rec("check-target", False, result["error"])
+            return result
+        if not ax.press_confirm_strict():
+            result["error"] = "目标已核对(「%s」)但点不到确认键" % verified
+            rec("click-dispatch", False, result["error"])
+            return result
+        dispatched = True
+        rec("click-dispatch", True, "目标「%s」已核对, 已确认派单" % verified)
+        break
+
+    if not dispatched:
+        # 两种可能: (a) 没弹确认框直接派单了 (v9 未观察到此路径, 以云端为准);
+        # (b) 按「打印」没反应。云端任务回读裁决。
+        task = cloud.latest_task(base, serial, after_id=before_id,
+                                 tries=5, wait=3)
+        if task:
+            result["task"] = task
+            result["ok"] = True
+            rec("task-created", True,
+                "未见确认弹窗但云端已有新任务 id=%s device=%s"
+                % (task.get("id"), task.get("device")))
+            return result
+        result["error"] = "按「打印」后未见可处理的确认弹窗, 云端也未回读到新任务"
+        rec("click-dispatch", False, result["error"])
+        return result
+
+    # 点下派单确认即 ok (与 Mac 一致: 不等页面切换, AX 旧文字滞留会假等待)。
+    result["ok"] = True
+    task = cloud.latest_task(base, serial, after_id=before_id, tries=4, wait=2)
+    if task:
+        result["task"] = task
+        if task.get("device") and task["device"] != serial:
+            rec("task-created", False, "警告: 任务落到 %s, 期望 %s"
+                % (task["device"], serial))
+        else:
+            rec("task-created", True, "id=%s status=%s device=%s"
+                % (task.get("id"), task.get("status"), task.get("device")))
+    else:
+        rec("task-created", False, "云端暂未回读到新任务(可能还在落库)")
+    result["elapsed_total"] = round(time.time() - t0, 2)
+    if verbose:
+        print("总耗时 %.1fs，结果 ok=%s" % (result["elapsed_total"],
+                                           result["ok"]), flush=True)
+    return result
+
+
 def run(path: str, stop_before_send: bool = False,
         serial: str = DEFAULT_DEVICE, verbose: bool = True,
         filament: list[str] | None = None, select_only: bool = False) -> dict:
@@ -879,19 +1033,38 @@ def run(path: str, stop_before_send: bool = False,
         return result
 
     # 清掉上一轮残留的弹窗（只按 cancel，不动 confirm，避免误派单）。
-    # 一次短路 probe 同时探两个页面标记，替代两次全量 texts() 遍历（省 ~18s）。
-    r = ax.probe(texts=[SEND_PAGE, IMPORT_PAGE])
-    cleaned = [_PAGE_LABEL[t] for t in (SEND_PAGE, IMPORT_PAGE)
-               if t in r.get("texts", {})]
-    if cleaned:
-        if press_desc("cancel"):
-            rec("reset", True, "关闭残留: " + "/".join(cleaned))
-            time.sleep(1.5)
-        else:
-            rec("reset", False, "有残留但点不到 cancel: " + "/".join(cleaned))
+    if _IS_WIN:
+        # Windows: 残留只有可能是导入确认弹窗(正文标记; 选项页残留不必清,
+        # 深链重进会重新预载)。strict cancel, 点不到就留着报给下一步。
+        if wait_probe(4, texts=[WIN_IMPORT_TEXT]):
+            if ax.press_cancel_strict():
+                rec("reset", True, "关闭残留导入弹窗")
+                time.sleep(1.5)
+            else:
+                rec("reset", False, "有残留导入弹窗但点不到 cancel")
+    else:
+        # 一次短路 probe 同时探两个页面标记，替代两次全量 texts() 遍历（省 ~18s）。
+        r = ax.probe(texts=[SEND_PAGE, IMPORT_PAGE])
+        cleaned = [_PAGE_LABEL[t] for t in (SEND_PAGE, IMPORT_PAGE)
+                   if t in r.get("texts", {})]
+        if cleaned:
+            if press_desc("cancel"):
+                rec("reset", True, "关闭残留: " + "/".join(cleaned))
+                time.sleep(1.5)
+            else:
+                rec("reset", False, "有残留但点不到 cancel: " + "/".join(cleaned))
 
     url = open_deeplink(path)
     rec("deeplink", True, url)
+
+    if _IS_WIN:
+        # Windows 实测流程与 Mac 完全不同 (无导入弹窗/无发送页/无下拉选机),
+        # 整条链独立成 _run_win, 便于对照与后续维护。
+        return _run_win(rec, result, path=path, serial=serial, dev=dev,
+                        before_id=before_id,
+                        stop_before_send=stop_before_send,
+                        select_only=select_only, filament=filament,
+                        verbose=verbose, t0=t0)
 
     # 1) 导入弹窗（短路 probe，~2s vs 全量 ~9s）
     if not wait_probe(30, texts=[IMPORT_PAGE]):
