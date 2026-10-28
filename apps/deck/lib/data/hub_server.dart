@@ -11,6 +11,7 @@ import 'bambu_mjpeg.dart';
 import 'bambu_mjpeg_hub.dart';
 import 'camera_profile.dart';
 import 'cloud_print_helper.dart';
+import 'hub_config.dart';
 import 'hub_ptz.dart';
 import 'log_buffer.dart';
 import 'printer_profile.dart';
@@ -74,9 +75,18 @@ class JpegSplitter {
 }
 
 /// ffmpeg candidates, absolute paths first - a GUI-launched macOS app has
-/// a minimal PATH, so the bare command would fail there.
+/// a minimal PATH, so the bare command would fail there. Windows 部署包把
+/// 静态 ffmpeg 放在可执行文件旁边 (GUI: 同目录; deck_hub: ffmpeg/ 子目录,
+/// 反馈 2026-10-28:Windows 网页服务第三方摄像头无画面就是缺它), 所以
+/// 先认 exe 目录再退回 PATH。
 String discoverFfmpeg() {
-  const candidates = [
+  final exeDir = Platform.resolvedExecutable.isEmpty
+      ? ''
+      : File(Platform.resolvedExecutable).parent.path;
+  final exeName = Platform.isWindows ? 'ffmpeg.exe' : 'ffmpeg';
+  final candidates = [
+    if (exeDir.isNotEmpty) '$exeDir/ffmpeg/$exeName',
+    if (exeDir.isNotEmpty) '$exeDir/$exeName',
     '/opt/homebrew/bin/ffmpeg',
     '/usr/local/bin/ffmpeg',
   ];
@@ -622,6 +632,20 @@ class HubServer {
   /// 立刻跟着变; 网页端自己那一路 `<audio>` 也按这个开关启停。
   Future<void> Function(bool muted)? muteHandler;
 
+  /// 云账号管理（产品化 2026-10-28）：登录向导 / 账号列表 / 暂定与退出。
+  /// 由独立 deck_hub 的 HubService 接线；App 内嵌网页服务暂不注入（端点回
+  /// 503，页面提示独立服务才提供）。登录成功即同步设备并落盘，打印机清单
+  /// 从此跟随云端账号。
+  Future<Map<String, dynamic>> Function(Map<String, dynamic> body)?
+      cloudLoginHandler;
+  Future<Map<String, dynamic>> Function()? accountsHandler;
+  Future<Map<String, dynamic>> Function(Map<String, dynamic> body)?
+      accountUpdateHandler;
+
+  /// 登录账号清单（快照用，不含 token）。同步状态在 HubService 的内存里，
+  /// 页面要详情时走 GET /api/accounts。
+  List<CloudAccount> accounts = const [];
+
   /// 服务状态 (2026-10-27): `/api/health` 会 GET 这条公网地址, 走 CF 边缘
   /// 进隧道再回本机, 一发探测整条链路。空 = 跳过隧道项 (App 内置网页服务
   /// 不注入; 独立 deck_hub 由 bin/hub.dart 按环境变量 HUB_TUNNEL_URL 给)。
@@ -751,6 +775,14 @@ class HubServer {
           req.response.headers.contentType = ContentType.json;
           req.response.write(jsonEncode(await _healthSnapshot()));
           await req.response.close();
+        case '/api/cloud/login':
+          await _handleCloudLogin(req);
+        case '/api/cloud/send-code':
+          await _handleCloudSendCode(req);
+        case '/api/accounts':
+          await _handleAccounts(req);
+        case '/api/account':
+          await _handleAccountUpdate(req);
         default:
           final m = RegExp(r'^/stream/([^/]+)$').firstMatch(path);
           final am = RegExp(r'^/audio/([^/]+)$').firstMatch(path);
@@ -1159,6 +1191,102 @@ class HubServer {
     await req.response.close();
   }
 
+  // -- 云账号（产品化 2026-10-28） ----------------------------------------
+  //
+  // 薄路由：登录/列表/暂定退出都委托 HubService 注入的 handler（它们要动
+  // 配置与同步引擎）；发验证码是纯协议调用，这里直接做。
+
+  Future<Map<String, dynamic>?> _readJsonBody(HttpRequest req) async {
+    if (req.method != 'POST') {
+      await _json(req, HttpStatus.methodNotAllowed,
+          {'ok': false, 'error': '只支持 POST'});
+      return null;
+    }
+    try {
+      final raw = await utf8.decoder.bind(req).join();
+      return raw.trim().isEmpty
+          ? const {}
+          : (jsonDecode(raw) as Map).cast<String, dynamic>();
+    } catch (_) {
+      await _json(req, HttpStatus.badRequest,
+          {'ok': false, 'error': 'body 不是合法 JSON'});
+      return null;
+    }
+  }
+
+  /// `POST /api/cloud/login {region, account, password|code}` —— 网页登录
+  /// 向导的提交口。成功即同步设备并落盘（mtime 重启生效），响应带设备清单
+  /// （不含访问码）给向导展示。业务失败回 200 + ok:false，页面负责展示。
+  Future<void> _handleCloudLogin(HttpRequest req) async {
+    final body = await _readJsonBody(req);
+    if (body == null) return;
+    final h = cloudLoginHandler;
+    if (h == null) {
+      await _json(req, HttpStatus.serviceUnavailable, {
+        'ok': false,
+        'error': '云登录未接入（独立网页服务 deck_hub 才提供）',
+      });
+      return;
+    }
+    await _json(req, HttpStatus.ok, await h(body));
+  }
+
+  /// `POST /api/cloud/send-code {region, account}` —— 邮箱/短信登录验证码。
+  Future<void> _handleCloudSendCode(HttpRequest req) async {
+    final body = await _readJsonBody(req);
+    if (body == null) return;
+    final account = (body['account'] ?? '').toString().trim();
+    if (account.isEmpty) {
+      await _json(req, HttpStatus.ok, {'ok': false, 'error': '请先输入账号'});
+      return;
+    }
+    final regionName = (body['region'] ?? 'cn').toString().trim();
+    final CloudRegion region;
+    try {
+      region = CloudRegion.values.byName(regionName);
+    } catch (_) {
+      await _json(
+          req, HttpStatus.ok, {'ok': false, 'error': '未知区域 $regionName'});
+      return;
+    }
+    try {
+      await cloudSendLoginCode(region: region, account: account)
+          .timeout(const Duration(seconds: 25));
+      await _json(req, HttpStatus.ok, {'ok': true});
+    } catch (e) {
+      await _json(req, HttpStatus.ok, {'ok': false, 'error': '$e'});
+    }
+  }
+
+  /// `GET /api/accounts` —— 账号列表 + 最近同步状态。
+  Future<void> _handleAccounts(HttpRequest req) async {
+    if (req.method != 'GET') {
+      await _json(req, HttpStatus.methodNotAllowed,
+          {'ok': false, 'error': '只支持 GET'});
+      return;
+    }
+    final h = accountsHandler;
+    if (h == null) {
+      await _json(req, HttpStatus.serviceUnavailable,
+          {'ok': false, 'error': '账号管理未接入（独立网页服务才提供）'});
+      return;
+    }
+    await _json(req, HttpStatus.ok, await h());
+  }
+
+  /// `POST /api/account {id, action: suspend|resume|logout}`。
+  Future<void> _handleAccountUpdate(HttpRequest req) async {
+    final body = await _readJsonBody(req);
+    if (body == null) return;
+    final h = accountUpdateHandler;
+    if (h == null) {
+      await _json(req, HttpStatus.serviceUnavailable,
+          {'ok': false, 'error': '账号管理未接入（独立网页服务才提供）'});
+      return;
+    }
+    await _json(req, HttpStatus.ok, await h(body));
+  }
+
   // -- snapshots --------------------------------------------------------
 
   Map<String, dynamic> _snapshot() => {
@@ -1166,6 +1294,17 @@ class HubServer {
         'cameraMuted': settings.cameraMuted,
         'printers': [for (final p in printers) _printerJson(p)],
         'cameras': [for (final c in cameras) _cameraJson(c)],
+        // 登录账号（脱敏，无 token）：页面据此判断「首次启动」弹登录向导，
+        // 用户管理面板要同步详情时再走 GET /api/accounts。
+        'accounts': [
+          for (final a in accounts)
+            {
+              'id': a.id,
+              'account': a.account,
+              'region': a.region.name,
+              'suspended': a.suspended,
+            },
+        ],
       };
 
   Map<String, dynamic> _printerJson(PrinterProfile p) {

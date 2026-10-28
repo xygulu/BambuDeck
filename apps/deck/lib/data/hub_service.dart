@@ -65,6 +65,10 @@ class HubService {
     hub.connStatusOf = (id) => (_statuses[id] ?? BambuConnStatus.disconnected).name;
     hub.cameraHandler = _camera;
     hub.muteHandler = _mute;
+    hub.accounts = config.accounts;
+    hub.cloudLoginHandler = _cloudLogin;
+    hub.accountsHandler = _accountsStatus;
+    hub.accountUpdateHandler = _accountUpdate;
 
     LogBuffer.instance.add('[独立服务] 载入 ${config.printers.length} 台打印机、'
         '${config.cameras.length} 个摄像头 (${configFile.path})');
@@ -316,5 +320,182 @@ class HubService {
       await saveHubConfig(config, configFile);
     }
     LogBuffer.instance.add('[网页] 摄像头声音${muted ? '已静音' : '已恢复'}');
+  }
+
+  // -- 云账号管理（产品化 2026-10-28） ------------------------------------
+  //
+  // 网页登录向导的三个入口。落盘后 bin/hub.dart 的 mtime 监视会退出重启，
+  // 新账号/暂定/退出一律经「保存→自动重启」生效（守护循环 3 秒内拉起）。
+
+  Future<Map<String, dynamic>> _cloudLogin(Map<String, dynamic> body) async {
+    final regionName = (body['region'] ?? 'cn').toString().trim();
+    final CloudRegion region;
+    try {
+      region = CloudRegion.values.byName(regionName);
+    } catch (_) {
+      return {'ok': false, 'error': '未知区域 $regionName'};
+    }
+    final account = (body['account'] ?? '').toString().trim();
+    final password = (body['password'] ?? '').toString();
+    final code = (body['code'] ?? '').toString();
+    if (account.isEmpty) return {'ok': false, 'error': '请输入账号'};
+    if (password.isEmpty && code.isEmpty) {
+      return {'ok': false, 'error': '请输入密码或验证码'};
+    }
+
+    // 1. 登录（密码或验证码；TOTP 账号引导走验证码路径）。
+    final String token;
+    try {
+      final outcome = await cloudLogin(
+        region: region,
+        account: account,
+        password: password.isEmpty ? null : password,
+        code: code.isEmpty ? null : code,
+      ).timeout(const Duration(seconds: 25));
+      if (outcome is LoginNeedsTfa) {
+        return {
+          'ok': false,
+          'needsCode': true,
+          'error': '该账号开启了两步验证，请改用邮箱验证码登录',
+        };
+      }
+      if (outcome is LoginNeedsEmailCode) {
+        return {
+          'ok': false,
+          'needsCode': true,
+          'error': '该账号需要验证码，请先点「发送验证码」',
+        };
+      }
+      token = (outcome as LoginToken).token;
+    } on TimeoutException {
+      return {'ok': false, 'error': '登录超时，请重试'};
+    } catch (e) {
+      return {'ok': false, 'error': '登录失败: ${_oneLine(e)}'};
+    }
+
+    // 2. 设备清单 + uid（uid 给云 MQTT 用；拉不到设备则当次登录作废重试）。
+    final List<CloudDevice> devices;
+    try {
+      devices = await fetchCloudDevices(token, region)
+          .timeout(const Duration(seconds: 25));
+    } catch (e) {
+      return {'ok': false, 'error': '登录成功但拉取设备失败: ${_oneLine(e)}'};
+    }
+    var uid = '';
+    try {
+      uid = await resolveCloudUserId(token, region)
+              .timeout(const Duration(seconds: 15)) ??
+          '';
+    } catch (_) {}
+
+    // 3. upsert 账号（同账号同区域复用既有 id），合并设备，落盘。
+    final idx = config.accounts
+        .indexWhere((a) => a.account == account && a.region == region);
+    final acc = CloudAccount(
+      id: idx >= 0
+          ? config.accounts[idx].id
+          : 'a${uid.isNotEmpty ? uid.replaceFirst('u_', '') : DateTime.now().millisecondsSinceEpoch}',
+      region: region,
+      account: account,
+      accessToken: token,
+      userId: uid,
+      suspended: false,
+      createdAt:
+          idx >= 0 ? config.accounts[idx].createdAt : DateTime.now().millisecondsSinceEpoch,
+    );
+    final accounts = [...config.accounts];
+    if (idx >= 0) {
+      accounts[idx] = acc;
+    } else {
+      accounts.add(acc);
+    }
+    final (printers, _) = mergeCloudDevices(
+        printers: config.printers, account: acc, devices: devices);
+    config = HubConfig(
+      settings: config.settings,
+      printers: printers,
+      cameras: config.cameras,
+      accounts: accounts,
+    );
+    hub.accounts = accounts;
+    await saveHubConfig(config, configFile);
+    LogBuffer.instance.add('[云同步] $account 登录成功，'
+        '${devices.length} 台设备已同步（重启加载）');
+    return {
+      'ok': true,
+      'count': devices.length,
+      'devices': [
+        for (final d in devices)
+          {
+            'serial': d.devId,
+            'name': d.devName.isNotEmpty ? d.devName : d.productName,
+            'model': d.productName.isNotEmpty ? d.productName : d.modelName,
+            'online': d.online,
+            'hasCode': d.accessCode.isNotEmpty,
+          },
+      ],
+    };
+  }
+
+  Future<Map<String, dynamic>> _accountsStatus() async => {
+        'ok': true,
+        'accounts': [
+          for (final a in config.accounts)
+            {
+              'id': a.id,
+              'account': a.account,
+              'region': a.region.name,
+              'suspended': a.suspended,
+              'printers': config.printers.where((p) => p.accountId == a.id).length,
+              ..._syncStatusJson(a.id),
+            },
+        ],
+      };
+
+  Map<String, dynamic> _syncStatusJson(String accountId) {
+    final s = cloudSync.status[accountId];
+    if (s == null) return const {};
+    return {
+      'syncOk': s.ok,
+      'syncAt': s.at.toIso8601String(),
+      'syncCount': s.count,
+      if (s.error.isNotEmpty) 'syncError': s.error,
+    };
+  }
+
+  Future<Map<String, dynamic>> _accountUpdate(Map<String, dynamic> body) async {
+    final id = (body['id'] ?? '').toString();
+    final action = (body['action'] ?? '').toString();
+    final idx = config.accounts.indexWhere((a) => a.id == id);
+    if (idx < 0) return {'ok': false, 'error': '账号不存在'};
+    final name = config.accounts[idx].account;
+    var accounts = config.accounts;
+    var printers = config.printers;
+    switch (action) {
+      case 'suspend':
+        accounts = [...accounts]..[idx] = accounts[idx].copyWith(suspended: true);
+      case 'resume':
+        accounts = [...accounts]..[idx] = accounts[idx].copyWith(suspended: false);
+      case 'logout':
+        accounts = [...accounts]..removeAt(idx);
+        printers = printers.where((p) => p.accountId != id).toList();
+      default:
+        return {'ok': false, 'error': '未知操作 $action'};
+    }
+    config = HubConfig(
+      settings: config.settings,
+      printers: printers,
+      cameras: config.cameras,
+      accounts: accounts,
+    );
+    hub.accounts = accounts;
+    await saveHubConfig(config, configFile);
+    LogBuffer.instance.add('[云同步] 账号 $name: $action 已保存');
+    return {'ok': true};
+  }
+
+  String _oneLine(Object e) {
+    final s = e.toString().replaceAll('\n', ' ');
+    return s.length > 200 ? '${s.substring(0, 200)}…' : s;
   }
 }

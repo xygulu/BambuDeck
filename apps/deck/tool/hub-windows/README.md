@@ -18,7 +18,7 @@ deck-hub-windows\
 ├─ start.bat / stop.bat / restart.bat   日常启停
 ├─ run.bat                        前台调试(不经服务,看得到输出)
 ├─ run-hub.cmd                    守护循环(服务实际入口,一般不用手动跑)
-└─ ffmpeg\                        可选:把 ffmpeg.exe 放这里(串流截图用)
+└─ ffmpeg\ffmpeg.exe              已内置:第三方摄像头拉流必需,别删
 ```
 
 ## 首次部署(三步)
@@ -26,11 +26,10 @@ deck-hub-windows\
 1. **放配置**:从 Mac 把 `~/.bambudeck/hub.json` 拷到本包 `config\hub.json`。
    没有这一步 install 会拒绝执行。hub.json 含打印机访问码和摄像头地址(明文),
    只放本机,别外传。
-2. **(可选)装 FFmpeg**:摄像头 JPG→MP4 转码需要。任选其一:
-   - `winget install Gyan.FFmpeg`(装进系统 PATH);
-   - 或把 `ffmpeg.exe` 直接放进本包 `ffmpeg\` 文件夹(服务脚本已把该目录
-     加进 PATH,SYSTEM 账户也生效)。没有 FFmpeg 时网页仍能看实时抓拍,
-     只是连续视频流不可用。
+2. **不用装 FFmpeg**:第三方(海康/萤石等 RTSP)摄像头的画面拉流靠包内
+   自带的 `ffmpeg\ffmpeg.exe`(2026-10-28 起随包分发,缺失只会让第三方
+   摄像头无画面;拓竹机内摄像头不依赖它)。误删了想补回:
+   `winget install Gyan.FFmpeg`,或重新下载一个静态构建放回 `ffmpeg\`。
 3. **右键"以管理员身份运行" `install-service.bat`**。它会:
    - 按 `config\hub.json` 里的端口(settings.hubPort,默认 8787)开防火墙入站规则;
    - 注册计划任务 `BambuDeckHub`(SYSTEM 账户,开机 15 秒后自启,不开窗口);

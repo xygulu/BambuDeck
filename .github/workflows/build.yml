@@ -57,6 +57,26 @@ jobs:
         working-directory: apps/deck
       - run: dart build cli -o build/hub
         working-directory: apps/deck
+      # 第三方 RTSP 摄像头拉流靠 ffmpeg (机内摄像头是纯 Dart, 不需要)。
+      # Windows 镜像不带 ffmpeg, 下静态构建: exe 进 GUI Release 目录
+      # (discoverFfmpeg 认 exeDir/ffmpeg.exe) 和 hub 包的 ffmpeg/ 子目录
+      # (discoverFfmpeg 认 exeDir/ffmpeg/ffmpeg.exe)。
+      - name: Bundle ffmpeg for Windows
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP/ffmpeg.zip"
+          try {
+            Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile $zip
+          } catch {
+            Invoke-WebRequest -Uri 'https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip' -OutFile $zip
+          }
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP/ffx" -Force
+          $exe = Get-ChildItem "$env:RUNNER_TEMP/ffx" -Recurse -Filter ffmpeg.exe |
+            Select-Object -First 1 -ExpandProperty FullName
+          Copy-Item $exe 'build/windows/x64/runner/Release/ffmpeg.exe'
+          New-Item -ItemType Directory -Force -Path 'deploy/deck-hub-windows/ffmpeg' | Out-Null
+          Copy-Item $exe 'deploy/deck-hub-windows/ffmpeg/ffmpeg.exe'
+        working-directory: apps/deck
       # 组装免配置部署包:hub.exe + assets + 服务脚本 打成一个 zip,
       # 拷到 Windows 机器解压即可 install-service.bat 注册成开机自启服务。
       - name: Assemble hub deploy package

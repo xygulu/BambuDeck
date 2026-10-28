@@ -224,6 +224,54 @@
   .hms-entry .desc { font-size: 12px; color: var(--text2); }
   .modal-card .btn { margin: 12px 0 0 auto; display: flex; }
 
+  /* 云账号(产品化 2026-10-28): 登录向导与用户管理, 渲染在 #modal 里。 */
+  .svc svg { width: 15px; height: 15px; }
+  .acct-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 2px; border-bottom: 1px solid var(--border);
+  }
+  .acct-row .info { flex: 1; min-width: 0; }
+  .acct-row .name { font-size: 14px; font-weight: 600; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acct-row .sub { font-size: 12px; color: var(--text2); margin-top: 2px; }
+  .acct-row button, .modal-card .add-acct {
+    flex: none; border: 1px solid var(--border); background: transparent;
+    color: var(--text); border-radius: 8px; padding: 6px 10px;
+    font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .acct-row button:hover, .modal-card .add-acct:hover { filter: brightness(1.2); }
+  .acct-row button.danger { color: var(--error); border-color: rgba(239,68,68,.5); }
+  .modal-card .add-acct {
+    margin: 14px 0 0 auto; display: block; padding: 9px 14px;
+    background: rgba(74,222,128,.14); color: var(--running);
+  }
+  .wiz { display: flex; flex-direction: column; gap: 10px; }
+  .wiz label { display: flex; flex-direction: column; gap: 4px;
+    font-size: 13px; color: var(--text2); }
+  .wiz input, .wiz select {
+    background: rgba(127,127,127,.12); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font-size: 15px; font: inherit;
+  }
+  .wiz input:focus, .wiz select:focus { outline: none; border-color: rgba(74,222,128,.6); }
+  .wiz .row2 { display: flex; gap: 8px; }
+  .wiz .row2 label { flex: 1; min-width: 0; }
+  .wiz button {
+    border: 1px solid var(--border); border-radius: 8px;
+    background: rgba(74,222,128,.14); color: var(--running);
+    padding: 10px 12px; font: inherit; font-size: 14px; font-weight: 600;
+    cursor: pointer;
+  }
+  .wiz button.outline { background: transparent; color: var(--text); }
+  .wiz button:disabled { opacity: .5; cursor: default; }
+  .wiz button:hover { filter: brightness(1.15); }
+  .wiz-msg { font-size: 13px; min-height: 18px; color: var(--text2); }
+  .wiz-msg.ok { color: var(--running); }
+  .wiz-msg.bad { color: var(--error); }
+  .wiz-dev { font-size: 13px; color: var(--text2);
+    border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
+  .wiz-dev b { color: var(--text); }
+
   /* 右栏: 选中打印机的详情 */
   #pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   .pane-head {
@@ -793,6 +841,9 @@
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.48.48 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
   </button>
   <span class="conn" id="conn"><i></i><span class="txt">连接中…</span></span>
+  <button class="svc" id="acctbtn" type="button" aria-label="云账号" title="云账号">
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg><span class="txt">账号</span>
+  </button>
   <button class="svc" id="svc" type="button" aria-label="服务状态" title="服务状态">
     <i></i><span class="txt">服务</span>
   </button>
@@ -2323,6 +2374,11 @@ function renderAll() {
 function apply(data) {
   lastPrinters = data.printers || [];
   lastCameras = data.cameras || [];
+  // 产品化: 首次启动(没账号也没打印机)自动弹登录向导, 一次会话只弹一次。
+  if (!(data.accounts || []).length && !lastPrinters.length && !wizardShown) {
+    wizardShown = true;
+    openWizard();
+  }
   const wasMuted = cameraMuted;
   cameraMuted = data.cameraMuted === true;
   if (wasMuted !== cameraMuted) {
@@ -2507,6 +2563,143 @@ setInterval(refreshSvc, 30000);
     try { bridge.postMessage('open'); } catch (_) {}
   });
 })();
+
+/* ---------------- 云账号(产品化 2026-10-28) ----------------
+   独立 deck_hub 才接入登录/账号管理; App 内嵌服务端点回 503, 界面如实提示。
+   首次启动(无账号无打印机)由 apply() 自动弹向导。 */
+let wizardShown = false;
+
+function acctMsg(text, cls) {
+  const el = $('wz-msg');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'wiz-msg' + (cls ? ' ' + cls : '');
+}
+
+function openWizard() {
+  $('modal-title').textContent = '登录拓竹云账号';
+  $('modal-body').innerHTML = `
+  <div class="wiz">
+    <label>区域
+      <select id="wz-region">
+        <option value="cn">中国区 (bambulab.cn)</option>
+        <option value="us">国际区 (bambulab.com)</option>
+        <option value="eu">欧洲区 (bambulab.eu)</option>
+      </select>
+    </label>
+    <label>账号（邮箱或手机号）<input id="wz-account" autocomplete="username"></label>
+    <div class="row2">
+      <label>密码<input id="wz-pass" type="password" autocomplete="current-password"></label>
+      <label>验证码（可选）<input id="wz-code" inputmode="numeric" placeholder="开了两步验证的账号用"></label>
+    </div>
+    <div class="wiz-msg" id="wz-msg"></div>
+    <button type="button" id="wz-login">登录并同步设备</button>
+    <button type="button" class="outline" id="wz-send">发送验证码</button>
+    <div class="wiz-dev" id="wz-devs" hidden></div>
+  </div>`;
+  $('modal').classList.add('show');
+  $('wz-login').addEventListener('click', wzLogin);
+  $('wz-send').addEventListener('click', wzSendCode);
+  $('wz-account').focus();
+}
+
+async function wzSendCode() {
+  const account = $('wz-account').value.trim();
+  if (!account) return acctMsg('请先输入账号', 'bad');
+  acctMsg('验证码发送中…');
+  const { j } = await post('/api/cloud/send-code',
+    { region: $('wz-region').value, account });
+  acctMsg(j.ok ? '验证码已发送，请查收邮箱/短信' : (j.error || '发送失败'),
+    j.ok ? 'ok' : 'bad');
+}
+
+async function wzLogin() {
+  const body = {
+    region: $('wz-region').value,
+    account: $('wz-account').value.trim(),
+    password: $('wz-pass').value,
+    code: $('wz-code').value.trim(),
+  };
+  if (!body.account) return acctMsg('请输入账号', 'bad');
+  if (!body.password && !body.code) {
+    return acctMsg('密码和验证码至少填一个', 'bad');
+  }
+  $('wz-login').disabled = true;
+  acctMsg('登录中…');
+  const { j } = await post('/api/cloud/login', body);
+  $('wz-login').disabled = false;
+  if (!j.ok) return acctMsg(j.error || '登录失败', 'bad');
+  const devs = (j.devices || []).map(d =>
+    `<div>${esc(d.name || d.serial)} · ${esc(d.model || '未知型号')} · ` +
+    `${d.online ? '在线' : '离线'}${d.hasCode ? '' : ' · 无访问码（云模式监控）'}</div>`
+  ).join('');
+  const box = $('wz-devs');
+  box.hidden = false;
+  box.innerHTML = `<b>已同步 ${j.count} 台设备</b>，服务正在重启加载：<div style="margin-top:6px">${devs || '（该账号名下没有设备）'}</div>`;
+  acctMsg('登录成功', 'ok');
+  // 落盘触发的自动重启 3 秒内完成; 留 3 秒看清单再收 modal, ws 重连接住后续。
+  setTimeout(() => $('modal').classList.remove('show'), 3000);
+}
+
+async function renderAccounts() {
+  let j;
+  try {
+    const r = await fetch(api('/api/accounts'));
+    j = await r.json();
+  } catch (_) {
+    return;
+  }
+  if (!j.ok) {
+    $('modal-body').innerHTML =
+      `<div class="wiz-msg bad">${esc(j.error || '未接入')}</div>`;
+    return;
+  }
+  const rows = (j.accounts || []).map(a => {
+    const sub = [
+      a.region === 'cn' ? '中国区' : a.region === 'eu' ? '欧洲区' : '国际区',
+      `${a.printers ?? 0} 台打印机`,
+    ];
+    if (a.syncAt) {
+      const t = new Date(a.syncAt).toLocaleTimeString();
+      sub.push(a.syncOk === false
+        ? `上次同步失败 ${t}${a.syncError ? ' · ' + esc(a.syncError) : ''}`
+        : `同步于 ${t} · ${a.syncCount ?? 0} 台`);
+    } else {
+      sub.push('尚未同步');
+    }
+    return `<div class="acct-row">
+      <div class="info">
+        <div class="name">${esc(a.account)}${a.suspended ? '（已暂定）' : ''}</div>
+        <div class="sub">${sub.join(' · ')}</div>
+      </div>
+      <button data-act="${a.suspended ? 'resume' : 'suspend'}" data-id="${a.id}">${a.suspended ? '恢复' : '暂定'}</button>
+      <button class="danger" data-act="logout" data-id="${a.id}">退出</button>
+    </div>`;
+  }).join('');
+  $('modal-body').innerHTML = rows || '<div class="wiz-msg">还没有登录任何账号。</div>';
+  $('modal-body').querySelectorAll('button[data-act]').forEach(b => {
+    b.addEventListener('click', async () => {
+      const act = b.dataset.act;
+      if (act === 'logout' && !confirm(
+          '退出该账号？\n\n它的打印机会从本服务移除（云端绑定不受影响）。')) return;
+      b.disabled = true;
+      await post('/api/account', { id: b.dataset.id, action: act });
+      // 落盘触发服务自动重启; 面板即时刷新, 打印机列表由 ws 重连更新。
+      renderAccounts();
+    });
+  });
+  const add = document.createElement('button');
+  add.className = 'add-acct';
+  add.textContent = '添加账号';
+  add.addEventListener('click', openWizard);
+  $('modal-body').appendChild(add);
+}
+
+$('acctbtn').addEventListener('click', () => {
+  $('modal-title').textContent = '云账号';
+  $('modal').classList.add('show');
+  renderAccounts();
+});
 
 if (TOKEN) boot();
 </script>
