@@ -373,16 +373,34 @@ class _DeckAppState extends ConsumerState<DeckApp> {
   /// 把当前 printers/cameras/settings 导出到 `~/.bambudeck/hub.json`, 供独立
   /// 网页服务(bin/hub.dart)读取。内容含局域网访问码/摄像头地址等凭据, 故只写
   /// 家目录(与 helper.json / signing_key.pem 同级信任)。
+  ///
+  /// 产品化(2026-10-28):accounts 段(网页登录的云账号)与 accountId 归属的
+  /// 打印机是网页服务(云同步)的地盘, App 导出不得覆盖 —— 按盘上现有文件合并:
+  /// 云账号原样带回, 云账号名下的打印机在 App 本地清单之外原样追加。
   void _exportHub() {
     final printers = ref.read(printersProvider).valueOrNull ?? const [];
     final cameras = ref.read(camerasProvider).valueOrNull ?? const [];
     final settings = ref.read(appSettingsProvider).valueOrNull;
     if (settings == null) return;
-    unawaited(saveHubConfig(HubConfig(
-      settings: settings,
-      printers: printers,
-      cameras: cameras,
-    )));
+    unawaited(() async {
+      final disk = await loadHubConfig();
+      final cloudOwned = disk.printers.where((p) => p.accountId.isNotEmpty);
+      final accountIdBySerial = {for (final p in cloudOwned) p.serial: p.accountId};
+      final merged = [
+        for (final p in printers)
+          accountIdBySerial[p.serial] != null
+              ? p.copyWith(accountId: accountIdBySerial[p.serial])
+              : p,
+        ...cloudOwned.where(
+            (p) => !printers.any((q) => q.serial == p.serial && q.serial.isNotEmpty)),
+      ];
+      await saveHubConfig(HubConfig(
+        settings: settings,
+        printers: merged,
+        cameras: cameras,
+        accounts: disk.accounts,
+      ));
+    }());
   }
 
   /// Start/stop the web hub (网页访问) with its switch; a port change while

@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:bambu_protocol/bambu_protocol.dart';
 
 import 'camera_profile.dart';
+import 'cloud_device_sync.dart';
 import 'cloud_print_helper.dart';
 import 'hub_config.dart';
 import 'hub_server.dart';
@@ -42,6 +44,10 @@ class HubService {
   final _states = <String, BambuState?>{};
   final _statuses = <String, BambuConnStatus>{};
 
+  /// 云账号设备同步（产品化 2026-10-28）：bind 列表为打印机清单的活源头。
+  CloudDeviceSync cloudSync = CloudDeviceSync();
+  Timer? _cloudSyncTimer;
+
   bool get running => hub.running;
 
   Future<void> start() async {
@@ -67,9 +73,30 @@ class HubService {
     }
 
     await hub.start();
+
+    // 云同步：先起服务（用缓存清单，不阻塞），随后立即拉一次 bind，之后每
+    // 5 分钟复查。变化落盘 → bin/hub.dart 的 mtime 监视退出重启 → 新清单生效。
+    if (config.accounts.any((a) => !a.suspended && a.accessToken.isNotEmpty)) {
+      unawaited(_runCloudSync());
+      _cloudSyncTimer = Timer.periodic(
+          const Duration(minutes: 5), (_) => unawaited(_runCloudSync()));
+    }
+  }
+
+  Future<void> _runCloudSync() async {
+    // 从盘上重读：mtime 重启可能在上一轮同步写盘后发生，内存里的 config 已旧。
+    final config = await loadHubConfig(configFile);
+    if (!config.accounts.any((a) => !a.suspended && a.accessToken.isNotEmpty)) {
+      return;
+    }
+    final changed = await cloudSync.syncAll(config, configFile);
+    if (changed) {
+      LogBuffer.instance.add('[云同步] 账号设备清单有变化，即将重启加载');
+    }
   }
 
   Future<void> stop() async {
+    _cloudSyncTimer?.cancel();
     for (final link in _links.values) {
       link.dispose();
     }
@@ -261,6 +288,7 @@ class HubService {
       settings: config.settings,
       printers: config.printers,
       cameras: hub.cameras,
+      accounts: config.accounts,
     );
     await saveHubConfig(config, configFile);
     LogBuffer.instance.add('[网页] 摄像头 ${cam.name}: '
@@ -282,6 +310,7 @@ class HubService {
         settings: config.settings.copyWith(cameraMuted: muted),
         printers: config.printers,
         cameras: config.cameras,
+        accounts: config.accounts,
       );
       hub.settings = config.settings;
       await saveHubConfig(config, configFile);

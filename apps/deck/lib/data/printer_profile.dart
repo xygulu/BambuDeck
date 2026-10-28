@@ -24,6 +24,7 @@ class PrinterProfile {
     this.builtinCam = BuiltinCamSetting.follow,
     this.autoPlateSwap = false,
     this.createdAt = 0,
+    this.accountId = '',
   });
 
   final String id;
@@ -58,6 +59,11 @@ class PrinterProfile {
   /// 视为最早且彼此保持原有顺序, 免迁移。
   final int createdAt;
 
+  /// 归属的云账号（CloudAccount.id，2026-10-28 产品化：网页登录即接入）。
+  /// 空串 = 手工添加、不归属任何账号 —— 云同步永不触碰它，与 Mac App 的
+  /// hub.json 导出互不覆盖。
+  final String accountId;
+
   String get modeLabel => mode == PrinterMode.lan ? '局域网' : '云端';
 
   /// Value-comparable key of the fields that actually decide the MQTT
@@ -89,6 +95,7 @@ class PrinterProfile {
         'builtinCam': builtinCam.name,
         'autoPlateSwap': autoPlateSwap,
         'createdAt': createdAt,
+        'accountId': accountId,
       };
 
   factory PrinterProfile.fromJson(Map<String, dynamic> j) => PrinterProfile(
@@ -110,6 +117,7 @@ class PrinterProfile {
             : BuiltinCamSetting.follow,
         autoPlateSwap: j['autoPlateSwap'] as bool? ?? false,
         createdAt: j['createdAt'] as int? ?? 0,
+        accountId: j['accountId'] as String? ?? '',
       );
 
   BambuMqttConfig toMqttConfig() => mode == PrinterMode.lan
@@ -121,17 +129,19 @@ class PrinterProfile {
     String? name,
     String? ip,
     String? accessCode,
+    PrinterMode? mode,
     CloudRegion? region,
     String? token,
     String? userId,
     String? model,
     BuiltinCamSetting? builtinCam,
     bool? autoPlateSwap,
+    String? accountId,
   }) =>
       PrinterProfile(
         id: id,
         name: name ?? this.name,
-        mode: mode,
+        mode: mode ?? this.mode,
         serial: serial,
         ip: ip ?? this.ip,
         accessCode: accessCode ?? this.accessCode,
@@ -141,6 +151,10 @@ class PrinterProfile {
         model: model ?? this.model,
         builtinCam: builtinCam ?? this.builtinCam,
         autoPlateSwap: autoPlateSwap ?? this.autoPlateSwap,
+        accountId: accountId ?? this.accountId,
+        // createdAt 不做参数：加入时间是身世信息,任何 copyWith 都必须保真
+        // (2026-10-28 修复:此前 App 内改名/编辑会把它悄悄归零)。
+        createdAt: createdAt,
       );
 }
 
