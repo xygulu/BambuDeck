@@ -871,7 +871,13 @@ class HubServer {
 
       try {
         final ok = await once();
-        return {'ok': ok, 'detail': ok ? 'running' : 'stopped'};
+        return <String, dynamic>{
+          'ok': ok,
+          'detail': ok ? 'running' : 'stopped',
+          'service': cloudflaredServiceName.trim().isNotEmpty
+              ? cloudflaredServiceName.trim()
+              : 'cloudflared.exe',
+        };
       } catch (_) {
         return {'ok': null, 'detail': 'unknown'};
       }
@@ -910,9 +916,9 @@ class HubServer {
       final code = res.statusCode;
       await res.drain<void>().timeout(const Duration(seconds: 2));
       final ok = code >= 200 && code < 300;
-      return {'ok': ok, 'detail': 'http_$code'};
+      return {'ok': ok, 'detail': 'http_$code', 'url': tunnelProbeUrl};
     } catch (_) {
-      return {'ok': false, 'detail': 'unreachable'};
+      return {'ok': false, 'detail': 'unreachable', 'url': tunnelProbeUrl};
     } finally {
       client.close(force: true);
     }

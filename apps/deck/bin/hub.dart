@@ -60,12 +60,27 @@ Future<void> main(List<String> args) async {
     plateSwapFile: resolvePlateSwap(),
   );
 
-  // 服务状态页的探测参数 (2026-10-29 起全部配置驱动, 不再写死域名 ——
-  // 公网隧道域名每台机器各不相同: Mac 的 bambu.miller.ink 指向 Mac,
-  // Windows 隧道在 CF 控制台绑了哪个域名就探哪个。此前 Windows 把 Mac
-  // 的隧道探成了自己的「绿」, 是假阳性)。优先级: 环境变量 > hub.json
-  // settings.* > 平台默认 (mac 沿用既有域名; Windows 无配置则跳过隧道
-  // 探测, 诚实报 not_configured, 不冒别人的绿)。
+  // 服务状态页的探测参数 (2026-10-29 起全配置驱动, 仓库不携带任何域名 ——
+  // 每台机器探测「本机部署绑定的那个域名/那个服务」, 检测谁就是谁)。
+  // 每台机器自己的覆盖文件 hub.local.json (hub.json 旁边, hub 只读不写):
+  // hub 启动/退出会把内存里的类型化配置回写 hub.json, 不认识的键会被抹掉
+  // (2026-10-29 实测: Windows box 重启一次 settings.tunnelProbeUrl 就没了),
+  // 所以检测参数放 local 文件。优先级: 环境变量 > hub.local.json >
+  // hub.json settings.* > 空 (跳过隧道探测, 诚实报 not_configured)。
+  String? localSetting(String key) {
+    try {
+      final dir = File(configPath).parent.path;
+      final sep = Platform.pathSeparator;
+      final f = File('$dir${sep}hub.local.json');
+      if (!f.existsSync()) return null;
+      final raw = jsonDecode(f.readAsStringSync());
+      if (raw is! Map<String, dynamic>) return null;
+      return raw[key]?.toString();
+    } catch (_) {
+      return null;
+    }
+  }
+
   String? configSetting(String key) {
     try {
       final raw = jsonDecode(File(configPath).readAsStringSync());
@@ -79,13 +94,15 @@ Future<void> main(List<String> args) async {
     }
   }
 
-  final envTunnel = env('HUB_TUNNEL_URL');
-  final cfgTunnel = configSetting('tunnelProbeUrl');
-  service.hub.tunnelProbeUrl = envTunnel.isNotEmpty
-      ? envTunnel
-      : (cfgTunnel ?? (Platform.isWindows ? '' : 'https://bambu.miller.ink'));
+  String pick(String key, String envName) {
+    final e = env(envName);
+    if (e.isNotEmpty) return e;
+    return localSetting(key) ?? configSetting(key) ?? '';
+  }
+
+  service.hub.tunnelProbeUrl = pick('tunnelProbeUrl', 'HUB_TUNNEL_URL');
   service.hub.cloudflaredServiceName =
-      configSetting('cloudflaredService') ?? '';
+      pick('cloudflaredService', 'HUB_CLOUDFLARED_SERVICE');
 
   await service.start();
   if (!service.hub.running) {

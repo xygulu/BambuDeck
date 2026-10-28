@@ -2474,10 +2474,19 @@ async function boot() {
 // 30 秒一查 (页面可见时), 芯片给总览红绿, 点击弹四项详情。
 let svcData = null;
 let svcModalOpen = false;
-const SVC_LABELS = {
-  hub: '网页服务', helper: '控制 helper',
-  cloudflared: 'cloudflared 进程', tunnel: '隧道 bambu.miller.ink',
-};
+// 标签动态化 (2026-10-29): 隧道显示本机部署自己的域名 (/api/health 的
+// tunnel.url, 每台机器在 hub.local.json 里各配各的), cloudflared 显示
+// 本机配置的服务名 —— 不再写死任何域名。
+function svcLabels() {
+  const cf = svcData && svcData.cloudflared;
+  const tn = svcData && svcData.tunnel;
+  return {
+    hub: '网页服务', helper: '控制 helper',
+    cloudflared: (cf && cf.service) ? 'cloudflared 服务 ' + cf.service
+                                    : 'cloudflared 进程',
+    tunnel: '隧道 ' + ((tn && tn.url) || '未配置'),
+  };
+}
 async function refreshSvc() {
   if (document.visibilityState !== 'visible') return;
   try {
@@ -2504,8 +2513,8 @@ function svcText(k, s) {
     case 'online': return '在线 (127.0.0.1:8799)';
     case 'no_response': return '无响应(没在跑或端口不通)';
     case 'running': return '进程运行中';
-    case 'stopped': return '进程未运行(反复重启起不来, 查 launchd 日志)';
-    case 'unknown': return '无法探测(非 macOS 或缺少 pgrep)';
+    case 'stopped': return '进程未运行(反复起不来, 查守护日志)';
+    case 'unknown': return '无法探测(本机缺少可用的检测手段)';
     case 'not_configured': return '未配置探测地址';
     case 'unreachable': return '无响应(DNS/网络异常或隧道断开)';
     default:
@@ -2519,13 +2528,14 @@ function svcText(k, s) {
 }
 function renderSvc() {
   if (!svcData) return;
-  const keys = Object.keys(SVC_LABELS);
+  const L = svcLabels();
+  const keys = Object.keys(L);
   const down = keys.filter(k => svcData[k] && svcData[k].ok === false);
   const chip = $('svc');
   chip.classList.remove('ok', 'bad');
   chip.classList.add(down.length ? 'bad' : 'ok');
   chip.title = down.length
-    ? '服务异常: ' + down.map(k => SVC_LABELS[k]).join('、')
+    ? '服务异常: ' + down.map(k => L[k]).join('、')
     : '服务全部正常';
   if (svcModalOpen) renderSvcModal();
 }
@@ -2536,10 +2546,11 @@ function openSvcModal() {
   $('modal').classList.add('show');
 }
 function renderSvcModal() {
-  const rows = Object.keys(SVC_LABELS).map(k => {
+  const L = svcLabels();
+  const rows = Object.keys(L).map(k => {
     const s = svcData && svcData[k];
     const cls = svcCls(s && s.ok);
-    return `<div class="svc-row ${cls}"><i></i><span class="k">${SVC_LABELS[k]}</span>` +
+    return `<div class="svc-row ${cls}"><i></i><span class="k">${L[k]}</span>` +
       `<span class="v">${esc(svcText(k, s))}</span></div>`;
   }).join('');
   const head = svcData
