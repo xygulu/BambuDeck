@@ -170,7 +170,10 @@ class HelperEndpoint {
   }
 
   static String get _infoPath {
-    final home = Platform.environment['HOME'] ?? '';
+    // Windows 没有 HOME, 用 USERPROFILE 兜底 (deck_hub 可部署到另一台机器)。
+    final home = Platform.environment['HOME'] ??
+        Platform.environment['USERPROFILE'] ??
+        '';
     return '$home/.bambudeck/helper.json';
   }
 

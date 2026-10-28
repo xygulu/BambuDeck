@@ -56,8 +56,11 @@ class HubConfig {
 }
 
 /// `~/.bambudeck/hub.json` — shared by the app (writer) and bin/hub.dart (reader).
+/// Windows 没有 HOME, 用 USERPROFILE 兜底 (另一台 Windows 机器部署 deck_hub)。
 Future<File> defaultHubConfigFile() async {
-  final home = Platform.environment['HOME'] ?? '';
+  final home = Platform.environment['HOME'] ??
+      Platform.environment['USERPROFILE'] ??
+      '';
   return File('$home/.bambudeck/hub.json');
 }
 

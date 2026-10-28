@@ -13,7 +13,10 @@ import 'package:deck/data/log_buffer.dart';
 /// 模型默认读仓库里的 `assets/`，可用 `HUB_PAGE` / `HUB_PLATE_SWAP` 环境变量
 /// 覆盖，`~/.bambudeck/hub_page.html` 存在时优先用家目录那份。
 Future<void> main(List<String> args) async {
-  final home = Platform.environment['HOME'] ?? '';
+  // Windows 没有 HOME, 用 USERPROFILE 兜底 (另一台 Windows 机器部署 deck_hub)。
+  final home = Platform.environment['HOME'] ??
+      Platform.environment['USERPROFILE'] ??
+      '';
 
   String env(String name) => Platform.environment[name]?.trim() ?? '';
 

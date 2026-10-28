@@ -52,3 +52,15 @@ jobs:
         with:
           name: deck-windows
           path: apps/deck/build/windows/x64/runner/Release
+      # 独立网页服务 (deck_hub): 供另一台 Windows 机器部署, 目标机不装 Flutter。
+      - run: dart pub get
+        working-directory: apps/deck
+      - run: dart build cli -o build/hub
+        working-directory: apps/deck
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deck-hub-windows
+          path: |
+            apps/deck/build/hub/bundle/**
+            apps/deck/assets/web/hub_page.html
+            apps/deck/assets/plate_swap/auto_plate_swap.3mf
