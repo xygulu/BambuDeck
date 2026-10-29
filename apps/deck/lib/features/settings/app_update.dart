@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+import '../../core/gh_mirror.dart';
 import '../../core/version.dart';
 
 /// App 自更新检查 (2026-10-29)。
@@ -78,23 +79,13 @@ class AppUpdate {
     if (!Platform.isAndroid) {
       throw '当前平台不支持自动安装, 请手动下载';
     }
-    final req = await _client.getUrl(Uri.parse(url));
-    final res = await req.close().timeout(const Duration(minutes: 10));
-    if (res.statusCode != 200) throw '下载失败: HTTP ${res.statusCode}';
     // 不引 path_provider: dart:io 的 systemTemp 在 Android 上就是 app 的
     // 缓存目录 (/data/user/0/<包名>/cache), 安装器通过 FileProvider 能读。
     final dir = Directory.systemTemp;
     if (!await dir.exists()) await dir.create(recursive: true);
     final apk = File('${dir.path}/deck-update.apk');
-    final sink = apk.openWrite();
-    try {
-      await res.pipe(sink);
-      await sink.flush();
-      await sink.close();
-    } catch (e) {
-      await sink.close().catchError((_) {});
-      rethrow;
-    }
+    // 直连不通自动换镜像 (国内 Release 资产站会被拦, 见 gh_mirror.dart)。
+    await GhMirror.fetch(_client, url, apk);
     await _channel.invokeMethod('installApk', apk.path);
   }
 

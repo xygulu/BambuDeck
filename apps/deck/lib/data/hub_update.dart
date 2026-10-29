@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
+import '../core/gh_mirror.dart';
 import '../core/version.dart';
 import 'log_buffer.dart';
 
@@ -199,26 +200,22 @@ class HubUpdater {
   }
 
   static Future<void> _download(String url, String to) async {
-    final req = await _http.getUrl(Uri.parse(url));
-    final res = await req.close().timeout(const Duration(minutes: 10));
-    if (res.statusCode != 200) throw '下载 ${res.statusCode}: $url';
-    final sink = File(to).openWrite();
-    var got = 0;
+    var lastMb = 0;
     const reportEvery = 4 << 20;
-    try {
-      await for (final chunk in res) {
-        got += chunk.length;
-        if (got % reportEvery < chunk.length) {
-          LogBuffer.instance.add('[更新] 已下载 ${got >> 20} MB');
+    // 直连不通自动换镜像 (国内 Release 资产站会被拦, 见 gh_mirror.dart);
+    // 内容真伪仍由清单里的 sha256 判定, 镜像不参与信任。
+    await GhMirror.fetch(
+      _http,
+      url,
+      File(to),
+      onLog: (m) => LogBuffer.instance.add(m),
+      onProgress: (got) {
+        final mb = got >> 20;
+        if (got % reportEvery < 65536 && mb != lastMb) {
+          lastMb = mb;
+          LogBuffer.instance.add('[更新] 已下载 $mb MB');
         }
-        sink.add(chunk);
-      }
-      await sink.flush();
-      await sink.close();
-    } catch (_) {
-      await sink.close().catchError((_) {});
-      await File(to).delete().catchError((_) => File(to));
-      rethrow;
-    }
+      },
+    );
   }
 }

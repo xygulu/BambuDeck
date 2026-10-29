@@ -96,3 +96,10 @@ deck-hub-windows\
   同理,重跑 `bootstrap_helper.ps1` 重新派生)。
 - **换了 Wi-Fi/网段**:打印机 IP 变了的话,直接改 `config\hub.json` 里对应
   打印机的 `lanIp`,保存即可生效。
+- **自更新下载失败**(日志里 `[更新] 下载失败`):国内网络对 GitHub Release
+  的资产站是半通的 —— `api.github.com` 正常,但 302 到的
+  `release-assets.githubusercontent.com` TLS 握手直接被掐(盒子实测:
+  `curl` 报 `schannel: failed to receive handshake`)。hub 会自动换
+  `ghfast.top` / `gh-proxy.com` 前缀镜像再试,内容仍按 `version.json` 里的
+  sha256 校验,对不上就删掉放弃。镜像都挂了就先手工把 `deck-hub-windows.zip`
+  拷到机器上解压覆盖(保留 `config\` `logs\` `update\`)。
