@@ -177,6 +177,10 @@ _OCR_STATE_PRINTING = ("打印中", "printing")
 _OCR_STATE_PAUSED = ("已暂停", "paused")
 
 
+def _log(*a) -> None:
+    print("[drv]", *a, flush=True)
+
+
 def _ocr_lines():
     """当前屏幕 OCR; 引擎不可用返回 None。"""
     try:
@@ -184,6 +188,53 @@ def _ocr_lines():
         return bp._win_ocr_lines(shot())
     except Exception:  # noqa: BLE001
         return None
+
+
+def _ocr_percent_anchor(state_y: float, shot_path: str | None = None,
+                        lines: list | None = None) -> tuple[int, int] | None:
+    """「NN%」总进度行 -> 控制按钮锚 (按钮在它右上)。
+
+    全屏 OCR 对小字 % 随机漏读 (2026-10-29 诊断: 同一页面一次读到
+    「14%」@1056,330, 下一次一行 % 都没有), 所以两级: 全屏 -> 按状态行
+    y 裁右侧条带 zoom 2.5x 重读 (导入弹窗文件名同款招)。坐标平移回
+    屏幕系。都没有返回 None。
+    """
+    try:
+        import bconnect_print as bp
+    except Exception:  # noqa: BLE001
+        return None
+    ls = lines if lines is not None else (_ocr_lines() or [])
+    # 2026-10-29 盒子实测: 进度是绿色「44%」, zh-Hans 有时 % 符号不吐
+    # 字符 (只剩「44 」), 有时吐全角「46 ％」—— 数字、半/全角 % 都收。
+    pct = [l for l in ls
+           if re.fullmatch(r"\d{1,3}\s*[%％]?", l["name"].strip())
+           and l["x"] > 800
+           and state_y + 20 <= l["y"] <= state_y + 110]
+    if pct:
+        p = max(pct, key=lambda l: l["x"])
+        _log("ocr anchor full:", p["name"], p["x"], p["y"])
+        return int(p["x"]), int(p["y"])
+    if not shot_path:
+        return None
+    try:
+        from PIL import Image
+        box = (900, int(state_y) + 25, 1450, int(state_y) + 115)
+        im = Image.open(shot_path).crop(box)
+        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+        im = im.resize((im.width * 5 // 2, im.height * 5 // 2), resample)
+        zp = shot_path + ".pct.png"
+        im.save(zp, "PNG")
+        zs = bp._win_ocr_lines(zp) or []
+    except Exception:  # noqa: BLE001
+        return None
+    pct = [l for l in zs if re.fullmatch(r"\d{1,3}\s*[%％]?", l["name"].strip())]
+    if not pct:
+        _log("ocr anchor zoom: none")
+        return None
+    v = max(pct, key=lambda l: l["x"])
+    ax_, ay_ = int(box[0] + v["x"] / 2.5), int(box[1] + v["y"] / 2.5)
+    _log("ocr anchor zoom:", v["name"], ax_, ay_)
+    return ax_, ay_
 
 
 def _ocr_state(blob: str) -> str:
@@ -209,9 +260,11 @@ def _ocr_press_control(name: str, cmd: str) -> dict:
         return None
     lines = _ocr_lines()
     if lines is None:
+        _log("ocr-ctrl: engine unavailable")
         return None
     blob = "".join("".join(l["name"].split()) for l in lines)
     if "打印进度" not in blob:
+        _log("ocr-ctrl: not_on_detail (%d lines)" % len(lines))
         return {"pressed": False, "reason": "not_on_detail"}
     # 机名核对: 相似行即算 (OCR 错字常态, 拓竹A1宇树 读成 柘竹A1宇树)
     hit = None
@@ -221,31 +274,32 @@ def _ocr_press_control(name: str, cmd: str) -> dict:
             hit = l
             break
     if hit is None:
+        _log("ocr-ctrl: wrong_printer (%d lines)" % len(lines))
         return {"pressed": False, "reason": "wrong_printer"}
     st = _ocr_state(blob)
     if st == "idle":
+        _log("ocr-ctrl: idle_no_skip")
         return {"pressed": False, "reason": "idle_no_skip"}
-    # 锚: 「NN%」行 (总进度, 按钮组左下, 实测距状态行 +63px)。右侧温控
-    # 面板也有「100%」(风扇, y 差 ~240) —— 用状态行 y 窗口 [+20,+110]
-    # 排除, 再取 x 最大者 (最靠按钮侧)。
+    # 锚: 「NN%」行 (总进度, 按钮组左下, 实测距状态行 +63px)。两级:
+    # 全屏 -> 状态行条带 zoom 重读 (全屏对小字 % 随机漏读)。
     state_line = next((l for l in lines
                        if "".join(l["name"].split())
                        in ("打印中", "已暂停") and l.get("y")), None)
-    pct = [l for l in lines
-           if l["name"].strip().endswith("%") and l["x"] > 800]
-    if state_line is not None:
-        y0 = state_line["y"]
-        pct = [l for l in pct if y0 + 20 <= l["y"] <= y0 + 110]
-    if not pct:
+    if state_line is None:
+        _log("ocr-ctrl: no state line (blob has state=%s)" % st)
         return {"pressed": False, "reason": "no_percent_anchor"}
-    p = max(pct, key=lambda l: l["x"])
+    anchor = _ocr_percent_anchor(state_line["y"], shot(), lines)
+    if anchor is None:
+        return {"pressed": False, "reason": "no_percent_anchor"}
+    ax_, ay_ = anchor
     if cmd == "stop":
-        bx, by = int(p["x"]) + 162, int(p["y"]) - 47
+        bx, by = ax_ + 162, ay_ - 47
     else:  # pause/resume 同一位置 (暂停 <-> 继续切换)
-        bx, by = int(p["x"]) + 122, int(p["y"]) - 47
+        bx, by = ax_ + 122, ay_ - 47
     try:
         mouse.click(coords=(bx, by))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _log("ocr-ctrl: click fail", str(e)[:60])
         return {"pressed": False, "reason": "click_fail"}
     return {"pressed": True, "method": "ocr", "coord": [bx, by],
             "state": st, "printer_line": hit["name"]}
