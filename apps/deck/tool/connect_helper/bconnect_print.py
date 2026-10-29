@@ -1076,8 +1076,13 @@ def _win_classify_local(texts, known: dict, want_name: str) -> str:
     return ""
 
 
-def _win_rect_of_current(known: dict, want_name: str):
-    """发送弹窗下拉框当前值的矩形 [l,t,r,b] (树里找得到 Text 时)。"""
+def _win_rect_of_current(known: dict, want_name: str, dlg=None):
+    """发送弹窗下拉框当前值的矩形 [l,t,r,b] (树里找得到 Text 时)。
+
+    给 dlg 时候选文本的矩形中心必须落在弹窗框内 —— 背景选项页自己的
+    选择器有同机名文本 (2026-10-29 实测 y~154-186), 不框会把下拉点错到
+    背景页, 选项读出来的全是耗材槽位。
+    """
     names = list((known or {}).keys())
     if want_name and want_name not in names:
         names.append(want_name)
@@ -1090,6 +1095,9 @@ def _win_rect_of_current(known: dict, want_name: str):
         t = str(it.get("text") or "")
         r = it.get("rect")
         if not t or not r or len(r) != 4:
+            continue
+        if dlg and not (dlg[0] - 20 <= (r[0] + r[2]) / 2 <= dlg[2] + 20
+                        and dlg[1] - 20 <= (r[1] + r[3]) / 2 <= dlg[3] + 20):
             continue
         for n in names:
             s = _name_score(t, n)
@@ -1262,16 +1270,43 @@ def _win_target_shown(texts, want_name: str, known: dict,
     return best_text
 
 
+def _win_target_in_dialog(known: dict, want_name: str, serial: str,
+                          dlg) -> str:
+    """弹窗内归属版 _win_target_shown: 命中文本的矩形必须落在弹窗框里。
+
+    2026-10-29 盒子干跑抓到现行: 背景选项页自己的打印机选择器 (弹窗上方
+    y~150-186) 同样把机名放进 UIA texts —— 不框弹窗的「任意文本匹配」
+    会在下拉实际值是别的机时假命中, 直接按确认就是**错机派单**。命中
+    文本中心必须落在 dlg=(l,t,r,b) 内 (±20px 松量) 才算数; 拿不到弹窗框
+    (dlg=None) 一律判不中, 交回截图+OCR 锚点的安全路径。
+    """
+    if not dlg:
+        return ""
+    try:
+        cands = ax.texts_with_rects()
+    except Exception:  # noqa: BLE001
+        return ""
+    l, t, r, b = dlg
+    inside = [c["name"] for c in cands
+              if l - 20 <= (c["l"] + c["r"]) / 2 <= r + 20
+              and t - 20 <= (c["t"] + c["b"]) / 2 <= b + 20]
+    return _win_target_shown(inside, want_name, known, serial)
+
+
 def _win_wait_target(want_name: str, known: dict, serial: str,
-                     timeout: float = 1.5) -> str:
+                     timeout: float = 1.5, dlg=None) -> str:
     """轮询 UIA texts 直到目标机名出现 (借 Mac 侧 _wait_target 的做法)。
 
     点完下拉项之后界面刷新有延迟, 固定 sleep 一读到底会把「已经切过去了」
-    判成没切, 白试三轮。这里到超时为止每 150ms 读一次。
+    判成没切, 白试三轮。这里到超时为止每 150ms 读一次。给 dlg 时走弹窗内
+    归属校验 (背景页残留机名不算)。
     """
     deadline = time.time() + timeout
     while True:
-        shown = _win_target_shown(ax.texts(), want_name, known, serial)
+        if dlg:
+            shown = _win_target_in_dialog(known, want_name, serial, dlg)
+        else:
+            shown = _win_target_shown(ax.texts(), want_name, known, serial)
         if shown:
             return shown
         if time.time() >= deadline:
@@ -1280,7 +1315,8 @@ def _win_wait_target(want_name: str, known: dict, serial: str,
 
 
 def _win_pick_printer(shot_path: str, want_name: str, known: dict,
-                      serial: str, ocr: list | None = None
+                      serial: str, ocr: list | None = None,
+                      dlg: tuple | None = None
                       ) -> tuple[bool, str]:
     """把「发送打印任务至」弹窗里的打印机切到 want_name。
 
@@ -1362,6 +1398,15 @@ def _win_pick_printer(shot_path: str, want_name: str, known: dict,
         except Exception:  # noqa: BLE001
             frame = None
         g = (frame or {}).get("group")
+        if g and dlg and not (dlg[1] - 30 <= g["y"] + g["h"] <= dlg[3] + 60):
+            # 2026-10-29 盒子实测: chevron_down 的宽度守卫仍会捞到**背景
+            # 选项页**的打印机选择器 (弹窗内容懒加载不进树, 全树唯一宽度
+            # ≥140 的 chevron_down 落在弹窗外的背景页上, y~150-186)。
+            # 拿它裁剪 = 裁到弹窗上方空白, OCR raw=0, 视觉兜底也救不回。
+            # 几何不出弹窗内容区的一律不认, 交回当前值矩形/视觉兜底。
+            _log("picker frame off-dialog: group=(%d,%d %dx%d) dlg=%s -> 忽略"
+                 % (g["x"], g["y"], g["w"], g["h"], dlg))
+            frame = g = None
         if g:
             chev = (frame or {}).get("chevron") or {
                 "x": g["x"] + g["w"] - 24, "y": g["y"] + g["h"] / 2}
@@ -1369,7 +1414,7 @@ def _win_pick_printer(shot_path: str, want_name: str, known: dict,
         else:
             # 选择器结构没进树 (Chromium 懒加载常态): 退当前值文本矩形,
             # 箭头 ≈ 值右缘-24 (与 chevron 组内几何兜底同一偏移)。
-            rect = _win_rect_of_current(known, want_name)
+            rect = _win_rect_of_current(known, want_name, dlg=dlg)
             if rect:
                 g = {"x": float(rect[0]), "y": float(rect[1]),
                      "w": float(rect[2] - rect[0]), "h": float(rect[3] - rect[1])}
@@ -1474,7 +1519,7 @@ def _win_pick_printer(shot_path: str, want_name: str, known: dict,
         tried.add(cand["name"])
         if not ax.press_at(cand["x"], cand["y"]):
             continue
-        shown = _win_wait_target(want_name, known, serial)
+        shown = _win_wait_target(want_name, known, serial, dlg=dlg)
         if shown:
             return True, "已选中「%s」(下拉框当前值已核对)" % shown
     return False, "候选都点过仍没选中「%s」(试过: %s)" % (
@@ -1609,97 +1654,17 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
                 "第%d次按「打印」(%s, 进打印确认)" % (pressed, how))
             continue
         time.sleep(0.4)  # 弹窗进场动画/渲染稳定 (钮对进 UIA 树时正文已在画)
-        # ---- 弹窗分类: 本地 OCR 像素先行 -> UIA 树 -> 云端视觉(可选)。
-        # 2026-10-29 实测两条铁律:
-        #   (1) UIA 树会残留上一态 —— 导入确认框盖着页面时树里还躺着上一屏
-        #       的机器名, 树先行会把导入框骗成「打印」; Chromium 树懒加载/
-        #       掏空/残留都是常态, 截图即真相, 所以 OCR 先行, 树只配兜底。
-        #   (2) zh-Hans OCR 在 CJK 字间插空格, 子串匹配先剥空白; 全屏 OCR
-        #       连背景一起读, 判定顺序 = 发送弹窗专属标记「发送打印任务至」
-        #       > 导入标记 > 机名命中 (机名最不可靠, 放最后)。
-        #   视觉配额 429 不再卡死链路 —— 它只是最后的可选兜底。
-        kind, body, printers, ocr = "", "", [], None
-        if not ax.screenshot(shot_path):
-            ax.press_cancel_strict()
-            result["error"] = "弹窗截图失败, 已取消未派单"
-            rec("classify-dialog", False, result["error"])
-            return result
-        # 分类/锚定只看弹窗: 截中央 1000x660 (弹窗恒居中, ~1/4 像素省一半
-        # OCR 时间); 裁剪失败或空手退全屏。
-        try:
-            from PIL import Image as _Img
-            _sw, _sh = _Img.open(shot_path).size
-        except Exception:  # noqa: BLE001
-            _sw = _sh = 0
-        ocr = None
-        if _sw:
-            ocr = _win_ocr_region(
-                shot_path,
-                (_sw // 2 - 500, _sh // 2 - 330,
-                 _sw // 2 + 500, _sh // 2 + 330))
-        if ocr is None:
-            ocr = _win_ocr_lines(shot_path)
-        if ocr:
-            blob = "".join("".join(l["name"].split()) for l in ocr)
-            if "发送打印任务至" in blob:
-                kind = "打印"
-            elif WIN_IMPORT_TEXT in blob or "导入" in blob:
-                kind = "导入"
-            elif _win_lines_hit_printer(ocr, known, want_name):
-                kind = "打印"  # 发送弹窗下拉当前值 (导入弹窗背景无机名)
-        elif _win_classify_local(ax.texts(), known, want_name) == "send":
-            kind = "打印"  # OCR 引擎不可用才退树签名
-        else:
-            cls = _win_classify_dialog(shot_path)  # 云端视觉兜底
-            kind = str(cls.get("kind") or "unknown")
-            body = str(cls.get("body") or "")
-            printers = [p for p in (cls.get("printers") or []) if p]
-        # OCR 看见了什么带进步骤日志: 远程排障全靠它 (UIA 树掏空是常态)。
-        ocr_dbg = ""
-        if ocr:
-            ocr_dbg = " ocr=[%s]" % "; ".join(
-                l["name"][:20] for l in ocr[:12])
-        rec("classify-dialog", kind in ("打印", "导入"),
-            "kind=%s body=%s printers=%s%s" % (kind, body[:48], printers, ocr_dbg))
-        if kind not in ("打印", "导入"):
-            # 2026-10-29 修正: OCR/视觉都没认出标记时 kind 是 "" 而不是
-            # "unknown", 旧判定 == "unknown" 永远不成立, 空 kind 会掉进
-            # 循环底部的兜底分支 —— 行为恰好也是取消, 但报错误导排障方向。
-            ax.press_cancel_strict()
-            result["error"] = ("弹窗内容判读不出 (UIA/本地OCR/视觉都空手), "
-                               "已取消未派单")
-            rec("check-target", False, result["error"] + ocr_dbg)
-            return result
-        if kind == "导入":
-            # 文件核对: 视觉正文 / 本地 OCR 都给得到才算数; 全屏 OCR 认不出
-            # (小字拆部首) 时裁弹窗放大重读; 两条 OCR 路都不可用才退流程位置
-            # —— 文件来自本进程 0.5s 前发的 deeplink, 选项页又已核对过文件名,
-            # 这里的 confirm 也不派单, 放行。
-            zoom_dbg = ""
-            if body:
-                file_ok = base in body
-            elif ocr is not None:
-                file_ok = _win_file_in_lines(ocr, base)
-                if not file_ok:
-                    zoom = _win_ocr_dialog_lines(shot_path, ax.dialog_frame())
-                    if zoom:
-                        file_ok = _win_file_in_lines(zoom, base)
-                        zoom_dbg = " zoom=[%s]" % "; ".join(
-                            l["name"][:20] for l in zoom[:8])
-                    else:
-                        zoom_dbg = " zoom=none"
-            else:
-                file_ok = True
-            if not file_ok:
-                ax.press_cancel_strict()
-                result["error"] = ("导入弹窗核对不到文件「%s」, 已取消未派单"
-                                   % base)
-                rec("check-file", False, result["error"] + ocr_dbg + zoom_dbg)
-                return result
-            # 导入确认弹窗 (正文含标记 + 文件名核对): strict confirm
+        # ---- 弹窗路由 (2026-10-29 定调): 固定编排信流程位置, OCR 只留兜底。
+        # 按「打印」后、导入前的首个弹窗只可能是导入确认弹窗 (发送弹窗要
+        # 等导入回选项页再按一次「打印」才出; v9 会话导入后自动接弹窗,
+        # 那发生在 imported 置位之后, 不会走进这支)。文件身份已在选项页
+        # 用 UIA 文字核对过 (check-file-page), 导入确认本身不派单, 误按
+        # 上限 = 白导入一次 —— 直接按, 不再烧 ~2s OCR 分类 + ~2s 文件名
+        # 放大重读 (Mac 侧 7-8s 全程同样是信流程位置直接按)。
+        if not imported:
             ok = ax.press_confirm_strict()
             if not ok:
-                time.sleep(1.5)
+                time.sleep(0.6)
                 ok = ax.press_confirm_strict()
             if not ok:
                 result["error"] = "导入确认弹窗(第%d轮)点不到确认键" % rnd
@@ -1708,21 +1673,70 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
             imported = True
             imported_at = time.time()
             rec("click-import", True,
-                "第%d轮: 已确认导入 (%s核对正文)"
-                % (rnd, "视觉" if body else "本地OCR" if ocr is not None
-                   else "流程位置"))
+                "第%d轮: 已确认导入 (流程位置直按, 免OCR)" % rnd)
             time.sleep(0.3)  # 弹窗收起; 回选项页的等待交给探测循环快路径
             continue
+        # imported 之后的弹窗 = 发送弹窗: UIA texts 目标机核对先行 (零
+        # OCR, 下拉框当前值在树里)。对不上才截图, 且 OCR 只做一件事:
+        # 给下面选机分支提供弹窗区域的屏幕坐标行 (机名行/标题行锚点)
+        # —— 不再做「这是不是发送弹窗」的全弹窗分类。派单安全门在选机
+        # 分支末端: 切换后的 UIA 当前值 == 目标 且 序列号一致, 与弹窗
+        # 分类无关; 弹窗若是别的东西 (报错框等), 选机必然失败 → 取消,
+        # 语义等价且省 ~2s。
+        kind, body, printers, ocr = "打印", "", [], None
+        # 弹窗内容区 (钮对矩形反推): texts 归属校验 + 选机锚点 OCR 共用。
+        fr = ax.dialog_frame()
+        dlg_box = None
+        if fr:
+            # 2026-10-29 截图实测标定 (1920x1080): 弹窗实际 x 562..1357 /
+            # y 317..746, 钮对只在右下角 (x 1220..1335 / y 691..723)。
+            # 旧偏移 (-330,-300) 只框到弹窗右半, 下拉**当前值行** (x~650,
+            # 取消键顶-270) 被扔在框外 —— 归属校验假 miss、锚点 OCR 读不
+            # 到值行。(-680,-370) 恰好完整盖住弹窗内部 (值行/标题/选项区),
+            # 上下左右都不越过弹窗边, 不会读进背景选项页 (其选择器值在
+            # 弹窗上方 y~154-186)。
+            dlg_box = (min(fr["cancel"][0], fr["confirm"][0]) - 680,
+                       min(fr["cancel"][1], fr["confirm"][1]) - 370,
+                       max(fr["cancel"][2], fr["confirm"][2]) + 35,
+                       max(fr["cancel"][3], fr["confirm"][3]) + 40)
+        if _win_target_in_dialog(known, want_name, serial, dlg_box):
+            rec("classify-dialog", True,
+                "kind=打印 (UIA texts 弹窗内归属核对, 免OCR)")
+        else:
+            if not ax.screenshot(shot_path):
+                ax.press_cancel_strict()
+                result["error"] = "弹窗截图失败, 已取消未派单"
+                rec("classify-dialog", False, result["error"])
+                return result
+            # 只裁弹窗框, _win_ocr_region 会把坐标平移回屏幕系 (picker 要
+            # 像素)。fr 没拿到 (钮对不在树里) 就按屏幕中心兜底。
+            if dlg_box is None:
+                try:
+                    from PIL import Image as _Img
+                    _sw, _sh = _Img.open(shot_path).size
+                except Exception:  # noqa: BLE001
+                    _sw = _sh = 0
+                dlg_box = ((_sw // 2 - 500, _sh // 2 - 330,
+                            _sw // 2 + 500, _sh // 2 + 330)
+                           if _sw else (0, 0, 0, 0))
+            ocr = (_win_ocr_region(shot_path, dlg_box)
+                   if dlg_box[2] > dlg_box[0] and dlg_box[3] > dlg_box[1]
+                   else None)
+            if ocr is None:
+                ocr = _win_ocr_lines(shot_path)
+            rec("classify-dialog", True,
+                "kind=打印 (流程位置; OCR 仅作选机锚点, %d 行)" % len(ocr or []))
         if kind in ("打印", "选择") and want_name:
             # 「发送打印任务至」弹窗: 目标机 = 下拉框当前选中的那台。
             # 权威来源是 UIA texts (下拉框当前值在树里, 零 OCR 错字);
             # 当前值不是目标 → 展开下拉点选目标 (选项不进树, 只能视觉给
             # 坐标; 视觉名只用来排序候选, 选中与否仍以 texts 为准)。
+            # 权威核对走弹窗内归属版: 背景页残留机名不算 (假核对=错机派单)。
+            shown = _win_target_in_dialog(known, want_name, serial, dlg_box)
             cur = {t for t in ax.texts() if t}
-            shown = _win_target_shown(cur, want_name, known, serial)
             if not shown:
                 ok2, why = _win_pick_printer(shot_path, want_name, known,
-                                             serial, ocr=ocr)
+                                             serial, ocr=ocr, dlg=dlg_box)
                 rec("select-device", ok2, why)
                 if not ok2:
                     ax.press_cancel_strict()
@@ -1730,8 +1744,10 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
                     rec("check-target", False, result["error"])
                     return result
                 # 选完再确认一次: 选机内部已经 _win_wait_target 过, 这里只是
-                # 给界面一个刷新窗口, 拿最终值。
-                shown = _win_wait_target(want_name, known, serial, timeout=1.0)
+                # 给界面一个刷新窗口拿最终值 (0.5s 够 UIA 回读; 下一行还有
+                # 0.8s 兜底重读)。
+                shown = _win_wait_target(want_name, known, serial,
+                                         timeout=0.5, dlg=dlg_box)
                 cur = {t for t in ax.texts() if t}
             if not shown:
                 # texts 掏空兜底 (Chromium 懒加载常态): 重预热 a11y 再读;
@@ -1741,17 +1757,22 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
                     ax.enable_ax()
                 except Exception:  # noqa: BLE001
                     pass
-                shown = _win_wait_target(want_name, known, serial, timeout=0.8)
+                shown = _win_wait_target(want_name, known, serial,
+                                         timeout=0.8, dlg=dlg_box)
             if not shown:
+                # texts 彻底掏空的最后兜底: 重截一张, 只 OCR 弹窗框内,
+                # 目标名**逐字**命中才放行 (OCR 有同音错字风险, 不吃模糊;
+                # 全屏 OCR 会读到背景页残留, 同假核对坑, 不能用)。
                 full2 = shot_path + ".verify"
                 if ax.screenshot(full2):
-                    v = _win_ocr_lines(full2)
+                    v = (_win_ocr_region(full2, dlg_box)
+                         if dlg_box else None) or []
                     want_n = _norm_printer_name(want_name)
-                    for l in (v or []):
+                    for l in v:
                         if _norm_printer_name(l["name"]) == want_n:
                             shown = want_name
                             rec("check-target-ocr", True,
-                                "texts 掏空, 本地OCR 逐字命中「%s」" % l["name"])
+                                "texts 掏空, 弹窗内OCR 逐字命中「%s」" % l["name"])
                             break
             if not shown:
                 ax.press_cancel_strict()
@@ -1819,7 +1840,7 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
     # 任务回读只是附带信息, tries=4/wait=2 要拖 2.4s —— 收窄到 ~1.5s,
     # 回读不到不影响 ok (App 自己会看云端任务)。
     result["ok"] = True
-    task = cloud.latest_task(base, serial, after_id=before_id, tries=2, wait=1)
+    task = cloud.latest_task(base, serial, after_id=before_id, tries=2, wait=0)
     if task:
         result["task"] = task
         if task.get("device") and task["device"] != serial:

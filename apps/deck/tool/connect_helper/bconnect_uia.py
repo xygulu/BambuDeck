@@ -509,6 +509,23 @@ def selector_frame() -> dict | None:
     return _selector_scan()
 
 
+def texts_with_rects() -> list[dict]:
+    """窗口里所有可读文本 + 屏幕矩形。
+
+    2026-10-29 盒子实测: 背景选项页自己的打印机选择器同样把机名放进
+    texts, 「任意文本匹配」会把没切过去的旧值当目标 (假核对)。调用方
+    (bconnect_print._win_target_in_dialog) 拿矩形做**弹窗内归属**: 命中
+    文本的矩形必须落在发送弹窗里, 背景页的机名一律不算。
+    """
+    out = []
+    for (c, t, n, au, r) in _snapshot():
+        if not n or r is None:
+            continue
+        out.append({'name': str(n), 'l': r.left, 't': r.top,
+                    'r': r.right, 'b': r.bottom})
+    return out
+
+
 def dropdown_options(group: dict, row_limit: int = 8,
                      first_dy: int = _SELECTOR_DROP_FIRST_DY,
                      row_h: int = _SELECTOR_ROW) -> list[dict]:

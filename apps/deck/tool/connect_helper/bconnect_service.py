@@ -533,6 +533,11 @@ class Handler(BaseHTTPRequestHandler):
                 "filename": payload.get("filename"),
                 "stop_before_send": payload.get("stop_before_send"),
                 "filament": payload.get("filament"),
+                # 2026-10-29: select_only 漏在白名单外 = 干跑变真派单
+                # (cmd_print.ps1 -SelectOnly 直发顶层字段, 这里不拷就被
+                # bool(None) 吞掉, Connect 真按了确认)。顶层字段必须逐个
+                # 进 params, 新加字段先查这里。
+                "select_only": payload.get("select_only"),
             })
             self.path = "/command"
 
