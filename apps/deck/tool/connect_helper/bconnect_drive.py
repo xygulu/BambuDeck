@@ -242,7 +242,70 @@ def _ocr_state(blob: str) -> str:
         return "printing"
     if "已暂停" in blob or "已 暂 停" in blob:
         return "paused"
-    return "idle"
+    # 明确读到空闲标记才算 idle; 什么都没读到返回 unknown。
+    if any(k in blob for k in ("在线", "离线", "空闲", "未连接")):
+        return "idle"
+    return "unknown"
+
+
+def _ocr_header_name(name: str) -> bool:
+    """只裁左上角机名行放大重读, 判断这一页是不是这台机。
+
+    全屏 OCR 对「拓竹A1宇树」这种 CJK+拉丁混排的小字行会整行漏读
+    (2026-10-29 探针: 连续三帧都是 21 行, 机名行一次都没读到, 但页面
+    确实是对的)。机名行标定在 (66,132), 按区域裁出来 3x 放大命中率高
+    得多, 而且「认错机器」的判据反而更严: 放大后读到的是真机名。
+    """
+    try:
+        import bconnect_print as bp
+        from PIL import Image
+        sp = shot()
+        box = (16, 96, 700, 176)
+        im = Image.open(sp).crop(box)
+        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+        im = im.resize((im.width * 3, im.height * 3), resample)
+        zp = sp + ".hdr.png"
+        im.save(zp, "PNG")
+        zs = bp._win_ocr_lines(zp) or []
+    except Exception:  # noqa: BLE001
+        return False
+    return any(bp._name_score(l["name"], name) >= 0.8 for l in zs)
+
+
+def _ocr_sense(name: str, tries: int = 3):
+    """截图 OCR, 直到读到这台机的名字。返回 (lines, blob, name_ok)。
+
+    机名行在左上角, Windows OCR 每帧读到的行数在 19~36 之间浮动,
+    机名会随机整行漏读 (2026-10-29 探针: 同一页面连续两帧, 一帧 36 行
+    有机名, 一帧 20 行没有) -> 单帧判 wrong_printer 会把正常操作挡掉,
+    而这个判据本身是防「操作错机器」的安全网, 不能删, 只能重试取帧。
+    全屏重试仍读不到时, 最后再单独放大机名行读一次。
+    """
+    import bconnect_print as bp
+    lines = _ocr_lines() or []
+    blob = "".join("".join(l["name"].split()) for l in lines)
+    for i in range(max(1, tries)):
+        if lines and any(bp._name_score(l["name"], name) >= 0.8
+                         for l in lines):
+            return lines, blob, True
+        if i == tries - 1:
+            break
+        time.sleep(0.6)
+        lines = _ocr_lines() or []
+        blob = "".join("".join(l["name"].split()) for l in lines)
+    if _ocr_header_name(name):
+        _log("ocr-sense: name via header zoom")
+        return lines, blob, True
+    return lines, blob, False
+
+
+def _ocr_on_detail(blob: str) -> bool:
+    """是不是某台机的详情页。多信号任一成立即算 —— OCR 每帧读到的行数
+    在 19~36 之间浮动, 只认「打印进度」一个词会误判 (2026-10-29 实测:
+    页面明明有 LED灯 / 速度% / 挤出机, 标题却漏读, 白判成不在详情页)。
+    """
+    return ("打印进度" in blob or "LED灯" in blob or "跳过" in blob
+            or "已暂停" in blob)
 
 
 def _ocr_press_control(name: str, cmd: str) -> dict:
@@ -263,17 +326,19 @@ def _ocr_press_control(name: str, cmd: str) -> dict:
         _log("ocr-ctrl: engine unavailable")
         return None
     blob = "".join("".join(l["name"].split()) for l in lines)
-    if "打印进度" not in blob:
+    if not _ocr_on_detail(blob):
         _log("ocr-ctrl: not_on_detail (%d lines)" % len(lines))
         return {"pressed": False, "reason": "not_on_detail"}
-    # 机名核对: 相似行即算 (OCR 错字常态, 拓竹A1宇树 读成 柘竹A1宇树)
-    hit = None
-    for l in lines:
-        n = bp._name_score(l["name"], name)
-        if n >= 0.8:
-            hit = l
-            break
-    if hit is None:
+    # 机名核对 (含漏读重试; 相似行即算 —— OCR 错字常态, 拓竹A1宇树 读成
+    # 柘竹A1宇树)
+    lines, blob, name_ok = _ocr_sense(name)
+    if not lines:
+        _log("ocr-ctrl: engine unavailable")
+        return None
+    if not _ocr_on_detail(blob):
+        _log("ocr-ctrl: not_on_detail (%d lines)" % len(lines))
+        return {"pressed": False, "reason": "not_on_detail"}
+    if not name_ok:
         _log("ocr-ctrl: wrong_printer (%d lines)" % len(lines))
         return {"pressed": False, "reason": "wrong_printer"}
     st = _ocr_state(blob)
@@ -323,7 +388,7 @@ def _ocr_enter(name: str) -> bool:
         return ("".join("".join(l["name"].split()) for l in ls)
                 if ls else "")
 
-    if "打印进度" in blob_of():
+    if _ocr_on_detail(blob_of()):
         return True
     ls = _ocr_lines() or []
     tab = next((l for l in ls
@@ -348,7 +413,7 @@ def _ocr_enter(name: str) -> bool:
     except Exception:  # noqa: BLE001
         return False
     time.sleep(3.0)
-    return "打印进度" in blob_of()
+    return _ocr_on_detail(blob_of())
 
 
 def _ocr_confirm_stop() -> bool:
@@ -725,14 +790,19 @@ def _ocr_speed_trigger(name: str) -> dict | None:
     if not lines:
         return None
     blob = "".join("".join(l["name"].split()) for l in lines)
-    if "打印进度" not in blob:
-        _log("ocr-speed: not_on_detail")
+    if not _ocr_on_detail(blob):
+        _log("ocr-speed: not_on_detail (%d lines)" % len(lines))
         return None
-    import bconnect_print as bp
-    if not any(bp._name_score(l["name"], name) >= 0.8 for l in lines):
-        _log("ocr-speed: wrong_printer")
+    lines, blob, name_ok = _ocr_sense(name)
+    if not lines:
+        return None
+    if not name_ok:
+        _log("ocr-speed: wrong_printer (%d lines)" % len(lines))
         return None
     if _ocr_state(blob) == "idle":
+        # 只有明确读到「在线/离线/空闲」才收手; 状态行整行漏读是常态
+        # (2026-10-29 探针: 23 行帧里没有状态行, 却把正常页面判成空闲),
+        # 漏读就当 unknown 继续找触发器 —— 找得到就是能操作。
         _log("ocr-speed: idle")
         return None
     lamp = next((l for l in lines
@@ -740,9 +810,19 @@ def _ocr_speed_trigger(name: str) -> dict | None:
     if lamp is None:
         _log("ocr-speed: no lamp line")
         return None
-    pct = [l for l in lines
-           if re.fullmatch(r"\d{1,3}\s*[%％]?", l["name"].strip())
-           and abs(l["y"] - lamp["y"]) <= 20 and l["x"] < lamp["x"]]
+    # 同一行判定收紧到 ±8: 真机实测 LED灯 在 y=507, 而温度行在 y=487,
+    # 用 ±20 会把温度那行的孤立「0」吸进来 (2026-10-29 探针实测: 触发器
+    # 选成了 (1445,487) 的 "0", 真正的速度在 (1325,507) 的 "124 ％")。
+    def _pct_of(src):
+        cand = [l for l in src
+                if re.fullmatch(r"\d{1,3}\s*[%％]?", l["name"].strip())
+                and abs(l["y"] - lamp["y"]) <= 8 and l["x"] < lamp["x"]]
+        # 速度百分比一定带 % (半角或全角); 温度/风扇的孤立数字不带。
+        # 有带号的优先, 没有才退回纯数字。
+        signed = [l for l in cand if re.search(r"[%％]", l["name"])]
+        return signed or cand
+
+    pct = _pct_of(lines)
     if not pct:
         # zoom 重读: LED 行左侧条带 (速度%黑色文本, 但全屏也有漏)
         try:
@@ -760,12 +840,14 @@ def _ocr_speed_trigger(name: str) -> dict | None:
             zs = bp._win_ocr_lines(zp) or []
         except Exception:  # noqa: BLE001
             zs = []
-        for v in zs:
-            if re.fullmatch(r"\d{1,3}\s*[%％]?", v["name"].strip()):
-                pct = [{"name": v["name"],
-                        "x": box[0] + v["x"] / 2.5,
-                        "y": box[1] + v["y"] / 2.5}]
-                break
+        zcand = [{"name": v["name"],
+                  "x": box[0] + v["x"] / 2.5,
+                  "y": box[1] + v["y"] / 2.5}
+                 for v in zs
+                 if re.fullmatch(r"\d{1,3}\s*[%％]?", v["name"].strip())]
+        zsigned = [c for c in zcand if re.search(r"[%％]", c["name"])]
+        if zsigned or zcand:
+            pct = zsigned or zcand
     if not pct:
         _log("ocr-speed: no trigger percent")
         return None
@@ -825,7 +907,7 @@ def _ocr_set_speed(name: str, serial: str, level: int,
 
     lines = _ocr_lines() or []
     blob = "".join("".join(l["name"].split()) for l in lines)
-    if "打印进度" not in blob or \
+    if not _ocr_on_detail(blob) or \
             not any(bp._name_score(l["name"], name) >= 0.8 for l in lines):
         if not _ocr_enter(name):
             return {"ok": False,

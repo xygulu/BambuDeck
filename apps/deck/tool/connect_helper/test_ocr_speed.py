@@ -61,8 +61,12 @@ fake_lines(DETAIL_LINES)
 check('别的机器返回 None', drv._ocr_speed_trigger('别的机器'), None)
 fake_lines([{'name': '打印', 'x': 228, 'y': 47}])
 check('非详情页返回 None', drv._ocr_speed_trigger('宇树'), None)
+fake_lines([l for l in DETAIL_LINES if l['name'] != '打印中']
+           + [{'name': '在线', 'x': 168, 'y': 133}])
+check('明确空闲返回 None', drv._ocr_speed_trigger('宇树'), None)
+# 状态行整行漏读(没有「打印中」也没有「在线」)不算空闲, 继续找触发器
 fake_lines([l for l in DETAIL_LINES if l['name'] != '打印中'])
-check('空闲返回 None', drv._ocr_speed_trigger('宇树'), None)
+check('状态漏读不当空闲', bool(drv._ocr_speed_trigger('宇树')), True)
 
 # 3) 异行百分比(风扇)不能被选中
 fake_lines(DETAIL_LINES + [{'name': '100%', 'x': 1200, 'y': 620}])
@@ -73,6 +77,33 @@ check('异行百分比不被选', round(t['x']) if t else None, 1349)
 fake_lines(DETAIL_LINES + [{'name': '50%', 'x': 1250, 'y': 507}])
 t = drv._ocr_speed_trigger('宇树')
 check('同行多百分比取靠近 LED', round(t['x']) if t else None, 1349)
+
+# 4b) 真机实测回归 (2026-10-29 探针): 温度行在 y=487 有孤立「0」,
+#     速度在 y=507 是「124 ％」(全角)。必须选中 124%, 不能选温度那个 0。
+REAL_LINES = [
+    {'name': '打印进度', 'x': 64, 'y': 191},
+    {'name': '拓竹A1宇树', 'x': 66, 'y': 132},
+    {'name': '打印中', 'x': 196, 'y': 267},
+    {'name': '0', 'x': 1445, 'y': 487},      # 温度行 (干扰)
+    {'name': '0', 'x': 1325, 'y': 487},      # 温度行 (干扰)
+    {'name': 'LED 灯', 'x': 1446, 'y': 507},
+    {'name': '124 ％', 'x': 1325, 'y': 507},  # 真正的速度 (全角 ％)
+]
+fake_lines(REAL_LINES)
+t = drv._ocr_speed_trigger('拓竹A1宇树')
+check('真机回归: 选中速度而非温度',
+      (t['text'], round(t['x']), round(t['y'])) if t else None,
+      ('124 ％', 1325, 507))
+
+# 4c) 同样的干扰, 但速度%只是纯数字 "124" (OCR 丢了 % 号)
+NO_SIGN = [dict(l) for l in REAL_LINES]
+for l in NO_SIGN:
+    if l['name'] == '124 ％':
+        l['name'] = '124'
+fake_lines(NO_SIGN)
+t = drv._ocr_speed_trigger('拓竹A1宇树')
+check('真机回归: 无%号时也不选温度',
+      (t['text'], round(t['y'])) if t else None, ('124', 507))
 
 # 5) 全角 ％ / 缺 % 号 / 中间带空格 都要认
 for variant in ('100％', '100', '100 %'):
@@ -95,6 +126,31 @@ for name, zx, zy, want in (('静音', 340.0, 45.0, (1355, 530)),
     x = BOX[0] + zx / ZOOM
     y = BOX[1] + zy / ZOOM
     check('菜单 %s 坐标反算' % name, (round(x), round(y)), want)
+
+# 6b) 详情页判定: 多信号任一成立 (OCR 每帧行数在 19~36 浮动, 标题会漏读)
+for sig, want in (('打印进度', True), ('LED灯', True), ('跳过', True),
+                  ('已暂停', True), ('打印', False), ('', False)):
+    check('详情页判定 %r' % sig, drv._ocr_on_detail(sig), want)
+
+# 6b2) 状态判定: 只有明确读到空闲标记才算 idle, 漏读=unknown
+for blob, want in (('打印中', 'printing'), ('已暂停', 'paused'),
+                   ('在线', 'idle'), ('拓竹A1宇树LED灯124％', 'unknown')):
+    check('状态判定 %r' % blob, drv._ocr_state(blob), want)
+
+# 6c) 机名漏读兜底: 全屏 3 帧都没有机名 -> 走标题区放大重读
+NO_NAME = [l for l in REAL_LINES if l['name'] != '拓竹A1宇树']
+fake_lines(NO_NAME)
+drv.time.sleep = lambda *_a, **_k: None
+drv._ocr_header_name = lambda n: n == '拓竹A1宇树'
+_ls, _blob, ok = drv._ocr_sense('拓竹A1宇树')
+check('机名靠标题区放大救回', ok, True)
+_ls, _blob, ok = drv._ocr_sense('别的机器')
+check('标题区也不是这台 -> 拒绝', ok, False)
+
+# 6d) 全屏有 3 帧都读不到机名时, 触发器仍能工作
+t = drv._ocr_speed_trigger('拓竹A1宇树')
+check('名字靠放大时触发器可用',
+      (t['text'], round(t['x'])) if t else None, ('124 ％', 1325))
 
 # 7) 档位映射齐全 (level 1-4)
 for lv in (1, 2, 3, 4):
