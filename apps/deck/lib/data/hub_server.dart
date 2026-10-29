@@ -835,6 +835,10 @@ class HubServer {
     return <String, dynamic>{
       'version': deckVersion,
       'platform': Platform.operatingSystem,
+      // 候选端点 (2026-10-29): 手机/电脑可以用这些地址连上这台 hub ——
+      // 局域网地址在前 (同网段直连最快), 隧道地址兜底 (不在同网段也能连)。
+      // 网页端会挨个探测, 取响应最快的那个 (局域网优先 + 隧道兜底)。
+      'endpoints': await _candidateEndpoints(),
       'hub': <String, dynamic>{
         'ok': true,
         if (up != null) 'uptimeSec': DateTime.now().difference(up).inSeconds,
@@ -843,6 +847,28 @@ class HubServer {
       'cloudflared': results[1],
       'tunnel': results[2],
     };
+  }
+
+  /// 本机所有 IPv4 地址 (http://ip:端口) + 隧道地址。
+  /// 环回地址不算 (外部连不到), 隧道地址来自 hub.local.json 的
+  /// tunnelProbeUrl (每台机器绑自己的域名)。
+  Future<List<String>> _candidateEndpoints() async {
+    final out = <String>[];
+    final port = settings.hubPort;
+    try {
+      final ifaces = await NetworkInterface.list();
+      for (final i in ifaces) {
+        for (final a in i.addresses) {
+          if (a.type == InternetAddressType.IPv4 && !a.isLoopback) {
+            final u = 'http://${a.address}:$port';
+            if (!out.contains(u)) out.add(u);
+          }
+        }
+      }
+    } catch (_) {}
+    final t = tunnelProbeUrl.trim();
+    if (t.isNotEmpty && !out.contains(t)) out.add(t);
+    return out;
   }
 
   Future<Map<String, dynamic>> _checkHelper() async {

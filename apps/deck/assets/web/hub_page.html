@@ -913,7 +913,90 @@ $('go').onclick = () => {
 };
 $('tok').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
 
-const api = path => path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
+// ---- 多端点 (2026-10-29): 局域网优先 + 隧道兜底 -------------------------
+// hub 在 /api/health 里给出候选端点 (本机各 IPv4 + 隧道域名, 局域网在前)。
+// 页面挨个探测, 取响应最快的那个当 API_BASE —— 同网段走局域网 (快),
+// 不在同网段自动落到隧道。之后所有 api() / WebSocket 都走这个 base。
+// 运行中某个端点断了 (换网络/WiFi 切换) -> 重新探测并切换, 不用用户手动改地址。
+let API_BASE = location.origin;
+let ENDPOINTS = [];
+
+function wsBase(base) {
+  const u = new URL(base, location.href);
+  return (u.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + u.host;
+}
+
+async function probeEndpoint(base, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  const t0 = (performance && performance.now) ? performance.now() : Date.now();
+  try {
+    const r = await fetch(base + '/api/health?token=' +
+        encodeURIComponent(TOKEN || ''), {signal: ctrl.signal, cache: 'no-store'});
+    if (!r.ok) return null;
+    const j = await r.json();
+    return {base: base, ms: Date.now() - t0, data: j};
+  } catch (_) {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 并发探测所有候选, 取最快能通的 (局域网地址延迟最低, 自然排前面)。
+// 注意: 浏览器会拦「混合内容」—— HTTPS 页面 fetch http:// 局域网地址会被
+// 拒绝, 这种情况下探测自然失败, 页面就留在隧道上 (这是浏览器的规矩,
+// 不是我们的选择)。页面本身用 http 打开时, 局域网优先才真正生效。
+let picking = false;
+async function pickEndpoint() {
+  if (picking) return API_BASE;
+  picking = true;
+  try {
+    const cands = [];
+    for (const c of ENDPOINTS.concat([location.origin])) {
+      if (c && !cands.includes(c)) cands.push(c);
+    }
+    if (cands.length <= 1) return location.origin;
+    const results = await Promise.all(cands.map(c => probeEndpoint(c, 3000)));
+    const ok = results.filter(Boolean).sort((a, b) => a.ms - b.ms);
+    if (!ok.length) return location.origin;
+    const best = ok[0];
+    if (best.data && Array.isArray(best.data.endpoints) &&
+        best.data.endpoints.length) {
+      ENDPOINTS = best.data.endpoints;
+    }
+    return best.base;
+  } finally {
+    picking = false;
+  }
+}
+
+// 切换端点: 换 base + 重连 WebSocket (画面/状态通道都要重挂) + 拉一次状态。
+// 15 秒节流: 所有端点都挂掉时 refreshSvc 会一直失败, 不节流就会反复探测。
+let lastSwitchAt = 0;
+async function switchEndpoint() {
+  if (Date.now() - lastSwitchAt < 15000) return false;
+  lastSwitchAt = Date.now();
+  const base = await pickEndpoint();
+  if (base === API_BASE) return false;
+  API_BASE = base;
+  try { if (camWS) { camWS.close(); camWS = null; } } catch (_) {}
+  try { if (ws) { try { ws.close(); } catch (_) {} ws = null; } } catch (_) {}
+  try {
+    const r = await fetch(api('/api/state'));
+    if (r.ok) apply(await r.json());
+  } catch (_) {}
+  try { camConnect(); } catch (_) {}
+  try { connect(); } catch (_) {}
+  try { refreshSvc(); } catch (_) {}
+  return true;
+}
+
+const api = path => {
+  const base = API_BASE.replace(/\/+$/, '');
+  return base + path + (path.includes('?') ? '&' : '?') +
+      'token=' + encodeURIComponent(TOKEN);
+};
 const esc = s => String(s).replace(/[&<>"]/g, ch =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
 
@@ -1661,8 +1744,7 @@ function camSend(obj) {
 
 function camConnect() {
   if (camWS && camWS.readyState <= WebSocket.OPEN) return camWS;
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const url = `${proto}://${location.host}/ws-cam?token=` +
+  const url = wsBase(API_BASE) + '/ws-cam?token=' +
     encodeURIComponent(TOKEN || '');
   let sock;
   try { sock = new WebSocket(url); } catch (_) { return null; }
@@ -2404,9 +2486,8 @@ let wsRetry = 1000;
 let wsEverOpen = false;
 function connect() {
   if (!TOKEN) return;
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const sock = new WebSocket(
-      `${proto}://${location.host}/ws?token=${encodeURIComponent(TOKEN)}`);
+      wsBase(API_BASE) + '/ws?token=' + encodeURIComponent(TOKEN));
   ws = sock;
   sock.onopen = () => {
     lastMsgAt = Date.now();
@@ -2442,6 +2523,8 @@ window.addEventListener('online', () => {
   ws = null;
   wsRetry = 1000;
   connect();
+  // 网络换了一轮: 原来的端点可能不通了 (或者不再是最快的), 重挑一次。
+  switchEndpoint();
 });
 
 // 服务端每 10 秒推一次心跳, 20 秒什么都没收到说明这条连接已经死了
@@ -2468,6 +2551,17 @@ async function boot() {
   } catch (_) { /* ws 重连会给出连接状态 */ }
   if (!ws) connect();
   refreshSvc();
+  // 首次进来挑一次最快的端点: 页面可能是在隧道上打开的, 但同一局域网
+  // 里其实有更快的直连地址 (局域网优先 + 隧道兜底)。
+  probeEndpoint(API_BASE, 3000).then(hit => {
+    if (!hit || !hit.data) return;
+    if (Array.isArray(hit.data.endpoints) && hit.data.endpoints.length) {
+      ENDPOINTS = hit.data.endpoints;
+    }
+    return pickEndpoint().then(best => {
+      if (best && best !== API_BASE) switchEndpoint();
+    });
+  }).catch(() => {});
 }
 
 // ---- 服务状态 (2026-10-27): hub / helper / cloudflared / 隧道 四项自检。
@@ -2493,8 +2587,14 @@ async function refreshSvc() {
     const r = await fetch(api('/api/health'));
     if (!r.ok) return;
     svcData = await r.json();
+    if (Array.isArray(svcData.endpoints) && svcData.endpoints.length) {
+      ENDPOINTS = svcData.endpoints;
+    }
     renderSvc();
-  } catch (_) {}
+  } catch (_) {
+    // 当前端点不通了 (换网络/盒子重启) -> 重新挑一个能通的并切过去。
+    switchEndpoint();
+  }
 }
 function svcCls(ok) { return ok === true ? 'ok' : ok === false ? 'bad' : 'warn'; }
 function fmtUp(sec) {
