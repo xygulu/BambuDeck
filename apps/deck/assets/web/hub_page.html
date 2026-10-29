@@ -2557,12 +2557,74 @@ function renderSvcModal() {
     ? `<div class="svc-checked">检查于 ${new Date().toLocaleTimeString()} · ` +
       `<a href="#" id="svc-retry">重新检查</a></div>`
     : '<div class="svc-checked">正在检查…</div>';
-  $('modal-body').innerHTML = head + rows;
+  $('modal-body').innerHTML = head + rows + updRow();
   const retry = $('svc-retry');
   if (retry) retry.addEventListener('click', e => {
     e.preventDefault();
     refreshSvc();
   });
+  const upd = $('svc-update');
+  if (upd) upd.addEventListener('click', e => {
+    e.preventDefault();
+    checkUpdate();
+  });
+  const apply = $('svc-apply');
+  if (apply) apply.addEventListener('click', e => {
+    e.preventDefault();
+    applyUpdate();
+  });
+}
+
+// ---- 自更新 (2026-10-29): Windows 部署包可原地换装, 其它平台只给下载页。
+let updData = null;
+function updRow() {
+  const v = (svcData && svcData.version) || '';
+  const plat = (svcData && svcData.platform) || '';
+  const canApply = plat === 'windows';
+  const latest = updData ? updData.latest : '';
+  const has = updData && updData.hasUpdate;
+  const line = has
+    ? `<div class="svc-row warn"><i></i><span class="k">新版本</span>` +
+      `<span class="v">${esc(latest)} 可更新</span></div>`
+    : `<div class="svc-row"><i></i><span class="k">版本</span>` +
+      `<span class="v">${esc(v)}${updData ? ' · 已是最新' : ''}</span></div>`;
+  const btn = has
+    ? `<a href="#" id="svc-apply">立即更新</a> · <a href="#" id="svc-update">重新检查</a>`
+    : `<a href="#" id="svc-update">检查更新</a>`;
+  const note = canApply
+    ? ''
+    : '<div class="svc-checked">当前平台不支持自动换装, 检查更新会给出下载页</div>';
+  return line + `<div class="svc-checked">${btn}</div>` + note;
+}
+async function checkUpdate() {
+  try {
+    const r = await fetch(api('/api/update'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'check' }),
+    });
+    const j = await r.json();
+    updData = j;
+    renderSvcModal();
+  } catch (e) {
+    alert('检查更新失败: ' + e);
+  }
+}
+async function applyUpdate() {
+  if (!confirm('下载并换装新版本? 服务会重启几秒。')) return;
+  try {
+    const r = await fetch(api('/api/update'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'apply' }),
+    });
+    const j = await r.json();
+    if (!j.ok) { alert('更新失败: ' + (j.error || '未知错误')); return; }
+    $('modal-body').innerHTML =
+      '<div class="svc-checked">已下载新版本, 服务正在重启换装… 稍后刷新页面。</div>';
+  } catch (e) {
+    alert('更新失败: ' + e);
+  }
 }
 $('svc').addEventListener('click', openSvcModal);
 setInterval(refreshSvc, 30000);

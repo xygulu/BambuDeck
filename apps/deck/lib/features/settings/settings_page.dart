@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
+import '../../core/version.dart';
 import '../../data/app_settings.dart';
 import '../../data/camera_providers.dart';
 import '../../data/cloud_print_helper.dart';
@@ -17,6 +18,7 @@ import '../../data/providers.dart';
 import '../../data/settings_providers.dart';
 import '../../data/vision_guard.dart';
 import '../../data/vision_llm.dart';
+import 'app_update.dart';
 
 /// Settings center (PRD FR-10, MVP slice): notification switches, run log,
 /// config backup via clipboard, about. Theme/accent/i18n land with M5.
@@ -144,11 +146,98 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           leading: const Icon(Icons.info_outline),
           title: const Text('BambuDeck'),
           subtitle: Text('拓竹打印机监控套件 · M1 独立客户端\n'
-              '错误句表版本 $errorTableVersion',
+              '版本 $deckVersion · 错误句表版本 $errorTableVersion',
               style: const TextStyle(fontSize: 12)),
           isThreeLine: true,
         ),
+        ListTile(
+          leading: const Icon(Icons.system_update_alt),
+          title: const Text('检查更新'),
+          subtitle: const Text('从 GitHub Releases 检查新版本 (Android 可直接装)',
+              style: TextStyle(fontSize: 12)),
+          onTap: () => _checkUpdate(context),
+        ),
       ]),
+    );
+  }
+
+  /// 检查更新 → 有新版就弹更新说明 (Android 直接下载安装; 其它平台给链接)。
+  Future<void> _checkUpdate(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const AlertDialog(
+        title: Text('检查更新'),
+        content: Text('正在检查…'),
+      ),
+    );
+    try {
+      final info = await AppUpdate.check();
+      if (!context.mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      final has = info['hasUpdate'] == true;
+      if (!has) {
+        messenger.showSnackBar(SnackBar(
+            content: Text('已是最新版本 ${info['current'] ?? deckVersion}')));
+        return;
+      }
+      await _showUpdateDialog(context, info);
+    } catch (e) {
+      if (!context.mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      messenger.showSnackBar(SnackBar(content: Text('检查更新失败: $e')));
+    }
+  }
+
+  Future<void> _showUpdateDialog(
+      BuildContext context, Map<String, dynamic> info) async {
+    final notes = (info['notes'] ?? '').toString().trim();
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('发现新版本 ${info['latest']}'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('当前版本 ${info['current'] ?? deckVersion}'),
+              if (notes.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(notes, style: const TextStyle(fontSize: 12)),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('稍后'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              final apk = (info['apkUrl'] ?? '').toString();
+              final messenger = ScaffoldMessenger.of(context);
+              Navigator.of(ctx).pop();
+              if (apk.isEmpty) {
+                await AppUpdate.openRelease(
+                    (info['releaseUrl'] ?? '').toString());
+                return;
+              }
+              messenger.showSnackBar(
+                  const SnackBar(content: Text('正在下载新版本…')));
+              try {
+                await AppUpdate.downloadAndInstall(apk);
+              } catch (e) {
+                messenger.showSnackBar(
+                    SnackBar(content: Text('安装未完成: $e')));
+              }
+            },
+            child: const Text('下载并安装'),
+          ),
+        ],
+      ),
     );
   }
 

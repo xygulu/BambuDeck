@@ -2,8 +2,8 @@
 """Bambu Connect Windows UIA 底层 (2026-10-28)。
 
 bconnect_ax.py 的 Windows 等价物: 驱动 Bambu Connect (Electron/Chromium) 的
-UIA 控件树。deploy 时把本文件同时拷成 bconnect_ax.py, 上层
-bconnect_drive/bconnect_service/bconnect_print 无需改动。
+UIA 控件树。上层 bconnect_drive/bconnect_service/bconnect_print 按平台
+import (Windows -> 本文件, macOS -> bconnect_ax), 不用再手工拷贝。
 
 实测结构 (RDP 会话, 1920x955):
   窗口      Pane 'Bambu Connect (Beta)' class=Chrome_WidgetWin_1

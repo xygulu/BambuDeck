@@ -26,9 +26,14 @@ import re
 import subprocess
 import time
 
-import bconnect_ax as ax
-import bconnect_cloud as cloud
-import bconnect_vision as vis
+# 界面驱动层按平台选 (Windows: bconnect_uia / macOS: bconnect_ax),
+# 与 bconnect_print.py 同一套约定 —— 不用再手工把 uia 拷成 ax。
+if os.name == "nt":
+    import bconnect_uia as ax  # noqa: E402
+else:
+    import bconnect_ax as ax  # noqa: E402
+import bconnect_cloud as cloud  # noqa: E402
+import bconnect_vision as vis  # noqa: E402
 
 LAN_CONF = os.path.expanduser("~/.bambudeck/printers.json")
 SHOT = "/tmp/connect_drive.png"

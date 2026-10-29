@@ -10,6 +10,11 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # 版本号来源: 打 tag vX.Y.Z -> X.Y.Z; 其它构建 -> 0.0.0-dev (自更新永远
+  # 认为正式版比 dev 新, 不会把 dev 当成升级目标)。
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.0-dev' }}
+
 jobs:
   android:
     name: Android APK
@@ -27,12 +32,40 @@ jobs:
           cache: true
       - run: flutter pub get
         working-directory: apps/deck
-      - run: flutter build apk --release
+      - run: flutter build apk --release --dart-define=DECK_VERSION=${{ env.VERSION }}
         working-directory: apps/deck
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          cp apps/deck/build/app/outputs/flutter-apk/app-release.apk dist/deck-android.apk
       - uses: actions/upload-artifact@v4
         with:
           name: deck-android-apk
-          path: apps/deck/build/app/outputs/flutter-apk/app-release.apk
+          path: dist/deck-android.apk
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.47.7'
+          cache: true
+      - run: flutter pub get
+        working-directory: apps/deck
+      - run: flutter build macos --release --dart-define=DECK_VERSION=${{ env.VERSION }}
+        working-directory: apps/deck
+      - name: Collect app bundle
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            apps/deck/build/macos/Build/Products/Release/BambuDeck.app dist/deck-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deck-macos
+          path: dist/deck-macos.zip
 
   windows:
     name: Windows
@@ -46,7 +79,7 @@ jobs:
           cache: true
       - run: flutter pub get
         working-directory: apps/deck
-      - run: flutter build windows --release
+      - run: flutter build windows --release --dart-define=DECK_VERSION=${{ env.VERSION }}
         working-directory: apps/deck
       - uses: actions/upload-artifact@v4
         with:
@@ -79,18 +112,145 @@ jobs:
         working-directory: apps/deck
       # 组装免配置部署包:hub.exe + assets + 服务脚本 打成一个 zip,
       # 拷到 Windows 机器解压即可 install-service.bat 注册成开机自启服务。
+      # 2026-10-29 起包里还带 Connect helper (换盘/派单): Python 运行时 +
+      # bconnect_*.py + 看护脚本, install-helper.bat 一键装成计划任务。
       - name: Assemble hub deploy package
         shell: pwsh
         run: |
           $d = 'deploy/deck-hub-windows'
-          New-Item -ItemType Directory -Force -Path "$d/assets/web","$d/assets/plate_swap" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$d/assets/web","$d/assets/plate_swap","$d/helper" | Out-Null
           Copy-Item build/hub/bundle/bin/hub.exe "$d/"
           Copy-Item assets/web/hub_page.html "$d/assets/web/"
           Copy-Item assets/plate_swap/auto_plate_swap.3mf "$d/assets/plate_swap/"
-          Copy-Item tool/hub-windows/*.cmd, tool/hub-windows/*.bat, tool/hub-windows/README.md "$d/"
-          Compress-Archive -Path "$d/*" -DestinationPath deploy/deck-hub-windows.zip -Force
+          Copy-Item tool/hub-windows/*.cmd, tool/hub-windows/*.bat, tool/hub-windows/*.ps1, tool/hub-windows/README.md "$d/"
+          # Connect helper: python 源码 + 看护/注册脚本 都在 helper/ 下,
+          # 运行时在 runtime/python (helper_service.bat 用 ..\runtime\... 找)
+          Copy-Item tool/hub-windows/helper/* "$d/helper/"
+          Copy-Item tool/connect_helper/bconnect_*.py "$d/helper/"
+          Copy-Item tool/connect_helper/requirements-windows.txt "$d/helper/"
+        working-directory: apps/deck
+      # Connect helper 的 Python 运行时 (Windows 嵌入版 + 依赖):
+      # 官方 embeddable zip + 预编译 wheel。wheel 就是 zip, 直接解压进
+      # site-packages —— 不用 pip, 也不执行任何外部安装脚本。
+      - name: Bundle helper Python runtime
+        shell: pwsh
+        run: |
+          $d = 'deploy/deck-hub-windows'
+          $sp = "$d/runtime/python/Lib/site-packages"
+          $zip = "$env:RUNNER_TEMP/python.zip"
+          Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$d/runtime/python" -Force
+          # embeddable 默认禁 site-packages -> 依赖装不进去, 打开它
+          $pth = Get-ChildItem "$d/runtime/python" -Filter 'python*._pth' | Select-Object -First 1
+          if ($pth) {
+            $lines = @(Get-Content $pth.FullName)
+            $lines = $lines | ForEach-Object { if ($_ -eq '#import site') { 'import site' } else { $_ } }
+            if (-not ($lines -contains 'import site')) { $lines += 'import site' }
+            if (-not ($lines -contains 'Lib\site-packages')) { $lines += 'Lib\site-packages' }
+            Set-Content -Path $pth.FullName -Value $lines -Encoding ASCII
+          }
+          New-Item -ItemType Directory -Force -Path $sp | Out-Null
+          # 用 runner 自带的 python 只做「下载」: wheel 是二进制包, 不执行
+          python -m pip download --only-binary=:all: --platform win_amd64 `
+            --implementation cp --python-version 3.12 --abi cp312 `
+            -r "$d/helper/requirements-windows.txt" -d "$env:RUNNER_TEMP/wheels"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          Get-ChildItem "$env:RUNNER_TEMP/wheels/*.whl" | ForEach-Object {
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($_.FullName, $sp)
+          }
+          # .dist-info 里 RECORD 会写绝对路径, 删掉免得 python 报噪声
+          Get-ChildItem $sp -Recurse -Filter RECORD | Remove-Item -Force
+          & "$d/runtime/python/python.exe" -c "import pywinauto, paho.mqtt.client, requests, PIL; print('helper runtime ok')"
+        working-directory: apps/deck
+      - name: Zip hub deploy package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'deploy/deck-hub-windows/*' -DestinationPath 'deploy/deck-hub-windows.zip' -Force
+          New-Item -ItemType Directory -Force -Path 'dist' | Out-Null
+          Copy-Item 'deploy/deck-hub-windows.zip' 'dist/deck-hub-windows.zip'
         working-directory: apps/deck
       - uses: actions/upload-artifact@v4
         with:
           name: deck-hub-windows
-          path: apps/deck/deploy/deck-hub-windows.zip
+          path: apps/deck/dist/deck-hub-windows.zip
+
+  # tag 构建才发 Release: 汇总三个平台产物 + 生成 version.json 清单
+  # (每个资产的 sha256, 自更新下载后本地校验, 对不上就放弃更新)。
+  release:
+    name: GitHub Release
+    needs: [android, macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Assemble dist
+        run: |
+          set -e
+          cd dist
+          cp deck-android-apk/deck-android.apk deck-android.apk 2>/dev/null || true
+          cp deck-hub-windows/deck-hub-windows.zip deck-hub-windows.zip 2>/dev/null || true
+          cp deck-macos/deck-macos.zip deck-macos.zip 2>/dev/null || true
+          rm -rf deck-android-apk deck-hub-windows deck-macos
+          ls -la
+      - name: Write version manifest
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, datetime
+          ver = os.environ['VERSION'].lstrip('vV')
+          base = 'https://github.com/xygulu/BambuDeck/releases/download/%s/' % os.environ['VERSION']
+          assets = {}
+          for key, fn in (('android_apk', 'deck-android.apk'),
+                          ('hub_windows', 'deck-hub-windows.zip'),
+                          ('macos', 'deck-macos.zip')):
+              p = os.path.join('dist', fn)
+              if not os.path.exists(p):
+                  continue
+              h = hashlib.sha256(open(p, 'rb').read()).hexdigest()
+              assets[key] = {'url': base + fn, 'file': fn,
+                             'size': os.path.getsize(p), 'sha256': h}
+          manifest = {'version': ver,
+                      'releasedAt': datetime.datetime.utcnow().isoformat() + 'Z',
+                      'assets': assets}
+          open(os.path.join('dist', 'version.json'), 'w').write(
+              json.dumps(manifest, ensure_ascii=False, indent=2))
+          print(json.dumps(manifest, ensure_ascii=False, indent=2))
+          PY
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          cd dist
+          gh release create "$VERSION" \
+            deck-android.apk deck-hub-windows.zip deck-macos.zip version.json \
+            --title "BambuDeck $VERSION" --notes "BambuDeck $VERSION" || \
+          gh release upload "$VERSION" \
+            deck-android.apk deck-hub-windows.zip deck-macos.zip version.json \
+            --clobber
+
+  # 非 tag 构建也上传汇总产物, 方便本地/CI 下载最新包
+  artifacts:
+    name: All artifacts
+    needs: [android, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Bundle
+        run: |
+          set -e
+          cd dist
+          cp deck-android-apk/deck-android.apk deck-android.apk 2>/dev/null || true
+          cp deck-hub-windows/deck-hub-windows.zip deck-hub-windows.zip 2>/dev/null || true
+          cp deck-macos/deck-macos.zip deck-macos.zip 2>/dev/null || true
+          rm -rf deck-android-apk deck-hub-windows deck-macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deck-all
+          path: dist

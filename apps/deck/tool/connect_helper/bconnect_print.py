@@ -64,7 +64,13 @@ DEFAULT_DEVICE = "03900D642905133"
 SILENT = os.environ.get("BAMBU_SILENT", "1").strip().lower() not in ("0", "false", "no", "off")
 
 sys.path.insert(0, HERE)
-import bconnect_ax as ax  # noqa: E402
+# 界面驱动层按平台选: Windows 用 bconnect_uia (UIA 控件树), macOS 用
+# bconnect_ax (辅助功能 API + JXA)。以前 Windows 部署时要手工把 uia 拷成
+# ax, 改代码经常忘了同步 —— 现在按平台显式 import, 拷贝这一步没了。
+if os.name == "nt":
+    import bconnect_uia as ax  # noqa: E402
+else:
+    import bconnect_ax as ax  # noqa: E402
 import bconnect_cloud as cloud  # noqa: E402
 
 
@@ -826,6 +832,10 @@ def _win_classify_dialog(img_path: str) -> dict:
 
     弹窗正文不进 UIA 树 (2026-10-29 实测), 视觉是唯一内容来源。读不出/
     模型不可用一律返回 kind=unknown, 调用方 fail-closed 取消。
+
+    printers 只填「打印机下拉框里当前显示的那个机名」—— 视觉会把机型
+    (A1)、AMS 槽位 (B2) 一起当机名读出来, 混进列表就会误判; 权威核对
+    一律走 UIA texts (下拉框当前值在树里, 零 OCR 错字风险)。
     """
     try:
         import bconnect_vision as vision
@@ -834,11 +844,11 @@ def _win_classify_dialog(img_path: str) -> dict:
             "不要输出其它文字: {\"kind\": \"导入|打印|选择|其他\", "
             "\"body\": \"弹窗正文逐字原文(标题下的说明文字, 含文件名要原样保留)\", "
             "\"buttons\": [\"弹窗内按钮文字\"], "
-            "\"printers\": [\"弹窗中出现的打印机名称, 逐字; 没有则空数组\"], "
+            "\"printers\": [\"打印机下拉框里当前显示的那个机名, 逐字; 看不出就空数组\"], "
             "\"selected\": \"能看出被选中/高亮的打印机名, 否则空字符串\"}。"
             "kind 判定: 正文含『您将导入文件』=导入; 标题/正文含『发送打印"
             "任务至』(打印机下拉+发送按钮)=打印; 列出多台打印机网格供点选"
-            "=选择。printers 要包含打印机下拉框里当前显示的机名。"
+            "=选择。printers 只填下拉框当前值, 不要填机型(A1)或耗材槽位(B2)。"
             "逐字引用, 不要推断补全。")
         js = vision.ask_vision(img_path, prompt)
         m = re.search(r"\{.*\}", js or "", re.S)
@@ -847,6 +857,158 @@ def _win_classify_dialog(img_path: str) -> dict:
         return json.loads(m.group(0))
     except Exception as e:  # noqa: BLE001
         return {"kind": "unknown", "raw": str(e)[:200]}
+
+
+def _win_parse_options(js: str) -> list[dict]:
+    """视觉返回的下拉选项 -> [{name, x, y}]。
+
+    容忍几种形状: [{"name":..,"x":..,"y":..}] / [{"name":..,"point":[x,y]}]
+    / ["名字", ...] (无坐标, 无法点, 丢掉)。
+    """
+    out = []
+    m = re.search(r"\{.*\}", js or "", re.S)
+    arr = None
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            arr = obj.get("options") if isinstance(obj, dict) else obj
+        except Exception:  # noqa: BLE001
+            arr = None
+    if arr is None:
+        m2 = re.search(r"\[.*\]", js or "", re.S)
+        if m2:
+            try:
+                arr = json.loads(m2.group(0))
+            except Exception:  # noqa: BLE001
+                arr = None
+    for it in arr or []:
+        if isinstance(it, str):
+            continue
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or it.get("text") or "").strip()
+        x = it.get("x")
+        y = it.get("y")
+        if x is None or y is None:
+            pt = it.get("point") or it.get("center")
+            if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                x, y = pt[0], pt[1]
+        try:
+            x = int(float(x))
+            y = int(float(y))
+        except Exception:  # noqa: BLE001
+            continue
+        if not name:
+            continue
+        out.append({"name": name, "x": x, "y": y})
+    return out
+
+
+def _name_similarity(a: str, b: str) -> float:
+    """两个机名的相似度 (同位字符占比)。视觉读名有同音错字 (实测
+    『拓竹A1宇树』->『拓竹A1字树』), 同位比对能把这种错字救回来。
+    """
+    a = (a or "").strip()
+    b = (b or "").strip()
+    if not a or not b:
+        return 0.0
+    n = max(len(a), len(b))
+    same = sum(1 for i in range(min(len(a), len(b))) if a[i] == b[i])
+    return same / n
+
+
+def _win_target_shown(texts, want_name: str, known: dict,
+                      serial: str) -> str:
+    """弹窗当前机名 -> 目标机? 返回命中的显示名 (没命中返回 "")。
+
+    权威精确匹配优先 (UIA texts 里下拉框当前值, 零错字)。兜底用同位
+    相似度: Connect 显示名可能与云端名有出入, 视觉读名也可能同音错字
+    (实测『拓竹A1宇树』被读成『拓竹A1字树』)。兜底只在**该显示名能落
+    到本机目标序列号**时才认 —— 光名字像不算数。
+    """
+    cur = {str(t).strip() for t in (texts or []) if t and str(t).strip()}
+    if want_name and want_name in cur:
+        return want_name
+    if not want_name:
+        return ""
+    best = ""
+    best_score = 0.0
+    for t in cur:
+        # 候选显示名必须是已知映射里指向目标序列号的那台 (重名机保护)
+        hit_serial = None
+        for n, s in (known or {}).items():
+            if _name_similarity(t, n) >= 0.8:
+                hit_serial = s
+                break
+        if hit_serial != serial:
+            continue
+        score = _name_similarity(t, want_name)
+        if score > best_score:
+            best, best_score = t, score
+    if best and best_score >= 0.8:
+        return best
+    return ""
+
+
+def _win_pick_printer(shot_path: str, want_name: str, known: dict,
+                      serial: str) -> tuple[bool, str]:
+    """把「发送打印任务至」弹窗里的打印机切到 want_name。
+
+    实测 (2026-10-29): 下拉选项**不进 UIA 树** (展开后树里只剩当前值
+    「123」和耗材槽位「B2」), 只能视觉拿选项坐标去点; 但视觉读名会出
+    同音错字, 所以**不用视觉名做最终匹配** —— 视觉名只用来给候选排序,
+    点完以 UIA texts 里下拉框的当前值为准 (当前值在树里, 零错字风险)。
+
+    返回 (选中?, 说明)。选不中就让调用方 fail-closed 取消, 绝不盲发。
+    """
+    try:
+        import bconnect_vision as vision
+    except Exception as e:  # noqa: BLE001
+        return False, "视觉模块不可用: %s" % str(e)[:60]
+    try:
+        chev = vision.ask_coords(
+            shot_path, "打印机名字右边的下拉箭头(小三角/chevron)")
+    except Exception as e:  # noqa: BLE001
+        return False, "找下拉箭头失败: %s" % str(e)[:60]
+    if not chev:
+        return False, "视觉没找到下拉箭头"
+    cx, cy = int(chev[0]), int(chev[1])
+
+    tried = set()
+    for _round in range(2):
+        # 展开下拉 → 截图 → 视觉读选项(名字+坐标)
+        if not ax.press_at(cx, cy):
+            return False, "点不下拉箭头"
+        time.sleep(1.2)
+        lst = shot_path + ".list"
+        if not ax.screenshot(lst):
+            return False, "展开后截图失败"
+        try:
+            js = vision.ask_vision(
+                lst,
+                "这是打印机下拉列表展开后的截图, 列表每项是一台打印机。"
+                "只输出 JSON: {\"options\":[{\"name\":\"逐字机名\","
+                "\"x\":123,\"y\":456}]} (x/y 是该项文字中心的像素坐标)")
+        except Exception as e:  # noqa: BLE001
+            return False, "视觉读选项失败: %s" % str(e)[:60]
+        opts = _win_parse_options(js)
+        if not opts:
+            return False, "视觉没读出下拉选项: %s" % (js or "")[:80]
+        # 按与目标名的相似度排序候选 (视觉名可能有错字)
+        opts.sort(key=lambda o: -_name_similarity(o["name"], want_name))
+        for opt in opts:
+            if opt["name"] in tried:
+                continue
+            tried.add(opt["name"])
+            if not ax.press_at(opt["x"], opt["y"]):
+                continue
+            time.sleep(1.0)
+            shown = _win_target_shown(ax.texts(), want_name, known, serial)
+            if shown:
+                return True, "已选中「%s」(下拉框当前值已核对)" % shown
+        # 都没中: 再来一轮 (展开状态可能已经变了)
+    return False, "候选都点过仍没选中「%s」(试过: %s)" % (
+        want_name, ",".join(sorted(tried)))
 
 
 def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
@@ -980,58 +1142,45 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
             time.sleep(1.5)
             continue
         if kind in ("打印", "选择") and want_name:
-            # 打印确认/选机弹窗: 先核对目标机名, 选机弹窗还要先视觉点选
-            hit = [n for n in printers if n == want_name]
-            if not hit and kind == "打印" and want_name in body:
-                hit = [want_name]
-            if kind == "选择" and len(printers) > 1:
-                try:
-                    import bconnect_vision as vision
-                    xy = vision.ask_coords(
-                        shot_path, "打印机「%s」的选项行/卡片中心" % want_name)
-                except Exception:
-                    xy = None
-                if not xy or not ax.press_at(int(xy[0]), int(xy[1])):
+            # 「发送打印任务至」弹窗: 目标机 = 下拉框当前选中的那台。
+            # 权威来源是 UIA texts (下拉框当前值在树里, 零 OCR 错字);
+            # 当前值不是目标 → 展开下拉点选目标 (选项不进树, 只能视觉给
+            # 坐标; 视觉名只用来排序候选, 选中与否仍以 texts 为准)。
+            cur = {t for t in ax.texts() if t}
+            shown = _win_target_shown(cur, want_name, known, serial)
+            if not shown:
+                ok2, why = _win_pick_printer(shot_path, want_name, known, serial)
+                rec("select-device", ok2, why)
+                if not ok2:
                     ax.press_cancel_strict()
-                    result["error"] = ("选机弹窗(可选:%s)读不到/点不中「%s」, "
-                                       "已取消未派单" % (printers, want_name))
-                    rec("select-device", False, result["error"])
-                    return result
-                rec("select-device", True, "已点选「%s」@%s" % (want_name, xy))
-                time.sleep(1.2)
-                if not ax.screenshot(shot_path):
-                    ax.press_cancel_strict()
-                    result["error"] = "选机后核对截图失败, 已取消未派单"
+                    result["error"] = ("发送弹窗切机失败: %s, 已取消未派单" % why)
                     rec("check-target", False, result["error"])
                     return result
-                cls2 = _win_classify_dialog(shot_path)
-                sel = str(cls2.get("selected") or "").strip()
-                p2 = [p for p in (cls2.get("printers") or []) if p]
-                if sel != want_name and p2 == [want_name]:
-                    sel = want_name  # 列表只剩目标 = 已选中进入确认态
-                if sel != want_name:
-                    ax.press_cancel_strict()
-                    result["error"] = ("选机弹窗选中态核对不到「%s」(视觉:%s), "
-                                       "已取消未派单" % (want_name, sel or "?"))
-                    rec("check-target", False, result["error"])
-                    return result
-                hit = [want_name]
-            if hit and known.get(hit[0]) == serial:
-                if not ax.press_confirm_strict():
-                    result["error"] = "目标已核对(「%s」)但点不到确认键" % hit[0]
-                    rec("click-dispatch", False, result["error"])
-                    return result
-                dispatched = True
-                rec("click-dispatch", True,
-                    "目标「%s」已核对(视觉), 已确认派单" % hit[0])
-                break
-            ax.press_cancel_strict()
-            result["error"] = ("打印确认弹窗核对不到目标「%s」(kind=%s "
-                               "printers=%s body=%s), 已取消未派单"
-                               % ((want_name or serial), kind, printers,
-                                  body[:60]))
-            rec("check-target", False, result["error"])
-            return result
+                cur = {t for t in ax.texts() if t}
+                shown = _win_target_shown(cur, want_name, known, serial)
+            if not shown:
+                ax.press_cancel_strict()
+                result["error"] = ("发送弹窗当前机名核对不到目标「%s」"
+                                   "(弹窗可见: %s), 已取消未派单"
+                                   % (want_name, sorted(cur)[:8]))
+                rec("check-target", False, result["error"])
+                return result
+            # 名字对上了还要对序列号 (重名机保护)
+            if known.get(want_name) != serial:
+                ax.press_cancel_strict()
+                result["error"] = ("机名「%s」与目标序列号 %s 不一致(已知映射:%s), "
+                                   "已取消未派单"
+                                   % (want_name, serial, known))
+                rec("check-target", False, result["error"])
+                return result
+            if not ax.press_confirm_strict():
+                result["error"] = "目标已核对(「%s」)但点不到确认键" % want_name
+                rec("click-dispatch", False, result["error"])
+                return result
+            dispatched = True
+            rec("click-dispatch", True,
+                "目标「%s」已核对(UIA 当前值), 已确认派单" % shown)
+            break
         # 导入弹窗但文件名对不上 / kind=其他 / 视觉读不出: 一律取消 ——
         # 绝不盲按 confirm (P22 误派教训)。
         ax.press_cancel_strict()

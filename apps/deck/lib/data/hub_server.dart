@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:bambu_protocol/bambu_protocol.dart';
 
+import '../core/version.dart';
 import 'app_settings.dart';
 import 'bambu_mjpeg.dart';
 import 'bambu_mjpeg_hub.dart';
@@ -13,6 +14,7 @@ import 'camera_profile.dart';
 import 'cloud_print_helper.dart';
 import 'hub_config.dart';
 import 'hub_ptz.dart';
+import 'hub_update.dart';
 import 'log_buffer.dart';
 import 'printer_profile.dart';
 import 'rtsp_quality.dart';
@@ -789,6 +791,8 @@ class HubServer {
           await _handleAccounts(req);
         case '/api/account':
           await _handleAccountUpdate(req);
+        case '/api/update':
+          await _handleUpdate(req);
         default:
           final m = RegExp(r'^/stream/([^/]+)$').firstMatch(path);
           final am = RegExp(r'^/audio/([^/]+)$').firstMatch(path);
@@ -829,6 +833,8 @@ class HubServer {
     ]);
     final up = _startedAt;
     return <String, dynamic>{
+      'version': deckVersion,
+      'platform': Platform.operatingSystem,
       'hub': <String, dynamic>{
         'ok': true,
         if (up != null) 'uptimeSec': DateTime.now().difference(up).inSeconds,
@@ -848,6 +854,65 @@ class HubServer {
     } catch (_) {
       return {'ok': false, 'detail': 'no_response'};
     }
+  }
+
+  // -- 自更新 (2026-10-29) ------------------------------------------------
+  //
+  // GET  /api/update            当前版 + 最新版 + 更新说明 (带缓存)。
+  // POST /api/update {action}   check=强制重查; apply=Windows 暂存后 3s
+  //                             以 42 退出, 守护循环 apply-update.ps1 换装。
+  //                             其它平台 apply 直接拒绝 (fail-closed)。
+  bool _exiting = false;
+
+  Future<void> _handleUpdate(HttpRequest req) async {
+    req.response.headers.contentType = ContentType.json;
+    try {
+      if (req.method == 'GET') {
+        final c = await HubUpdater.check();
+        req.response.write(jsonEncode({
+          'version': c['current'],
+          'latest': c['latest'],
+          'notes': c['notes'],
+          'hasUpdate': c['hasUpdate'],
+          'checkedAt': c['checkedAt'],
+          'releaseUrl': c['releaseUrl'],
+          'platform': Platform.operatingSystem,
+        }));
+      } else if (req.method == 'POST') {
+        final body = await utf8.decoder.bind(req).join();
+        final action =
+            (jsonDecode(body) as Map)['action']?.toString() ?? '';
+        if (_exiting) {
+          req.response.write(
+              jsonEncode({'ok': false, 'error': '正在退出换装, 请稍等重启'}));
+        } else if (action == 'check') {
+          final c = await HubUpdater.check(force: true);
+          req.response.write(jsonEncode({
+            'ok': true,
+            'latest': c['latest'],
+            'hasUpdate': c['hasUpdate'],
+            'notes': c['notes'],
+          }));
+        } else if (action == 'apply') {
+          await HubUpdater.stage();
+          _exiting = true;
+          req.response.write(jsonEncode({'ok': true, 'staged': true}));
+          // 响应先落地, 再 42 退出让守护脚本换装 (run-hub.cmd)。
+          HubUpdater.exitForSwap();
+        } else {
+          req.response.statusCode = HttpStatus.badRequest;
+          req.response.write(
+              jsonEncode({'ok': false, 'error': '未知 action: $action'}));
+        }
+      } else {
+        req.response.statusCode = HttpStatus.methodNotAllowed;
+      }
+    } catch (e) {
+      if (!_exiting) {
+        req.response.write(jsonEncode({'ok': false, 'error': '$e'}));
+      }
+    }
+    await req.response.close();
   }
 
   Future<Map<String, dynamic>> _checkCloudflared() async {

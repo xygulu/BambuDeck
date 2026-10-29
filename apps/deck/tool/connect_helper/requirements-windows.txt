@@ -1,0 +1,14 @@
+# Windows 部署包用的依赖清单 (2026-10-29)
+#
+# 与 requirements.txt 的区别: 这份是**纯 Windows 运行时**的完整闭包 ——
+# CI 用它把 wheel 拉下来直接解压进嵌入式 Python 的 site-packages
+# (wheel 就是 zip, 不需要 pip, 也不用执行任何外部安装脚本)。
+#
+# 运行时打包步骤见 .github/workflows/build.yml 的 "Bundle helper Python
+# runtime": python.org 的 embeddable zip + 这些 wheel = 目标机不用装
+# Python、不用装 pywinauto。
+paho-mqtt>=2.0,<3
+pywinauto>=0.6.8
+comtypes>=1.2
+requests>=2.31
+Pillow>=10.0

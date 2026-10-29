@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- App 自更新: 装 APK 时把缓存里的 deck-update.apk 以 content:// 交给
+     系统安装器 (Android 7+ 不允许 file:// 跨进程)。 -->
+<paths>
+    <cache-path name="deck_update" path="." />
+    <files-path name="deck_files" path="." />
+</paths>
