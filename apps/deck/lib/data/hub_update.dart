@@ -133,10 +133,13 @@ class HubUpdater {
       throw 'sha256 不符 (期望 $wantSha, 实得 $got), 已删除';
     }
     LogBuffer.instance.add('[更新] sha256 校验通过, 解压暂存');
+    // -Command 后面整串当一个脚本执行, 参数不会再被单独引用 —— 路径带空格
+    // (C:\Program Files\...) 时必须自己加引号, 所以拼成一条命令再传。
+    String q(String s) => "'${s.replaceAll("'", "''")}'";
     final p = await Process.run('powershell', [
-      '-NoProfile', '-Command',
-      'Expand-Archive', '-LiteralPath', zipPath,
-      '-DestinationPath', pendingDir.path, '-Force',
+      '-NoProfile', '-NonInteractive', '-Command',
+      'Expand-Archive -LiteralPath ${q(zipPath)} '
+          '-DestinationPath ${q(pendingDir.path)} -Force',
     ]);
     if (p.exitCode != 0) {
       throw '解压失败: ${p.stderr}';
