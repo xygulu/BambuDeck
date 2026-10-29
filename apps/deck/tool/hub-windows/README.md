@@ -86,5 +86,13 @@ deck-hub-windows\
   里 `settings.hubPort`,保存(自动重载),再以管理员重跑一次
   `install-service.bat` 让防火墙规则跟上新端口。
 - **重新安装系统后任务没了**:重跑 `install-service.bat` 即可,配置还在。
+- **网页上中文名字变乱码**(`宇树` 变成 `瀛?鏍?` 这类):配置被当成 GBK
+  读进来又按 UTF-8 写回,中文被二次编码了。PowerShell 5.1 的
+  `Get-Content` 不带 `-Encoding` 时按系统 ANSI(中文机器=GBK)解码 UTF-8
+  文件,正是这个坑。改法:读配置一律显式 UTF-8
+  (`[System.IO.File]::ReadAllText($path, (New-Object System.Text.UTF8Encoding($false)))`),
+  仓库里的 `bootstrap_helper.ps1` / `install-service.bat` 已改好;如果
+  `config\hub.json` 已经坏了,把它换回正常 UTF-8 即可(`printers.json`
+  同理,重跑 `bootstrap_helper.ps1` 重新派生)。
 - **换了 Wi-Fi/网段**:打印机 IP 变了的话,直接改 `config\hub.json` 里对应
   打印机的 `lanIp`,保存即可生效。
