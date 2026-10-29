@@ -23,6 +23,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$t = -join ((48..57)+(65
 if not exist "%~dp0logs" mkdir "%~dp0logs"
 if not exist "%~dp0ffmpeg" mkdir "%~dp0ffmpeg" >nul 2>&1
 
+rem Derive helper.json + printers.json from config\hub.json (helper token,
+rem serial->name map). Without this the helper starts with its own token and
+rem every control command 401s. bootstrap reads hub.json as explicit UTF-8
+rem (see bootstrap_helper.ps1 for why the default encoding is wrong).
+if exist "%~dp0bootstrap_helper.ps1" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0bootstrap_helper.ps1"
+  if errorlevel 1 echo [WARN] bootstrap_helper.ps1 failed; helper may 401.
+)
+
 rem Firewall rule; port comes from config (settings.hubPort, default 8787).
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = [System.IO.File]::ReadAllText('%~dp0config\hub.json', (New-Object System.Text.UTF8Encoding($false))) | ConvertFrom-Json; $p = $c.settings.hubPort; if (-not $p) { $p = 8787 }; netsh advfirewall firewall delete rule name=\"BambuDeck Hub\" | Out-Null; netsh advfirewall firewall add rule name=\"BambuDeck Hub\" dir=in action=allow protocol=TCP localport=$p | Out-Null; Write-Host ('[OK] firewall rule ready, port ' + $p)"
 
