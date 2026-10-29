@@ -84,7 +84,7 @@ PROVIDERS = {
 # ---------------------------------------------------------------- 配置
 def load_models() -> dict:
     try:
-        with open(INFO) as f:
+        with open(INFO, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
@@ -92,7 +92,10 @@ def load_models() -> dict:
 
 def save_models(models: dict) -> str:
     os.makedirs(os.path.dirname(INFO), exist_ok=True)
-    with open(INFO, "w") as f:
+    # 显式 utf-8: 模型名是中文, ensure_ascii=False 直接写中文; 用系统默认
+    # 编码在 Windows 上就是 GBK, 存进去再读出来就是乱码
+    # (2026-10-29 踩过同款坑: 盒子配置里的中文全被二次编码)。
+    with open(INFO, "w", encoding="utf-8") as f:
         json.dump(models, f, ensure_ascii=False, indent=2)
     os.chmod(INFO, 0o600)
     return INFO

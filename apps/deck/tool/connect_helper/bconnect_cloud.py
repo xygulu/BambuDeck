@@ -70,7 +70,7 @@ def load_session() -> str:
     global _token_cache
     if _token_cache:
         return _token_cache
-    with open(SESSION_FILE) as f:
+    with open(SESSION_FILE, encoding="utf-8") as f:
         sess = json.load(f)
     tok = sess.get("accessToken") or sess.get("token") or sess.get("refresh")
     if not tok:
