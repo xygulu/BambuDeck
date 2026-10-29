@@ -928,32 +928,60 @@ def _name_similarity(a: str, b: str) -> float:
     return same / len(a)
 
 
+def _name_score(text: str, want: str) -> float:
+    """显示名 vs 目标名打分, 0 = 肯定不是这台。
+
+    三种来源的差异都要吃下:
+      1.00  归一化后完全一致;
+      0.90  显示名**以**目标名结尾 —— Connect 会在机名前面加机型
+            (云端叫「宇树」, 下拉里显示「拓竹A1宇树」; 等长比对对它
+            是 0 分, 只按相似度核对会永远核不上, 这就是「没有匹配到
+            目标」的一个来源);
+      0.8+  等长同位相似度 (视觉同音错字)。
+    后缀规则要求目标名 ≥2 字且显示名更长, 于是「拓竹A1宇树2」不会
+    被当成「宇树」(它结尾是「宇树2」) —— 误派保护还在。
+    """
+    t, w = _norm_printer_name(text), _norm_printer_name(want)
+    if not t or not w:
+        return 0.0
+    if t == w:
+        return 1.0
+    if len(w) >= 2 and len(t) > len(w) and t.endswith(w):
+        return 0.90
+    s = _name_similarity(t, w)
+    return 0.8 + 0.19 * s if s >= 0.8 else 0.0
+
+
 def _win_target_shown(texts, want_name: str, known: dict,
                       serial: str) -> str:
     """弹窗当前机名 -> 目标机? 返回命中的显示名 (没命中返回 "")。
 
-    只有**映射到目标序列号**的那个已知名才算数 (重名机保护): 弹窗里
-    显示的是下拉框当前值, 它必须就是目标那台。精确匹配优先 (归一化掉
-    「在线」这类状态后缀), 兜底用同位相似度 —— Connect 显示名可能与
-    云端名有出入, 视觉读名也可能同音错字 (实测『拓竹A1宇树』被读成
-    『拓竹A1字树』)。
+    弹窗里显示的是下拉框当前值, 它必须就是**映射到目标序列号**的那台
+    (重名机保护)。做法: 把显示到的每个文本跟**所有**已知机名打分, 取全局
+    最高分; 最高分命中的已知名若不属于目标序列号就判不中 —— 这样
+    「拓竹A1大宇树」不会被当成本次要的「宇树」。known 为空时退化成
+    只跟 want_name 比。
     """
     cur = {str(t).strip() for t in (texts or []) if t and str(t).strip()}
     if not want_name:
         return ""
-    targets = [n for n, s in (known or {}).items() if s == serial]
-    if not targets:
-        targets = [want_name]
-    best = ""
-    best_score = 0.0
+    names = list((known or {}).keys()) or [want_name]
+    if want_name not in names:
+        names.append(want_name)
+    # 同分时取**更长**的已知名当命中 (更具体): 「拓竹A1大宇树」对「宇树」
+    # 和「大宇树」都是后缀命中, 必须认「大宇树」—— 那可能是另一台机。
+    best_key, best_text, best_name, best_score = (0.0, 0), "", "", 0.0
     for t in cur:
-        for n in targets:
-            if _norm_printer_name(t) == _norm_printer_name(n):
-                return t
-            score = _name_similarity(t, n)
-            if score >= 0.8 and score > best_score:
-                best, best_score = t, score
-    return best
+        for n in names:
+            score = _name_score(t, n)
+            key = (score, len(_norm_printer_name(n)))
+            if key > best_key:
+                best_key, best_text, best_name, best_score = key, t, n, score
+    if best_score < 0.8:
+        return ""
+    if known and known.get(best_name) != serial:
+        return ""
+    return best_text
 
 
 def _win_pick_printer(shot_path: str, want_name: str, known: dict,
@@ -980,15 +1008,16 @@ def _win_pick_printer(shot_path: str, want_name: str, known: dict,
         return False, "视觉没找到下拉箭头"
     cx, cy = int(chev[0]), int(chev[1])
 
-    tried = set()
-    for _round in range(3):
-        # 展开下拉 → 截图 → 视觉读选项(名字+坐标)
+    def read_options(tag):
+        """点箭头展开 + 截图 + 视觉读选项。列表本来开着时点箭头会把它收起,
+        这时读不到选项 —— 所以调用方读不到就再点一次, 不假设当前开合状态。
+        """
         if not ax.press_at(cx, cy):
-            return False, "点不下拉箭头"
+            return []
         time.sleep(1.2)
-        lst = shot_path + ".list"
+        lst = "%s.list%s" % (shot_path, tag)
         if not ax.screenshot(lst):
-            return False, "展开后截图失败"
+            return []
         try:
             js = vision.ask_vision(
                 lst,
@@ -996,26 +1025,37 @@ def _win_pick_printer(shot_path: str, want_name: str, known: dict,
                 "只输出 JSON: {\"options\":[{\"name\":\"逐字机名\","
                 "\"x\":123,\"y\":456}]} (x/y 是该项文字中心的像素坐标)")
         except Exception as e:  # noqa: BLE001
-            return False, "视觉读选项失败: %s" % str(e)[:60]
+            return [{"error": str(e)[:60]}]
         opts = _win_parse_options(js)
         if not opts:
-            return False, "视觉没读出下拉选项: %s" % (js or "")[:80]
-        # 按与目标名的相似度排序候选 (视觉名可能有错字)
-        opts.sort(key=lambda o: -_name_similarity(o["name"], want_name))
-        for opt in opts:
-            if opt["name"] in tried:
-                continue
-            tried.add(opt["name"])
-            if not ax.press_at(opt["x"], opt["y"]):
-                continue
-            time.sleep(1.0)
-            shown = _win_target_shown(ax.texts(), want_name, known, serial)
-            if shown:
-                return True, "已选中「%s」(下拉框当前值已核对)" % shown
-            # 没选中: 弹窗收起后旧坐标失效, 重新展开再点下一个候选
-            if not ax.press_at(cx, cy):
-                break
-            time.sleep(1.0)
+            return [{"raw": (js or "")[:80]}]
+        # 按与目标名的匹配度排序候选 (视觉名可能有错字/带机型前缀)
+        opts.sort(key=lambda o: -_name_score(o["name"], want_name))
+        return opts
+
+    tried = set()
+    # 每轮只点**一个**候选(相似度最高的未试项), 下一轮重新展开重读坐标。
+    # 早先版本在内层循环里连着点多个候选: 第一次点没命中后下拉已经收起,
+    # 后面那些坐标全是展开态的旧值, 点了也白点 (实测会一直失败)。
+    for _round in range(3):
+        opts = read_options("r%d" % _round)
+        if opts and "error" in opts[0]:
+            return False, "视觉读选项失败: %s" % opts[0]["error"]
+        if opts and "raw" in opts[0]:
+            # 可能是列表本来就开着, 这一点把它收起了 —— 再点一次展开重读
+            opts = read_options("r%db" % _round)
+        if not opts or "error" in opts[0] or "raw" in opts[0]:
+            return False, "视觉没读出下拉选项"
+        cand = next((o for o in opts if o["name"] not in tried), None)
+        if cand is None:
+            break
+        tried.add(cand["name"])
+        if not ax.press_at(cand["x"], cand["y"]):
+            continue
+        time.sleep(1.0)
+        shown = _win_target_shown(ax.texts(), want_name, known, serial)
+        if shown:
+            return True, "已选中「%s」(下拉框当前值已核对)" % shown
     return False, "候选都点过仍没选中「%s」(试过: %s)" % (
         want_name, ",".join(sorted(tried)))
 
