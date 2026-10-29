@@ -19,3 +19,16 @@ Remove-Item (Join-Path $root 'update\pending.zip') -Force -ErrorAction SilentlyC
 $v = ''
 try { $v = ((Get-Content (Join-Path $root 'update\stage.json') -Raw | ConvertFrom-Json).version) } catch {}
 Write-Output ("[update] applied v" + $v)
+
+# 换装后重新派生 helper.json / printers.json。包里的 bootstrap_helper.ps1
+# 可能刚被修好 (2026-10-29: 读 hub.json 之前按 ANSI 解码, 中文名全乱),
+# 不重跑一次, 盒子上已有的坏 printers.json 就一直坏下去。
+# 失败不阻断更新 —— hub 本身不依赖这两个文件, 只有 helper 依赖。
+$bs = Join-Path $root 'bootstrap_helper.ps1'
+if (Test-Path $bs) {
+  try {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $bs | Write-Output
+  } catch {
+    Write-Output ('[update] bootstrap failed: ' + $_.Exception.Message)
+  }
+}

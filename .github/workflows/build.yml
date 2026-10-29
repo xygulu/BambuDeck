@@ -154,6 +154,8 @@ jobs:
           # Connect helper: python 源码 + 看护/注册脚本 都在 helper/ 下,
           # 运行时在 runtime/python (helper_service.bat 用 ..\runtime\... 找)
           Copy-Item tool/hub-windows/helper/* "$d/helper/"
+          # 自测脚本不进部署包 (目标机上没意义)
+          Remove-Item "$d/helper/test_*.py" -ErrorAction SilentlyContinue
           Copy-Item tool/connect_helper/bconnect_*.py "$d/helper/"
           Copy-Item tool/connect_helper/requirements-windows.txt "$d/helper/"
         working-directory: apps/deck
