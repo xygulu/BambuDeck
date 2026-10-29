@@ -165,6 +165,168 @@ def _wait_control(name: str, cmd: str, serial: str, timeout: float = 3.0,
 
 
 # ---------------------------------------------------------------- 控制
+# 2026-10-29 Windows 控制链 OCR 像素先行。起因: 用户打印中点暂停,
+# helper 报 MiniMax「tokenplan 用量不足」—— UIA 树掏空 (Chromium 常态)
+# 导致 press_control not_on_detail + _enter 失败, 一路掉到视觉兜底。
+# 详情页标定 (nav2.png, 1920x1080): 控制按钮是纯图标 OCR 读不到文字,
+# 但同行的「NN%」总进度恒在按钮左下 (1056,330): 暂停/继续 = +122,-47,
+# 停止 = +162,-47; 详情页判定 = 「打印进度」; 状态 = 「打印中/已暂停」。
+# 与换盘链同一哲学: 截图即真相, UIA 只配兜底。
+
+_OCR_STATE_PRINTING = ("打印中", "printing")
+_OCR_STATE_PAUSED = ("已暂停", "paused")
+
+
+def _ocr_lines():
+    """当前屏幕 OCR; 引擎不可用返回 None。"""
+    try:
+        import bconnect_print as bp
+        return bp._win_ocr_lines(shot())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _ocr_state(blob: str) -> str:
+    if "打印中" in blob or "打印  中" in blob:
+        return "printing"
+    if "已暂停" in blob or "已 暂 停" in blob:
+        return "paused"
+    return "idle"
+
+
+def _ocr_press_control(name: str, cmd: str) -> dict:
+    """截图 OCR 判页/核名/锚定 -> mouse 点击控制按钮。Windows 专用。
+
+    返回与 ax.press_control 同契约 {pressed, reason, method, coord};
+    OCR 引擎不可用时返回 None (调用方退 UIA 路径)。
+    """
+    if os.name != "nt":
+        return None
+    try:
+        from pywinauto import mouse
+        import bconnect_print as bp
+    except Exception:  # noqa: BLE001
+        return None
+    lines = _ocr_lines()
+    if lines is None:
+        return None
+    blob = "".join("".join(l["name"].split()) for l in lines)
+    if "打印进度" not in blob:
+        return {"pressed": False, "reason": "not_on_detail"}
+    # 机名核对: 相似行即算 (OCR 错字常态, 拓竹A1宇树 读成 柘竹A1宇树)
+    hit = None
+    for l in lines:
+        n = bp._name_score(l["name"], name)
+        if n >= 0.8:
+            hit = l
+            break
+    if hit is None:
+        return {"pressed": False, "reason": "wrong_printer"}
+    st = _ocr_state(blob)
+    if st == "idle":
+        return {"pressed": False, "reason": "idle_no_skip"}
+    # 锚: 「NN%」行 (总进度, 按钮组左下, 实测距状态行 +63px)。右侧温控
+    # 面板也有「100%」(风扇, y 差 ~240) —— 用状态行 y 窗口 [+20,+110]
+    # 排除, 再取 x 最大者 (最靠按钮侧)。
+    state_line = next((l for l in lines
+                       if "".join(l["name"].split())
+                       in ("打印中", "已暂停") and l.get("y")), None)
+    pct = [l for l in lines
+           if l["name"].strip().endswith("%") and l["x"] > 800]
+    if state_line is not None:
+        y0 = state_line["y"]
+        pct = [l for l in pct if y0 + 20 <= l["y"] <= y0 + 110]
+    if not pct:
+        return {"pressed": False, "reason": "no_percent_anchor"}
+    p = max(pct, key=lambda l: l["x"])
+    if cmd == "stop":
+        bx, by = int(p["x"]) + 162, int(p["y"]) - 47
+    else:  # pause/resume 同一位置 (暂停 <-> 继续切换)
+        bx, by = int(p["x"]) + 122, int(p["y"]) - 47
+    try:
+        mouse.click(coords=(bx, by))
+    except Exception:  # noqa: BLE001
+        return {"pressed": False, "reason": "click_fail"}
+    return {"pressed": True, "method": "ocr", "coord": [bx, by],
+            "state": st, "printer_line": hit["name"]}
+
+
+def _ocr_enter(name: str) -> bool:
+    """OCR 导航到机名详情页: 顶标签「设备」-> 列表机名卡片 -> 详情页。
+
+    探针实测 (2026-10-29): 「设备」两字 zh-Hans 常整行漏掉, 顶标签
+    「打印」读得到 (x=228 y=47), 设备 = 打印+57px 同 y; 列表卡片机名
+    行 y>80; 详情页以「打印进度」落位为准。已在详情页直接 True。
+    """
+    try:
+        from pywinauto import mouse
+        import bconnect_print as bp
+    except Exception:  # noqa: BLE001
+        return False
+
+    def blob_of():
+        ls = _ocr_lines()
+        return ("".join("".join(l["name"].split()) for l in ls)
+                if ls else "")
+
+    if "打印进度" in blob_of():
+        return True
+    ls = _ocr_lines() or []
+    tab = next((l for l in ls
+                if "打印" in "".join(l["name"].split()) and l["y"] < 100), None)
+    if not tab:
+        return False
+    try:
+        mouse.click(coords=(int(tab["x"]) + 57, int(tab["y"])))
+    except Exception:  # noqa: BLE001
+        return False
+    time.sleep(2.5)
+    ls = _ocr_lines() or []
+    card = None
+    for l in ls:
+        if l["y"] > 80 and bp._name_score(l["name"], name) >= 0.8:
+            card = l
+            break
+    if card is None:
+        return False
+    try:
+        mouse.click(coords=(int(card["x"]), int(card["y"])))
+    except Exception:  # noqa: BLE001
+        return False
+    time.sleep(3.0)
+    return "打印进度" in blob_of()
+
+
+def _ocr_confirm_stop() -> bool:
+    """停止确认框: OCR 找「确认」钮并点击。框是模态, 屏上只有框内文字。
+
+    「确认」是绿底大按钮文字, 全屏 OCR 读得到; 读不到再试 UIA desc
+    (Mac 契约 cancel/confirm)。找不到 = False (调用方报错 fail-closed)。
+    """
+    for attempt in range(3):
+        if ax.press_desc("confirm"):
+            return True
+        time.sleep(1.2 if attempt == 0 else 0.6)
+        try:
+            import bconnect_print as bp
+            from pywinauto import mouse
+        except Exception:  # noqa: BLE001
+            return False
+        ls = _ocr_lines()
+        if not ls:
+            continue
+        # squash 后精确「确认」: 别撞上「确认时间」之类的长行 —— 全等才算
+        for l in ls:
+            txt = "".join(l["name"].split())
+            if txt == "确认" and l["x"] > 700:
+                try:
+                    mouse.click(coords=(int(l["x"]), int(l["y"])))
+                    return True
+                except Exception:  # noqa: BLE001
+                    pass
+    return bool(ax.press_desc("confirm") or ax.press_at(987, 548))
+
+
 def control(identifier: str, command: str, verify: bool = False) -> dict:
     t0 = time.time()
     steps: dict[str, float] = {}
@@ -185,15 +347,39 @@ def control(identifier: str, command: str, verify: bool = False) -> dict:
 
     ax.enable_ax()
 
-    # 一次遍历：确认在 name 详情页 + 定位并点击控制按钮（真实控制在此触发）
-    r = ax.press_control(name, cmd)
-    if not r.get("pressed") and r.get("reason") in ("not_on_detail", "wrong_printer"):
-        if _enter(name):
-            r = _wait_control(name, cmd, serial)
-    # 交叉校验：云端说在打印、AX 快路径却说空闲 → 快路径可能漏了控件，用慢路径再确认
-    # （只在矛盾时发生，正常路径零额外开销）
-    if not r.get("pressed") and r.get("reason") == "idle_no_skip" and _cloud_busy(serial):
-        r = ax.press_control(name, cmd, slow=True)
+    if os.name == "nt":
+        # OCR 像素先行 (2026-10-29): UIA 树掏空/懒加载是常态, 视觉要配额。
+        # 点击注入的是坐标顶层窗口, 先把 Connect 置前。
+        try:
+            ax.activate()
+        except Exception:  # noqa: BLE001
+            pass
+        r = _ocr_press_control(name, cmd)
+        if r is not None and not r.get("pressed") and \
+                r.get("reason") in ("not_on_detail", "wrong_printer"):
+            if _ocr_enter(name):
+                r = _ocr_press_control(name, cmd)
+        if r is None:  # OCR 引擎不可用 -> 退原 UIA 路径
+            r = ax.press_control(name, cmd)
+            if not r.get("pressed") and r.get("reason") in \
+                    ("not_on_detail", "wrong_printer"):
+                if _enter(name):
+                    r = _wait_control(name, cmd, serial)
+        if not r.get("pressed") and r.get("reason") == "idle_no_skip" \
+                and _cloud_busy(serial):
+            r2 = ax.press_control(name, cmd, slow=True)
+            if r2.get("pressed"):
+                r = r2
+    else:
+        # 一次遍历：确认在 name 详情页 + 定位并点击控制按钮（真实控制在此触发）
+        r = ax.press_control(name, cmd)
+        if not r.get("pressed") and r.get("reason") in ("not_on_detail", "wrong_printer"):
+            if _enter(name):
+                r = _wait_control(name, cmd, serial)
+        # 交叉校验：云端说在打印、AX 快路径却说空闲 → 快路径可能漏了控件，用慢路径再确认
+        # （只在矛盾时发生，正常路径零额外开销）
+        if not r.get("pressed") and r.get("reason") == "idle_no_skip" and _cloud_busy(serial):
+            r = ax.press_control(name, cmd, slow=True)
     mark("click")
 
     if not r.get("pressed"):
@@ -213,13 +399,16 @@ def control(identifier: str, command: str, verify: bool = False) -> dict:
     # desc=cancel/confirm/close（确认 ~987,548）。等框弹出后点 confirm（desc 精确匹配，
     # 别用 label——会撞「取消打印」标题）。pause/resume 是 toggle，无需确认。
     if cmd == "stop":
-        confirmed = False
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
-            if ax.press_desc("confirm") or ax.press_at(987, 548):
-                confirmed = True
-                break
-            time.sleep(0.12)  # 快路径一次探测 ~0.02s，框一出现就能立刻确认
+        if os.name == "nt" and r.get("method") == "ocr":
+            confirmed = _ocr_confirm_stop()
+        else:
+            confirmed = False
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                if ax.press_desc("confirm") or ax.press_at(987, 548):
+                    confirmed = True
+                    break
+                time.sleep(0.12)  # 快路径一次探测 ~0.02s，框一出现就能立刻确认
         if not confirmed:
             return {"ok": False,
                     "error": "停止确认框未出现或找不到「确认」按钮（打印可能仍在进行）",
