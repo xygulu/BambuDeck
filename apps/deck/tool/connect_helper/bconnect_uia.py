@@ -110,7 +110,10 @@ def find_window(timeout: float = 20.0):
 def enable_ax() -> bool:
     """等价 macOS 的 AXManualAccessibility: 找窗口 + 预热 Chromium a11y。"""
     global _wrap, _poked
-    w = find_window(timeout=8 if _wrap is not None else 20)
+    # 尽力而为的预热: 窗口这会儿不在(最小化恢复中/重启中)就快速放弃,
+    # 后面选项页 wait_probe 会带着自己的预算重找窗口 —— 别在这白烧
+    # 8-20s (2026-10-29 实测: 每单先烧 8s, 失败后流程照样能走完)。
+    w = find_window(timeout=3 if _wrap is not None else 8)
     if w is None:
         return False
     _wrap = w

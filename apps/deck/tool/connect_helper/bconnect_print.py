@@ -1548,12 +1548,14 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
     shot_path = os.path.join(tempfile.gettempdir(), "deck_win_dialog.png")
     pressed = 1        # 「打印」按下次数 (上限 2: 首次 + 导入回选项页后一次)
     imported = False
+    imported_at = 0.0  # 导入确认的时刻 (回选项页快路径的起点)
     dispatched = False
     for rnd in range(1, 8):
         # 弹窗出现探测: cancel+confirm 钮对同时在树里 = 有弹层 (选项页/
         # 详情页都没有这对钮)。不能用「导入Gcode 3MF文件」按钮名探弹窗 ——
         # 选项页「浏览换文件」钮同名, 永远假阳性 (v9 教训)。
         d = None
+        fast_btn = None
         # 2026-10-29 干跑时间线: 二按前 14.4s 里 12s 是这里空转 —— 导入确认
         # 后明知 ~2s 回选项页, 探测只是确认「没有意外弹窗」。超时不失败:
         # 走 wait_probe 找「打印」按钮兜底, 所以 imported 后只给 3s。
@@ -1562,7 +1564,23 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
             d = ax.dialog_frame()
             if d:
                 break
-            time.sleep(0.6)
+            if imported and time.time() - imported_at >= 0.8:
+                # 当前构建导入确认后回选项页: 「打印」按钮一回来就按,
+                # 别傻等弹窗探测超时 (实测每单固定烧 3s, 2026-10-29)。
+                fast_btn = ax.button_rect("打印")
+                if fast_btn:
+                    break
+            time.sleep(0.25)
+        if fast_btn is not None:
+            # UIA Invoke 对这个按钮哑火过 (p_press2), 物理鼠标点中心。
+            ok = ax.press_at((fast_btn[0] + fast_btn[2]) // 2,
+                             (fast_btn[1] + fast_btn[3]) // 2)
+            if ok:
+                pressed += 1
+                rec("click-print", True,
+                    "第%d次按「打印」(mouse, 导入回选项页快路径)" % pressed)
+                continue
+            fast_btn = None  # 哑火: 落到下面原兜底再试
         if not d:
             # 没弹窗: 已导入且还有一次「打印」额度 -> 再按一次进打印弹窗;
             # 否则交给云端任务回读裁决 (可能没弹框直接派单了)。
@@ -1590,7 +1608,7 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
             rec("click-print", True,
                 "第%d次按「打印」(%s, 进打印确认)" % (pressed, how))
             continue
-        time.sleep(1.0)  # 弹窗进场动画/渲染稳定 (分类只读文字, 1.0s 足够)
+        time.sleep(0.4)  # 弹窗进场动画/渲染稳定 (钮对进 UIA 树时正文已在画)
         # ---- 弹窗分类: 本地 OCR 像素先行 -> UIA 树 -> 云端视觉(可选)。
         # 2026-10-29 实测两条铁律:
         #   (1) UIA 树会残留上一态 —— 导入确认框盖着页面时树里还躺着上一屏
@@ -1688,11 +1706,12 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
                 rec("click-import", False, result["error"])
                 return result
             imported = True
+            imported_at = time.time()
             rec("click-import", True,
                 "第%d轮: 已确认导入 (%s核对正文)"
                 % (rnd, "视觉" if body else "本地OCR" if ocr is not None
                    else "流程位置"))
-            time.sleep(0.8)  # 回选项页; 下一轮探测会兜底等
+            time.sleep(0.3)  # 弹窗收起; 回选项页的等待交给探测循环快路径
             continue
         if kind in ("打印", "选择") and want_name:
             # 「发送打印任务至」弹窗: 目标机 = 下拉框当前选中的那台。
@@ -1797,8 +1816,10 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
         return result
 
     # 点下派单确认即 ok (与 Mac 一致: 不等页面切换, AX 旧文字滞留会假等待)。
+    # 任务回读只是附带信息, tries=4/wait=2 要拖 2.4s —— 收窄到 ~1.5s,
+    # 回读不到不影响 ok (App 自己会看云端任务)。
     result["ok"] = True
-    task = cloud.latest_task(base, serial, after_id=before_id, tries=4, wait=2)
+    task = cloud.latest_task(base, serial, after_id=before_id, tries=2, wait=1)
     if task:
         result["task"] = task
         if task.get("device") and task["device"] != serial:
