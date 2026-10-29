@@ -24,6 +24,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 
 # 界面驱动层按平台选 (Windows: bconnect_uia / macOS: bconnect_ax),
@@ -36,7 +37,11 @@ import bconnect_cloud as cloud  # noqa: E402
 import bconnect_vision as vis  # noqa: E402
 
 LAN_CONF = os.path.expanduser("~/.bambudeck/printers.json")
-SHOT = "/tmp/connect_drive.png"
+# 2026-10-29 盒子实测: 硬编码 /tmp 在 Windows 上 FileNotFoundError
+# (「stop ok=false err=[Errno 2] ... '/tmp/connect_drive.png'」),
+# 暂停/恢复/停止三命令共用这条截图路径, 全炸。gettempdir() Mac/Win 通吃,
+# 且 SHOT 只在本进程内引用, 换目录无副作用。
+SHOT = os.path.join(tempfile.gettempdir(), "connect_drive.png")
 
 _CMDS = {
     "pause": "pause", "暂停": "pause",
