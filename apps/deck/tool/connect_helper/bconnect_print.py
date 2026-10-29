@@ -931,6 +931,34 @@ def _win_ocr_lines(path: str) -> list[dict] | None:
         return None
 
 
+def _win_ocr_region(shot_path: str, box: tuple | None) -> list[dict] | None:
+    """OCR 截图的中央区域并平移回屏幕坐标 (2026-10-29 提速)。
+
+    全屏 1920x1080 识别 ~2s, Connect 弹窗恒居中且不到 1/4 像素 —— 分类
+    和选机锚定只关心弹窗内容, 收窄后省一半多时间。坐标平移后与全屏结果
+    同坐标系, 下游 (picker 命中行/标题锚定) 无感。box=None 或裁剪失败
+    返回 None, 调用方退全屏。
+    """
+    if not box:
+        return None
+    try:
+        from PIL import Image
+        w, h = Image.open(shot_path).size
+        l, t = max(0, box[0]), max(0, box[1])
+        r, b = min(w, box[2]), min(h, box[3])
+        if r - l < 60 or b - t < 60:
+            return None
+        crop = shot_path + ".cls.png"
+        Image.open(shot_path).crop((l, t, r, b)).save(crop, "PNG")
+    except Exception:  # noqa: BLE001
+        return None
+    lines = _win_ocr_lines(crop)
+    if not lines:
+        return lines  # 引擎不可用 (None) 或区域里没字 ([]) 都如实上抛
+    return [{"name": o["name"], "x": o["x"] + l, "y": o["y"] + t,
+             "w": o.get("w", 0), "h": o.get("h", 0)} for o in lines]
+
+
 def _win_ocr_dialog_lines(shot_path: str, frame: dict | None) -> list[dict] | None:
     """裁弹窗区域放大 2.5x 再 OCR —— 正文核对专用。
 
@@ -1504,7 +1532,10 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
         # 详情页都没有这对钮)。不能用「导入Gcode 3MF文件」按钮名探弹窗 ——
         # 选项页「浏览换文件」钮同名, 永远假阳性 (v9 教训)。
         d = None
-        deadline = time.time() + (25 if rnd == 1 else 12)
+        # 2026-10-29 干跑时间线: 二按前 14.4s 里 12s 是这里空转 —— 导入确认
+        # 后明知 ~2s 回选项页, 探测只是确认「没有意外弹窗」。超时不失败:
+        # 走 wait_probe 找「打印」按钮兜底, 所以 imported 后只给 3s。
+        deadline = time.time() + (25 if rnd == 1 else (3 if imported else 12))
         while time.time() < deadline:
             d = ax.dialog_frame()
             if d:
@@ -1537,7 +1568,7 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
             rec("click-print", True,
                 "第%d次按「打印」(%s, 进打印确认)" % (pressed, how))
             continue
-        time.sleep(1.5)  # 弹窗进场动画/渲染稳定 (弹窗缩放动画会给出中间态)
+        time.sleep(1.0)  # 弹窗进场动画/渲染稳定 (分类只读文字, 1.0s 足够)
         # ---- 弹窗分类: 本地 OCR 像素先行 -> UIA 树 -> 云端视觉(可选)。
         # 2026-10-29 实测两条铁律:
         #   (1) UIA 树会残留上一态 —— 导入确认框盖着页面时树里还躺着上一屏
@@ -1553,7 +1584,21 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
             result["error"] = "弹窗截图失败, 已取消未派单"
             rec("classify-dialog", False, result["error"])
             return result
-        ocr = _win_ocr_lines(shot_path)
+        # 分类/锚定只看弹窗: 截中央 1000x660 (弹窗恒居中, ~1/4 像素省一半
+        # OCR 时间); 裁剪失败或空手退全屏。
+        try:
+            from PIL import Image as _Img
+            _sw, _sh = _Img.open(shot_path).size
+        except Exception:  # noqa: BLE001
+            _sw = _sh = 0
+        ocr = None
+        if _sw:
+            ocr = _win_ocr_region(
+                shot_path,
+                (_sw // 2 - 500, _sh // 2 - 330,
+                 _sw // 2 + 500, _sh // 2 + 330))
+        if ocr is None:
+            ocr = _win_ocr_lines(shot_path)
         if ocr:
             blob = "".join("".join(l["name"].split()) for l in ocr)
             if "发送打印任务至" in blob:
@@ -1625,7 +1670,7 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
                 "第%d轮: 已确认导入 (%s核对正文)"
                 % (rnd, "视觉" if body else "本地OCR" if ocr is not None
                    else "流程位置"))
-            time.sleep(1.5)
+            time.sleep(0.8)  # 回选项页; 下一轮探测会兜底等
             continue
         if kind in ("打印", "选择") and want_name:
             # 「发送打印任务至」弹窗: 目标机 = 下拉框当前选中的那台。
