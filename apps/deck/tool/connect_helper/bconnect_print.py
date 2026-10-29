@@ -904,50 +904,56 @@ def _win_parse_options(js: str) -> list[dict]:
     return out
 
 
+def _norm_printer_name(s: str) -> str:
+    """机名归一: 去掉 Connect 显示名上的状态后缀 (「… 在线」)。"""
+    s = (s or "").strip()
+    for suf in (" 在线", " 离线", " 打印中", " 待机", " 等待", " 异常"):
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+    return s.strip()
+
+
 def _name_similarity(a: str, b: str) -> float:
     """两个机名的相似度 (同位字符占比)。视觉读名有同音错字 (实测
     『拓竹A1宇树』->『拓竹A1字树』), 同位比对能把这种错字救回来。
+
+    前缀**不算**满分: 「拓竹A1宇树2」是另一台机, 按前缀放行会误派。
+    长度必须相同 —— OCR 错字是**替换**不是插入, 长度不同就是另一台机。
     """
     a = (a or "").strip()
     b = (b or "").strip()
-    if not a or not b:
+    if not a or not b or len(a) != len(b):
         return 0.0
-    n = max(len(a), len(b))
-    same = sum(1 for i in range(min(len(a), len(b))) if a[i] == b[i])
-    return same / n
+    same = sum(1 for i in range(len(a)) if a[i] == b[i])
+    return same / len(a)
 
 
 def _win_target_shown(texts, want_name: str, known: dict,
                       serial: str) -> str:
     """弹窗当前机名 -> 目标机? 返回命中的显示名 (没命中返回 "")。
 
-    权威精确匹配优先 (UIA texts 里下拉框当前值, 零错字)。兜底用同位
-    相似度: Connect 显示名可能与云端名有出入, 视觉读名也可能同音错字
-    (实测『拓竹A1宇树』被读成『拓竹A1字树』)。兜底只在**该显示名能落
-    到本机目标序列号**时才认 —— 光名字像不算数。
+    只有**映射到目标序列号**的那个已知名才算数 (重名机保护): 弹窗里
+    显示的是下拉框当前值, 它必须就是目标那台。精确匹配优先 (归一化掉
+    「在线」这类状态后缀), 兜底用同位相似度 —— Connect 显示名可能与
+    云端名有出入, 视觉读名也可能同音错字 (实测『拓竹A1宇树』被读成
+    『拓竹A1字树』)。
     """
     cur = {str(t).strip() for t in (texts or []) if t and str(t).strip()}
-    if want_name and want_name in cur:
-        return want_name
     if not want_name:
         return ""
+    targets = [n for n, s in (known or {}).items() if s == serial]
+    if not targets:
+        targets = [want_name]
     best = ""
     best_score = 0.0
     for t in cur:
-        # 候选显示名必须是已知映射里指向目标序列号的那台 (重名机保护)
-        hit_serial = None
-        for n, s in (known or {}).items():
-            if _name_similarity(t, n) >= 0.8:
-                hit_serial = s
-                break
-        if hit_serial != serial:
-            continue
-        score = _name_similarity(t, want_name)
-        if score > best_score:
-            best, best_score = t, score
-    if best and best_score >= 0.8:
-        return best
-    return ""
+        for n in targets:
+            if _norm_printer_name(t) == _norm_printer_name(n):
+                return t
+            score = _name_similarity(t, n)
+            if score >= 0.8 and score > best_score:
+                best, best_score = t, score
+    return best
 
 
 def _win_pick_printer(shot_path: str, want_name: str, known: dict,
