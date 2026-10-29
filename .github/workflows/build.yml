@@ -148,6 +148,11 @@ jobs:
           $d = 'deploy/deck-hub-windows'
           New-Item -ItemType Directory -Force -Path "$d/assets/web","$d/assets/plate_swap","$d/helper" | Out-Null
           Copy-Item build/hub/bundle/bin/hub.exe "$d/"
+          # hub 的版本号只能随包发: `dart build cli` 没有 --dart-define 之类的
+          # 编译期注入 (2026-10-29 实测), 没有这个文件 hub 会一直报 dev,
+          # 语义比较里 dev 永远小于正式版 -> hasUpdate 永远为真, 自更新收不了尾。
+          $ver = $env:VERSION -replace '^[vV]', ''
+          Set-Content -Path "$d/version.txt" -Value $ver -Encoding ascii -NoNewline
           Copy-Item assets/web/hub_page.html "$d/assets/web/"
           Copy-Item assets/plate_swap/auto_plate_swap.3mf "$d/assets/plate_swap/"
           Copy-Item tool/hub-windows/*.cmd, tool/hub-windows/*.bat, tool/hub-windows/*.ps1, tool/hub-windows/README.md "$d/"

@@ -833,7 +833,8 @@ class HubServer {
     ]);
     final up = _startedAt;
     return <String, dynamic>{
-      'version': deckVersion,
+      // hub 用运行时版本 (AOT 包读包根 version.txt), App 里两者相同
+      'version': deckVersionRuntime,
       'platform': Platform.operatingSystem,
       // 候选端点 (2026-10-29): 手机/电脑可以用这些地址连上这台 hub ——
       // 局域网地址在前 (同网段直连最快), 隧道地址兜底 (不在同网段也能连)。

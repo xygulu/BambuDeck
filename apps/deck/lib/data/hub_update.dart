@@ -85,10 +85,10 @@ class HubUpdater {
     final releaseUrl =
         'https://github.com/$repo/releases/latest';
     final out = <String, dynamic>{
-      'current': deckVersion,
+      'current': deckVersionRuntime,
       'latest': latest,
       'notes': (rel['body'] as String?) ?? '',
-      'hasUpdate': compareVersions(latest, deckVersion) > 0,
+      'hasUpdate': compareVersions(latest, deckVersionRuntime) > 0,
       'checkedAt': DateTime.now().toIso8601String(),
       'apkUrl': assetUrl('android_apk'),
       'releaseUrl': releaseUrl,
@@ -108,8 +108,8 @@ class HubUpdater {
     if (m == null) throw 'Release 缺 version.json 清单, 拒绝更新';
     final latest = (m['version'] as String?)?.trim() ?? '';
     if (latest.isEmpty) throw '清单缺 version 字段';
-    if (compareVersions(latest, deckVersion) <= 0) {
-      throw '已是最新版 $deckVersion';
+    if (compareVersions(latest, deckVersionRuntime) <= 0) {
+      throw '已是最新版 $deckVersionRuntime';
     }
     final a = m['assets'] as Map?;
     final hubAsset = a?['hub_windows'] as Map?;

@@ -1,10 +1,41 @@
+import 'dart:io';
+
 /// 全平台版本号 (2026-10-29 自动更新体系)。
 ///
 /// CI 打 tag `vX.Y.Z` 时用 `--dart-define=DECK_VERSION=X.Y.Z` 注入
-/// (Android APK / Windows GUI / macOS GUI / hub AOT 全部同源);
+/// (Android APK / Windows GUI / macOS GUI);
 /// 本地无注入构建显示 `dev`, 语义比较里永远小于任何正式版。
 const String deckVersion =
     String.fromEnvironment('DECK_VERSION', defaultValue: 'dev');
+
+/// hub 用的版本号: 先认 Dart 注入, 没有再读 `hub.exe` 旁边的 `version.txt`。
+///
+/// `dart build cli` 没有 `--define` 之类的编译期注入参数 (2026-10-29 实测:
+/// `dart build cli --help` 只有 -o/-t/-p), 于是 hub 一直报 `dev`;
+/// `dev` 在语义比较里永远小于任何正式版 -> `hasUpdate` 永远为真, 自更新
+/// 换完还认为有新版, 闭环收不了尾。CI 打包时把 tag 写进包根的
+/// `version.txt`, 这里按需读取 (读不到才算 dev)。
+String readVersionFile(String dir) {
+  try {
+    final f = File('$dir${Platform.pathSeparator}version.txt');
+    if (!f.existsSync()) return '';
+    return f.readAsStringSync().trim().replaceFirst(RegExp(r'^[vV]'), '');
+  } catch (_) {}
+  return '';
+}
+
+String _hubVersionFile() =>
+    readVersionFile(File(Platform.resolvedExecutable).parent.path);
+
+/// 惰性求值并缓存: App 里恒等于注入常量, hub 进程才去读包根的文件。
+String? _runtimeCache;
+
+String get deckVersionRuntime {
+  if (deckVersion != 'dev') return deckVersion;
+  if (_runtimeCache != null) return _runtimeCache!;
+  final v = _hubVersionFile();
+  return _runtimeCache = v.isEmpty ? deckVersion : v;
+}
 
 /// 版本语义比较: 逐段数字比大小 (`3.9.10` 大于 `3.9.2`), 段数不齐补 0;
 /// 预发布后缀 (-dev/-beta/...) 比同一版本号的正式版小。
