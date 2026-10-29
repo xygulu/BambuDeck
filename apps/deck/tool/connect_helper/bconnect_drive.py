@@ -707,6 +707,214 @@ def probe_speed() -> dict:
     }
 
 
+# ---- Windows OCR 版调速 (2026-10-29): AX 树掏空时旧路径一路掉视觉,
+# MiniMax 429 直接报给用户。与 control 的 OCR 化同架构: 截图即真相。
+# 触发器 = 「LED灯」行左边同一行的速度百分比 (详情页实测 LED灯 OCR 稳定
+# 读到 @1446,507, 速度% @1349,507); 菜单 = 触发器下方区域 zoom 重读
+# (2 字档位名 zh-Hans 有漏读风险, 小图放大读); 确认 = 界面百分比变化
+# (滞后 10-20s, 3s 内变了才算 confirmed, 语义与 AX 版一致)。
+
+_SQ_SPEED_NAMES = {"静音", "标准", "运动", "狂暴",
+                   "Silent", "Standard", "Sport", "Ludicrous"}
+
+
+def _ocr_speed_trigger(name: str) -> dict | None:
+    """OCR 找调速触发器: LED灯 行左边的速度百分比。不在详情页/不是这台
+    机/空闲/找不到都返回 None (reason 打进日志)。"""
+    lines = _ocr_lines()
+    if not lines:
+        return None
+    blob = "".join("".join(l["name"].split()) for l in lines)
+    if "打印进度" not in blob:
+        _log("ocr-speed: not_on_detail")
+        return None
+    import bconnect_print as bp
+    if not any(bp._name_score(l["name"], name) >= 0.8 for l in lines):
+        _log("ocr-speed: wrong_printer")
+        return None
+    if _ocr_state(blob) == "idle":
+        _log("ocr-speed: idle")
+        return None
+    lamp = next((l for l in lines
+                 if "LED灯" in "".join(l["name"].split())), None)
+    if lamp is None:
+        _log("ocr-speed: no lamp line")
+        return None
+    pct = [l for l in lines
+           if re.fullmatch(r"\d{1,3}\s*[%％]?", l["name"].strip())
+           and abs(l["y"] - lamp["y"]) <= 20 and l["x"] < lamp["x"]]
+    if not pct:
+        # zoom 重读: LED 行左侧条带 (速度%黑色文本, 但全屏也有漏)
+        try:
+            import bconnect_print as bp
+            from PIL import Image
+            sp = shot()
+            box = (max(0, int(lamp["x"]) - 260), int(lamp["y"]) - 30,
+                   int(lamp["x"]) - 10, int(lamp["y"]) + 30)
+            im = Image.open(sp).crop(box)
+            resample = getattr(getattr(Image, "Resampling", Image),
+                               "LANCZOS")
+            im = im.resize((im.width * 5 // 2, im.height * 5 // 2), resample)
+            zp = sp + ".spd.png"
+            im.save(zp, "PNG")
+            zs = bp._win_ocr_lines(zp) or []
+        except Exception:  # noqa: BLE001
+            zs = []
+        for v in zs:
+            if re.fullmatch(r"\d{1,3}\s*[%％]?", v["name"].strip()):
+                pct = [{"name": v["name"],
+                        "x": box[0] + v["x"] / 2.5,
+                        "y": box[1] + v["y"] / 2.5}]
+                break
+    if not pct:
+        _log("ocr-speed: no trigger percent")
+        return None
+    t = max(pct, key=lambda l: l["x"])  # 最靠 LED灯 的
+    _log("ocr-speed trigger:", t["name"], int(t["x"]), int(t["y"]))
+    return {"text": t["name"].strip(), "x": t["x"], "y": t["y"]}
+
+
+def _ocr_speed_menu(trig: dict) -> list[dict]:
+    """点开触发器后的档位菜单: 触发器下方区域 zoom 重读 (2 字档位名
+    全屏 OCR 有漏读风险)。菜单没开返回空表。"""
+    try:
+        import bconnect_print as bp
+        from PIL import Image
+        sp = shot()
+        box = (max(0, int(trig["x"]) - 130), int(trig["y"]) + 5,
+               min(Image.open(sp).size[0], int(trig["x"]) + 200),
+               int(trig["y"]) + 230)
+        im = Image.open(sp).crop(box)
+        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+        im = im.resize((im.width * 5 // 2, im.height * 5 // 2), resample)
+        zp = sp + ".menu.png"
+        im.save(zp, "PNG")
+        zs = bp._win_ocr_lines(zp) or []
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for v in zs:
+        t = "".join(v["name"].split())
+        if t in _SQ_SPEED_NAMES:
+            out.append({"text": t,
+                        "x": box[0] + v["x"] / 2.5,
+                        "y": box[1] + v["y"] / 2.5})
+    _log("ocr-speed menu:", [(o["text"], int(o["x"]), int(o["y"]))
+                             for o in out])
+    return out
+
+
+def _ocr_set_speed(name: str, serial: str, level: int,
+                   t0: float, steps: dict) -> dict:
+    """set_speed 的 Windows OCR 实现。返回结构与 AX 版一致。"""
+    try:
+        from pywinauto import mouse
+        import bconnect_print as bp
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": "OCR 调速依赖缺失: %s" % e,
+                "printer": name, "serial": serial}
+
+    def mark(k: str) -> None:
+        steps.setdefault(k, round(time.time() - t0, 2))
+
+    want = _SPEED_PCT[level]
+    try:
+        ax.activate()
+    except Exception:  # noqa: BLE001
+        pass
+
+    lines = _ocr_lines() or []
+    blob = "".join("".join(l["name"].split()) for l in lines)
+    if "打印进度" not in blob or \
+            not any(bp._name_score(l["name"], name) >= 0.8 for l in lines):
+        if not _ocr_enter(name):
+            return {"ok": False,
+                    "error": "%s 的设备页导航失败 (OCR)" % name,
+                    "printer": name, "serial": serial,
+                    "elapsed": round(time.time() - t0, 2), "steps": steps}
+    mark("enter")
+
+    trig = _ocr_speed_trigger(name)
+    if not trig:
+        return {"ok": False,
+                "error": "%s 的设备页上没找到调速控件 (OCR: LED灯/速度%%)"
+                         % name,
+                "printer": name, "serial": serial,
+                "elapsed": round(time.time() - t0, 2), "steps": steps}
+
+    before = None
+    m = re.match(r"(\d{1,3})", trig["text"])
+    if m:
+        before = int(m.group(1))
+
+    menu: list[dict] = []
+    for attempt in (1, 2):  # 刚置前时首点可能被吞, 失败再点一次
+        try:
+            mouse.click(coords=(int(trig["x"]), int(trig["y"])))
+        except Exception as e:  # noqa: BLE001
+            _log("ocr-speed click fail:", str(e)[:60])
+        time.sleep(1.0)
+        menu = _ocr_speed_menu(trig)
+        if menu:
+            break
+    mark("open")
+    if not menu:
+        return {"ok": False,
+                "error": "%s 的调速菜单点不开 (OCR 没读到菜单项; 在打印中?)"
+                         % name,
+                "printer": name, "serial": serial,
+                "elapsed": round(time.time() - t0, 2), "steps": steps}
+
+    target = _SPEED_LABELS[level][0]
+    opts = [o for o in menu if o["text"] == target]
+    if not opts:
+        return {"ok": False, "error": "菜单里没读到「%s」(读到: %s)"
+                % (target, ",".join(o["text"] for o in menu)),
+                "printer": name, "serial": serial,
+                "elapsed": round(time.time() - t0, 2), "steps": steps}
+    time.sleep(0.3)  # 等下拉进场动画落定
+    try:
+        mouse.click(coords=(int(opts[0]["x"]), int(opts[0]["y"])))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": "点档位失败: %s" % e,
+                "printer": name, "serial": serial,
+                "elapsed": round(time.time() - t0, 2), "steps": steps}
+    time.sleep(0.6)
+    # 菜单应该收起; 还在 = 点空了 (fail-closed, 不重试第三次)
+    still = [o for o in _ocr_speed_menu(trig) if o["text"] == target]
+    if still:
+        return {"ok": False, "error": "点了「%s」菜单没收起 (点击没落到"
+                "Connect 上)" % target,
+                "printer": name, "serial": serial,
+                "elapsed": round(time.time() - t0, 2), "steps": steps}
+    mark("click")
+
+    # 3s 内界面百分比变了才算 confirmed (滞后 10-20s, 语义同 AX 版)
+    changed, now_txt = False, None
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        t = _ocr_speed_trigger(name)
+        if t:
+            mm = re.match(r"(\d{1,3})", t["text"])
+            if mm:
+                now_txt = t["text"]
+                if int(mm.group(1)) == want or (
+                        before is not None and int(mm.group(1)) != before):
+                    changed = True
+                    break
+        time.sleep(0.4)
+    mark("verify")
+    return {
+        "ok": True, "command": "speed", "level": level,
+        "printer": name, "serial": serial, "method": "ocr",
+        "from": trig["text"], "to": now_txt, "confirmed": changed,
+        "elapsed": round(time.time() - t0, 2), "steps": steps,
+        **({} if changed else
+           {"note": "已在 Connect 点选「%s」; 界面百分比约 10 秒才刷新,"
+                    "档位确认请看局域网状态帧的 spd_lvl" % target}),
+    }
+
+
 def set_speed(identifier: str, level: int) -> dict:
     """切速度档位（1 静音 / 2 标准 / 3 运动 / 4 狂暴），走 Connect 自动化。"""
     t0 = time.time()
@@ -738,6 +946,11 @@ def set_speed(identifier: str, level: int) -> dict:
         bp.ensure_app(timeout=10)
     except Exception:  # noqa: BLE001
         pass  # 起不来不在这报错，后面各步会给出具体原因
+
+    if os.name == "nt":
+        # Windows: 树常被掏空, AX 版会一路掉进视觉模型 (2026-10-29 用户要求
+        # 控制链全走 OCR)。OCR 版结构与 AX 版一致, 确认仍以界面百分比为准。
+        return _ocr_set_speed(name, serial, level, t0, steps)
 
     ax.enable_ax()
     # 档位在详情页；页面正是这台机才直接用，否则（连"有控件"都是别的机器的）

@@ -24,7 +24,7 @@ if not exist "%~dp0logs" mkdir "%~dp0logs"
 if not exist "%~dp0ffmpeg" mkdir "%~dp0ffmpeg" >nul 2>&1
 
 rem Firewall rule; port comes from config (settings.hubPort, default 8787).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = Get-Content -Raw -LiteralPath '%~dp0config\hub.json' | ConvertFrom-Json; $p = $c.settings.hubPort; if (-not $p) { $p = 8787 }; netsh advfirewall firewall delete rule name=\"BambuDeck Hub\" | Out-Null; netsh advfirewall firewall add rule name=\"BambuDeck Hub\" dir=in action=allow protocol=TCP localport=$p | Out-Null; Write-Host ('[OK] firewall rule ready, port ' + $p)"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = [System.IO.File]::ReadAllText('%~dp0config\hub.json', (New-Object System.Text.UTF8Encoding($false))) | ConvertFrom-Json; $p = $c.settings.hubPort; if (-not $p) { $p = 8787 }; netsh advfirewall firewall delete rule name=\"BambuDeck Hub\" | Out-Null; netsh advfirewall firewall add rule name=\"BambuDeck Hub\" dir=in action=allow protocol=TCP localport=$p | Out-Null; Write-Host ('[OK] firewall rule ready, port ' + $p)"
 
 schtasks /Create /F /TN "BambuDeckHub" /TR "\"%~dp0run-hub.cmd\"" /SC ONSTART /DELAY 0000:15 /RU SYSTEM /RL HIGHEST
 if %errorlevel% neq 0 (

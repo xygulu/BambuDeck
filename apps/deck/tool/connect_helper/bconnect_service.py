@@ -100,16 +100,21 @@ def load_token() -> None:
 
 def write_info(url: str) -> str:
     os.makedirs(os.path.dirname(_INFO), exist_ok=True)
-    with open(_INFO, "w") as f:
+    with open(_INFO, "w", encoding="utf-8") as f:
         json.dump({"url": url, "token": TOKEN}, f)
     os.chmod(_INFO, 0o600)
     return _INFO
 
 
 def load_lan_conf() -> dict:
-    """serial -> {ip, name}。机器相关（换机器部署要改）。"""
+    """serial -> {ip, name}。机器相关（换机器部署要改）。
+
+    显式 utf-8: Windows 上 open() 默认按系统 ANSI(中文机器=GBK) 解码,
+    里面的中文打印机名会读成乱码, 名字↔序列号映射直接对不上
+    (2026-10-29 实测: 盒子上 printers.json 的名字已是 U+E076 私有区字符)。
+    """
     try:
-        with open(_LAN_CONF) as f:
+        with open(_LAN_CONF, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
