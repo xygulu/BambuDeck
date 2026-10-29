@@ -19,6 +19,8 @@ Remove-Item (Join-Path $root 'update\pending.zip') -Force -ErrorAction SilentlyC
 $v = ''
 try { $v = ((Get-Content (Join-Path $root 'update\stage.json') -Raw | ConvertFrom-Json).version) } catch {}
 Write-Output ("[update] applied v" + $v)
+# 暂存标记用完即删: 留着会被当成「上次换装没完成」
+Remove-Item (Join-Path $root 'update\stage.json') -Force -ErrorAction SilentlyContinue
 
 # 换装后重新派生 helper.json / printers.json。包里的 bootstrap_helper.ps1
 # 可能刚被修好 (2026-10-29: 读 hub.json 之前按 ANSI 解码, 中文名全乱),

@@ -38,6 +38,8 @@ if "%HUBEXIT%"=="42" (
     xcopy update\pending\* . /E /Y /I /Q >> logs\hub.log 2>&1
     rmdir /S /Q update\pending >> logs\hub.log 2>&1
     del /Q update\pending.zip >> logs\hub.log 2>&1
+    rem 暂存标记用完即删: 留着会让下次启动误判「上次换装没完成」
+    del /Q update\stage.json >> logs\hub.log 2>&1
     echo [%date% %time%] update applied, restarting hub.exe >> logs\hub.log
   ) else (
     echo [%date% %time%] exit 42 but update\pending missing, skip >> logs\hub.log
