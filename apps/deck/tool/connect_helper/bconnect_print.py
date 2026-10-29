@@ -77,6 +77,11 @@ import bconnect_cloud as cloud  # noqa: E402
 _IS_WIN = os.name == "nt"  # Windows 移植 (2026-10-28): 进程探测/启动走 tasklist/exe
 
 
+def _log(*a) -> None:
+    """诊断输出 (service.log 收 stdout; 2026-10-29 补: 两处调用点早于定义)。"""
+    print("[bp]", *a, flush=True)
+
+
 # ---------------------------------------------------------------- 应用控制
 def _frontmost_app() -> str | None:
     """当前最前 app 名。SILENT 模式下 Connect 收到 deep link 会自己弹到最前，
@@ -511,7 +516,7 @@ def _ocr_rows_win(group: dict, row_limit: int) -> list[tuple[str, int, int]]:
         if not (vision.resolve_model("vision").get("api_key")):
             return []
         ImageGrab.grab(bbox=(rx, ry, rx + rw, ry + rh),
-                       all_screens=True).save(path)
+                       all_screens=True).save(path, "PNG")
         ans = vision.ask_vision(path, (
             "这是打印机设备下拉列表的截图。列出每个选项的文字和该行中心的像素"
             "坐标，只回 JSON 数组 [{\"t\":\"机名\",\"x\":中心x,\"y\":中心y},"
@@ -827,6 +832,225 @@ def select_device(want_name: str, cur_target: str | None = None) -> bool:
             _restore_frontmost(prev)
 
 
+# ---------------------------------------------------------------- 本地 OCR
+# 2026-10-29: 云端视觉 (MiniMax) 配额 429 把换盘链路整个卡死 —— 派单不能
+# 依赖一个外部配额。Windows 10+ 自带 OCR 引擎 (Windows.Media.Ocr), 用系统
+# PowerShell 直调 WinRT: 零安装、零配额、零上传, 和 Mac 侧「OCR 是系统自带
+# 框架, 本地跑」同一个设计。视觉从此只是可选兜底。
+_WIN_OCR_PS = (
+    # WinRT 类型必须用带限定的字面量 (2026-10-29 盒子实测): 裸写
+    # [Windows.Media.Ocr.OcrEngine] 会报「找不到类型」, 加
+    # ,Windows.Foundation,ContentType=WindowsRuntime 才投影得动。
+    "$ErrorActionPreference='Stop';"
+    "$Path='__PATH__';"
+    "try{Add-Type -AssemblyName System.Runtime.WindowsRuntime}"
+    "catch{Write-Output 'ERR: no rt';exit};"
+    "$m=[System.WindowsRuntimeSystemExtensions].GetMethods()|"
+    "Where-Object{$_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and "
+    "$_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'}"
+    "|Select-Object -First 1;"
+    "if(-not $m){Write-Output 'ERR: no asTask';exit};"
+    "function Await($op,$t){$task=$m.MakeGenericMethod($t).Invoke($null,@($op));"
+    "$task.Wait();$task.Result};"
+    "$RT=',Windows.Foundation,ContentType=WindowsRuntime';"
+    "$ocr=$null;"
+    "try{$eng=[Type]('Windows.Media.Ocr.OcrEngine'+$RT);"
+    "$lng=[Type]('Windows.Globalization.Language'+$RT);"
+    "$zh=[Activator]::CreateInstance($lng,[object[]]@('zh-Hans'));"
+    "$ocr=$eng::TryCreateFromLanguage($zh)}catch{};"
+    "if(-not $ocr){try{$ocr=$eng::TryCreateFromUserProfileLanguages()}catch{}};"
+    "if(-not $ocr){Write-Output 'ERR: no engine';exit};"
+    "try{"
+    "$sf=[Type]('Windows.Storage.StorageFile'+$RT);"
+    "$file=Await ($sf::GetFileFromPathAsync($Path)) $sf;"
+    "$fam=[Type]('Windows.Storage.FileAccessMode'+$RT);"
+    "$strm=[Type]('Windows.Storage.Streams.IRandomAccessStream'+$RT);"
+    "$stream=Await ($file.OpenAsync($fam::Read)) $strm;"
+    "$bd=[Type]('Windows.Graphics.Imaging.BitmapDecoder'+$RT);"
+    "$dec=Await ($bd::CreateAsync($stream)) $bd;"
+    "$sb=[Type]('Windows.Graphics.Imaging.SoftwareBitmap'+$RT);"
+    "$bmp=Await ($dec.GetSoftwareBitmapAsync()) $sb;"
+    "$orr=[Type]('Windows.Media.Ocr.OcrResult'+$RT);"
+    "$res=Await ($ocr.RecognizeAsync($bmp)) $orr;"
+    "$out=@();"
+    # OcrLine 没有 BoundingRect (只有 OcrWord 有, 盒子实测全 0) —— 行矩形
+    # 按行内词包围盒取并集。
+    "foreach($ln in $res.Lines){$x0=1e9;$y0=1e9;$x1=-1.0;$y1=-1.0;"
+    "foreach($wd in $ln.Words){$r=$wd.BoundingRect;"
+    "if($r.X -lt $x0){$x0=$r.X};if($r.Y -lt $y0){$y0=$r.Y};"
+    "$e=$r.X+$r.Width;if($e -gt $x1){$x1=$e};"
+    "$b=$r.Y+$r.Height;if($b -gt $y1){$y1=$b}};"
+    "if($x1 -lt 0){continue};"
+    "$out+=[pscustomobject]@{t=$ln.Text;x=[int](($x0+$x1)/2);"
+    "y=[int](($y0+$y1)/2);w=[int]($x1-$x0);h=[int]($y1-$y0)}};"
+    "if($out.Count -eq 0){Write-Output '[]'}else{"
+    "Write-Output ($out|ConvertTo-Json -Compress -Depth 3)}"
+    "}catch{Write-Output ('ERR: '+$_.Exception.Message)}"
+)
+
+
+def _win_ocr_parse(out: str) -> list[dict] | None:
+    """PowerShell OCR 输出 -> [{name,x,y,w,h}]; None = 引擎不可用。"""
+    out = (out or "").strip()
+    if not out or out.startswith("ERR") or out == "[]":
+        return None if out.startswith("ERR") else []
+    try:
+        arr = json.loads(out)
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(arr, dict):
+        arr = [arr]
+    res = []
+    for it in arr:
+        t = str(it.get("t") or "").strip()
+        try:
+            x, y = int(it["x"]), int(it["y"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if t:
+            res.append({"name": t, "x": x, "y": y,
+                        "w": int(it.get("w") or 0), "h": int(it.get("h") or 0)})
+    return res
+
+
+def _win_ocr_lines(path: str) -> list[dict] | None:
+    """本地 OCR 一张图。返回行列表 (位图像素 = 屏幕物理像素, ImageGrab
+    截图与 OcrResult 包围盒同坐标系); None = 引擎不可用 (没装语言包等)。
+    """
+    import base64
+    script = _WIN_OCR_PS.replace("__PATH__", path.replace("'", "''"))
+    enc = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-EncodedCommand", enc],
+            capture_output=True, text=True, timeout=40)
+        return _win_ocr_parse(r.stdout)
+    except Exception as e:  # noqa: BLE001
+        _log("local ocr fail:", str(e)[:80])
+        return None
+
+
+def _win_ocr_dialog_lines(shot_path: str, frame: dict | None) -> list[dict] | None:
+    """裁弹窗区域放大 2.5x 再 OCR —— 正文核对专用。
+
+    小字号 CJK 全屏 OCR 会拆成部首 (2026-10-29 盒子实测: 正文
+    「您将导入文件 "xxx.3mf"」 -> 「扌寻 与 ． 文 亻牛 au」), 文件名核对
+    全靠这份放大版。区域: UIA 钮对矩形反推 (正文恒在钮上方); 钮对拿不到
+    (树掏空是常态) 就取屏幕正中大块 —— Connect 弹窗恒居中。
+    """
+    try:
+        from PIL import Image
+        w, h = Image.open(shot_path).size
+    except Exception:  # noqa: BLE001
+        return None
+    if frame:
+        l = min(frame["cancel"][0], frame["confirm"][0]) - 330
+        t = min(frame["cancel"][1], frame["confirm"][1]) - 175
+        r = max(frame["cancel"][2], frame["confirm"][2]) + 35
+        b = max(frame["cancel"][3], frame["confirm"][3]) + 40
+    else:
+        cx, cy = w // 2, h // 2
+        l, t, r, b = cx - 380, cy - 260, cx + 380, cy + 220
+    try:
+        im = Image.open(shot_path).crop(
+            (max(0, l), max(0, t), min(w, r), min(h, b)))
+        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+        im = im.resize((im.width * 5 // 2, im.height * 5 // 2), resample)
+        # 2026-10-29 盒子实测: im.save() 按扩展名猜格式, ".zoom" 直接
+        # ValueError("unknown file extension") —— 落盘必须是标准后缀。
+        zoom = shot_path + ".zoom.png"
+        im.save(zoom, "PNG")
+        return _win_ocr_lines(zoom)
+    except Exception:  # noqa: BLE001
+        return None  # 裁剪/放大失败不致命: 外层还有全屏 OCR 和流程位置放行
+
+
+def _win_lines_hit_printer(ocr, known: dict, want_name: str) -> str:
+    """OCR 行里有没有哪行像一台已知的机器 -> 返回那行原文。
+
+    给「发送弹窗」分类用: 发送弹窗的下拉框当前值必然是某台已知的机器,
+    导入弹窗里只有机型/耗材/时长文本 (实测 'A1'/'PLA'/'11m'), 撞不上
+    (除非机器真的叫 A1 —— 精确机器名才有这个风险, 现有命名没有)。
+    """
+    if not ocr:
+        return ""
+    names = list((known or {}).keys())
+    if want_name and want_name not in names:
+        names.append(want_name)
+    for l in ocr:
+        for n in names:
+            if _name_score(l["name"], n) >= 0.8:
+                return l["name"]
+    return ""
+
+
+def _win_file_in_lines(ocr, base: str) -> bool:
+    """OCR 文本里核对得到文件名 (主干比对; 小数点和下划线 OCR 时有时不回,
+    一并归一掉)。"""
+    if not ocr:
+        return False
+
+    def squash(s: str) -> str:
+        return re.sub(r"[ \t._-]+", "", s or "").lower()
+
+    stem = (base or "").rsplit(".", 1)[0] or (base or "")
+    key = squash(stem)
+    if len(key) < 4:
+        key = squash(base)
+    blob = "".join(squash(l["name"]) for l in ocr)
+    return bool(key) and key in blob
+
+
+def _win_classify_local(texts, known: dict, want_name: str) -> str:
+    """零成本弹窗分类: 'send' / '' (判不了, 交给下一级)。
+
+    发送弹窗独有、导入弹窗没有的 UIA 特征: 设备选择器结构 (chevron_down
+    组, 有宽度守卫) 和下拉框当前值。匹配吃精确(1.0)和机型前缀(0.90),
+    不吃 0.8 同位模糊 —— texts 是树里读的权威值, 没有视觉那种同音错字,
+    模糊只会白白放大「机型文本撞机名」的风险 (导入弹窗里躺着「A1」)。
+    """
+    try:
+        if ax.selector_frame():
+            return "send"
+    except Exception:  # noqa: BLE001
+        pass
+    names = list((known or {}).keys())
+    if want_name and want_name not in names:
+        names.append(want_name)
+    for t in (texts or []):
+        tn = _norm_printer_name(str(t))
+        if not tn:
+            continue
+        for n in names:
+            if _name_score(tn, n) >= 0.90:
+                return "send"
+    return ""
+
+
+def _win_rect_of_current(known: dict, want_name: str):
+    """发送弹窗下拉框当前值的矩形 [l,t,r,b] (树里找得到 Text 时)。"""
+    names = list((known or {}).keys())
+    if want_name and want_name not in names:
+        names.append(want_name)
+    best, best_key = None, (0.0, 0)
+    try:
+        items = ax.text_items()
+    except Exception:  # noqa: BLE001
+        return None
+    for it in items:
+        t = str(it.get("text") or "")
+        r = it.get("rect")
+        if not t or not r or len(r) != 4:
+            continue
+        for n in names:
+            s = _name_score(t, n)
+            key = (s, len(_norm_printer_name(n)))
+            if key > best_key:
+                best_key, best = key, r
+    return best if best_key[0] >= 0.8 else None
+
+
 def _win_classify_dialog(img_path: str) -> dict:
     """截图 + 视觉模型读弹窗内容 -> {kind, body, buttons, printers, selected}。
 
@@ -905,12 +1129,18 @@ def _win_parse_options(js: str) -> list[dict]:
 
 
 def _norm_printer_name(s: str) -> str:
-    """机名归一: 去掉 Connect 显示名上的状态后缀 (「… 在线」)。"""
-    s = (s or "").strip()
-    for suf in (" 在线", " 离线", " 打印中", " 待机", " 等待", " 异常"):
-        if s.endswith(suf):
-            s = s[: -len(suf)]
-    return s.strip()
+    """机名归一: 去掉状态后缀, 再去掉全部空白 + 转小写。
+
+    对齐 Mac 侧 _norm_name 的做法: 云端名「拓竹 A1 宇树」和 Connect 界面
+    显示的「拓竹A1宇树」只差空格, 不去空白就永远核不上; 大小写同理。
+    状态后缀可能是「宇树 在线」也可能「宇树在线」, 所以先把空白全去掉
+    再剥后缀。
+    """
+    s = "".join((s or "").split()).lower()
+    for suf in ("在线", "离线", "打印中", "待机", "等待", "异常"):
+        if s.endswith(suf) and len(s) > len(suf):
+            return s[: -len(suf)]
+    return s
 
 
 def _name_similarity(a: str, b: str) -> float:
@@ -984,76 +1214,217 @@ def _win_target_shown(texts, want_name: str, known: dict,
     return best_text
 
 
+def _win_wait_target(want_name: str, known: dict, serial: str,
+                     timeout: float = 1.5) -> str:
+    """轮询 UIA texts 直到目标机名出现 (借 Mac 侧 _wait_target 的做法)。
+
+    点完下拉项之后界面刷新有延迟, 固定 sleep 一读到底会把「已经切过去了」
+    判成没切, 白试三轮。这里到超时为止每 150ms 读一次。
+    """
+    deadline = time.time() + timeout
+    while True:
+        shown = _win_target_shown(ax.texts(), want_name, known, serial)
+        if shown:
+            return shown
+        if time.time() >= deadline:
+            return ""
+        time.sleep(0.15)
+
+
 def _win_pick_printer(shot_path: str, want_name: str, known: dict,
-                      serial: str) -> tuple[bool, str]:
+                      serial: str, ocr: list | None = None
+                      ) -> tuple[bool, str]:
     """把「发送打印任务至」弹窗里的打印机切到 want_name。
 
-    实测 (2026-10-29): 下拉选项**不进 UIA 树** (展开后树里只剩当前值
-    「123」和耗材槽位「B2」), 只能视觉拿选项坐标去点; 但视觉读名会出
-    同音错字, 所以**不用视觉名做最终匹配** —— 视觉名只用来给候选排序,
-    点完以 UIA texts 里下拉框的当前值为准 (当前值在树里, 零错字风险)。
+    与 Mac 的 select_device 同构 (2026-10-29 对齐): 定位下拉框 -> 展开 ->
+    读选项(名字+坐标) -> 点最像目标的 -> UIA texts 权威核对。
+    几何来源: OCR 机名行 (2026-10-29 盒子实测: 树残留会给错位几何, 裁剪图
+    空裁 700 字节为证; 全屏 OCR 命中已知机名的那行就是下拉当前值, 像素即
+    真相) > UIA 选择器 > UIA 当前值矩形 > 视觉 chevron (可选)。
+    选项来源三级: UIA 原生 (Chromium 有时把 option 映射进树) > Windows
+    自带 OCR (免费) > 云端视觉 (可选, 配额满/断网就没了)。视觉/OCR 读名
+    都可能有错字, 只用来排序候选; 选中与否以 texts 里下拉框当前值为准
+    (当前值在树里, 零错字风险)。
 
     返回 (选中?, 说明)。选不中就让调用方 fail-closed 取消, 绝不盲发。
     """
-    try:
-        import bconnect_vision as vision
-    except Exception as e:  # noqa: BLE001
-        return False, "视觉模块不可用: %s" % str(e)[:60]
-    try:
-        chev = vision.ask_coords(
-            shot_path, "打印机名字右边的下拉箭头(小三角/chevron)")
-    except Exception as e:  # noqa: BLE001
-        return False, "找下拉箭头失败: %s" % str(e)[:60]
-    if not chev:
-        return False, "视觉没找到下拉箭头"
-    cx, cy = int(chev[0]), int(chev[1])
-
-    def read_options(tag):
-        """点箭头展开 + 截图 + 视觉读选项。列表本来开着时点箭头会把它收起,
-        这时读不到选项 —— 所以调用方读不到就再点一次, 不假设当前开合状态。
-        """
-        if not ax.press_at(cx, cy):
-            return []
-        time.sleep(1.2)
-        lst = "%s.list%s" % (shot_path, tag)
-        if not ax.screenshot(lst):
-            return []
+    g = None
+    cx = cy = None
+    hit_line = None
+    if ocr:
+        hit = _win_lines_hit_printer(ocr, known, want_name)
+        if hit:
+            hit_line = next((l for l in ocr
+                             if l["name"] == hit and l.get("w")), None)
+        if hit_line is None:
+            # 2026-10-29 盒子实测: 下拉当前值是小字+图标, 全屏 zh-Hans OCR
+            # 整行漏掉 (「123」没进输出) -> 用读到了的「发送打印任务至」
+            # 标题行锚定弹窗, 裁值行区域放大 2.5x 重读。值行恒在标题下方
+            # 45~105px、左缘对齐标题 (Connect 布局固定)。
+            tline = next((l for l in ocr
+                          if "发送打印任务至" in "".join(l["name"].split())
+                          and l.get("w")), None)
+            if tline:
+                tl = tline["x"] - tline["w"] // 2   # 标题左缘
+                tt = tline["y"] - tline["h"] // 2   # 标题上缘
+                try:
+                    from PIL import Image
+                    box = (max(0, tl - 10), max(0, tt + 30),
+                           tl + 380, tt + 130)
+                    im = Image.open(shot_path).crop(box)
+                    resample = getattr(getattr(Image, "Resampling", Image),
+                                       "LANCZOS")
+                    im = im.resize((im.width * 5 // 2, im.height * 5 // 2),
+                                   resample)
+                    zp = shot_path + ".val.png"
+                    im.save(zp, "PNG")
+                    vlines = _win_ocr_lines(zp) or []
+                except Exception:  # noqa: BLE001
+                    vlines = []
+                names = list((known or {}).keys())
+                if want_name and want_name not in names:
+                    names.append(want_name)
+                for v in vlines:
+                    if not v.get("w"):
+                        continue
+                    scr = {"name": v["name"],
+                           "x": int(box[0] + v["x"] / 2.5),
+                           "y": int(box[1] + v["y"] / 2.5),
+                           "w": int(v["w"] / 2.5), "h": int(v["h"] / 2.5)}
+                    if any(_name_score(scr["name"], n) >= 0.8
+                           for n in names):
+                        hit_line = scr
+                        break
+                _log("picker value-zoom: title=(%d,%d) vlines=%s hit=%s" % (
+                    tl, tt, [v["name"][:12] for v in vlines[:6]],
+                    hit_line and hit_line["name"]))
+    _log("picker geom: hit_line=%s names=%s" % (
+        bool(hit_line), [l["name"][:10] for l in (ocr or [])][:14]))
+    if hit_line:
+        # 下拉当前值行: 矩形反推自中心坐标 (PS OCR 给的是包围盒中心)
+        l = hit_line
+        g = {"x": float(l["x"] - l["w"] // 2),
+             "y": float(l["y"] - l["h"] // 2),
+             "w": float(l["w"]), "h": float(l["h"])}
+        cx, cy = int(g["x"] + g["w"]) + 24, int(l["y"])
+    else:
+        frame = None
         try:
+            frame = ax.selector_frame()
+        except Exception:  # noqa: BLE001
+            frame = None
+        g = (frame or {}).get("group")
+        if g:
+            chev = (frame or {}).get("chevron") or {
+                "x": g["x"] + g["w"] - 24, "y": g["y"] + g["h"] / 2}
+            cx, cy = int(chev["x"]), int(chev["y"])
+        else:
+            # 选择器结构没进树 (Chromium 懒加载常态): 退当前值文本矩形,
+            # 箭头 ≈ 值右缘-24 (与 chevron 组内几何兜底同一偏移)。
+            rect = _win_rect_of_current(known, want_name)
+            if rect:
+                g = {"x": float(rect[0]), "y": float(rect[1]),
+                     "w": float(rect[2] - rect[0]), "h": float(rect[3] - rect[1])}
+                cx, cy = int(rect[2]) - 24, int((rect[1] + rect[3]) / 2)
+            else:
+                # 树彻底掏空的最后兜底: 视觉找 chevron (可选)。没有选择器矩形
+                # 就没法裁剪做本地 OCR, 选项只能走视觉; 视觉也没有 -> 放弃。
+                try:
+                    import bconnect_vision as vision
+                    full = shot_path + ".full"
+                    if ax.screenshot(full):
+                        c = vision.ask_coords(
+                            full, "打印机名字右边的下拉箭头(小三角/chevron)")
+                        if c:
+                            cx, cy = int(c[0]), int(c[1])
+                except Exception:  # noqa: BLE001
+                    pass
+                if cx is None:
+                    return False, "选择器几何拿不到 (chevron 组/当前值/视觉都空手)"
+    n_known = max(3, len(known or {}) + 2)
+
+    def vision_options():
+        """云端视觉兜底 (可选): 本地两级都空手才走这, 配额满就直接空。"""
+        try:
+            import bconnect_vision as vision
+            full = shot_path + ".vfull"
+            if not ax.screenshot(full):
+                return []
             js = vision.ask_vision(
-                lst,
+                full,
                 "这是打印机下拉列表展开后的截图, 列表每项是一台打印机。"
                 "只输出 JSON: {\"options\":[{\"name\":\"逐字机名\","
                 "\"x\":123,\"y\":456}]} (x/y 是该项文字中心的像素坐标)")
+            return _win_parse_options(js)
+        except Exception:  # noqa: BLE001
+            return []
+
+    def read_options(tag):
+        """点箭头展开 + 读选项 (三级来源)。列表本来开着时点箭头会把它收起,
+        这时读不到选项 —— 调用方读不到就再点一次, 不假设当前开合状态。
+        """
+        if not ax.press_at(cx, cy):
+            return None  # None = 点不动, 直接放弃
+        time.sleep(1.0)
+        if g is None:
+            return vision_options()  # 没有选择器矩形, 裁剪OCR做不了
+        # 1) UIA 原生选项
+        try:
+            opts = [{"name": o["name"], "x": int(o["x"]), "y": int(o["y"])}
+                    for o in (ax.dropdown_options(g, row_limit=n_known) or [])
+                    if o.get("name")]
+        except Exception:  # noqa: BLE001
+            opts = []
+        if opts:
+            return opts
+        # 2) 本地 OCR: 裁选择器下方区域读行名+行中心
+        # (2026-10-29 盒子实测: 选项列表比当前值文本宽得多 —— 值「123」
+        # 只有 30px, 列表 315px; 窄裁会把「拓竹A1 xxx」拦腰截断)
+        lst = "%s.list%s" % (shot_path, tag)
+        rx, ry = int(g["x"]) - 60, int(g["y"] + g["h"]) - 4
+        rw, rh = int(g["w"]) + 300, 30 + n_known * 40 + 20
+        try:
+            from PIL import ImageGrab
+            # 同 .zoom 教训: 动态后缀 (.list r0/r1) 必须显式格式
+            ImageGrab.grab(bbox=(rx, ry, rx + rw, ry + rh),
+                           all_screens=True).save(lst, "PNG")
         except Exception as e:  # noqa: BLE001
-            return [{"error": str(e)[:60]}]
-        opts = _win_parse_options(js)
-        if not opts:
-            return [{"raw": (js or "")[:80]}]
-        # 按与目标名的匹配度排序候选 (视觉名可能有错字/带机型前缀)
-        opts.sort(key=lambda o: -_name_score(o["name"], want_name))
-        return opts
+            _log("crop shot fail:", str(e)[:60])
+            return None
+        ocr = _win_ocr_lines(lst)
+        if ocr is None:
+            return None  # 引擎不可用
+        # 裁剪图坐标平移回屏幕; 只留选择器下缘以下的行 (上头是弹窗标题)
+        keep = [{"name": o["name"], "x": o["x"] + rx, "y": o["y"] + ry}
+                for o in ocr if o["y"] + ry >= g["y"] + g["h"] - 4]
+        _log("picker ocr[%s]: crop=%dx%d+%d+%d raw=%d keep=%d %s" % (
+            tag, rw, rh, rx, ry, len(ocr), len(keep),
+            [(k["name"][:10], k["x"], k["y"]) for k in keep[:6]]))
+        return keep
 
     tried = set()
-    # 每轮只点**一个**候选(相似度最高的未试项), 下一轮重新展开重读坐标。
+    # 每轮只点**一个**候选(最像目标的未试项), 下一轮重新展开重读坐标。
     # 早先版本在内层循环里连着点多个候选: 第一次点没命中后下拉已经收起,
     # 后面那些坐标全是展开态的旧值, 点了也白点 (实测会一直失败)。
+    vision_tried = False
     for _round in range(3):
         opts = read_options("r%d" % _round)
-        if opts and "error" in opts[0]:
-            return False, "视觉读选项失败: %s" % opts[0]["error"]
-        if opts and "raw" in opts[0]:
+        if opts is not None and not opts:
             # 可能是列表本来就开着, 这一点把它收起了 —— 再点一次展开重读
             opts = read_options("r%db" % _round)
-        if not opts or "error" in opts[0] or "raw" in opts[0]:
-            return False, "视觉没读出下拉选项"
+        if not opts and not vision_tried:
+            vision_tried = True   # 全程至多一次云端视觉, 别把配额打爆
+            opts = vision_options()
+        if not opts:
+            return False, "下拉选项读不出 (UIA/本地OCR/视觉都空手)"
+        opts.sort(key=lambda o: -_name_score(o["name"], want_name))
         cand = next((o for o in opts if o["name"] not in tried), None)
         if cand is None:
             break
         tried.add(cand["name"])
         if not ax.press_at(cand["x"], cand["y"]):
             continue
-        time.sleep(1.0)
-        shown = _win_target_shown(ax.texts(), want_name, known, serial)
+        shown = _win_wait_target(want_name, known, serial)
         if shown:
             return True, "已选中「%s」(下拉框当前值已核对)" % shown
     return False, "候选都点过仍没选中「%s」(试过: %s)" % (
@@ -1167,18 +1538,79 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
                 "第%d次按「打印」(%s, 进打印确认)" % (pressed, how))
             continue
         time.sleep(1.5)  # 弹窗进场动画/渲染稳定 (弹窗缩放动画会给出中间态)
+        # ---- 弹窗分类: 本地 OCR 像素先行 -> UIA 树 -> 云端视觉(可选)。
+        # 2026-10-29 实测两条铁律:
+        #   (1) UIA 树会残留上一态 —— 导入确认框盖着页面时树里还躺着上一屏
+        #       的机器名, 树先行会把导入框骗成「打印」; Chromium 树懒加载/
+        #       掏空/残留都是常态, 截图即真相, 所以 OCR 先行, 树只配兜底。
+        #   (2) zh-Hans OCR 在 CJK 字间插空格, 子串匹配先剥空白; 全屏 OCR
+        #       连背景一起读, 判定顺序 = 发送弹窗专属标记「发送打印任务至」
+        #       > 导入标记 > 机名命中 (机名最不可靠, 放最后)。
+        #   视觉配额 429 不再卡死链路 —— 它只是最后的可选兜底。
+        kind, body, printers, ocr = "", "", [], None
         if not ax.screenshot(shot_path):
             ax.press_cancel_strict()
             result["error"] = "弹窗截图失败, 已取消未派单"
             rec("classify-dialog", False, result["error"])
             return result
-        cls = _win_classify_dialog(shot_path)
-        kind = str(cls.get("kind") or "unknown")
-        body = str(cls.get("body") or "")
-        printers = [p for p in (cls.get("printers") or []) if p]
-        rec("classify-dialog", True, "kind=%s body=%s printers=%s"
-            % (kind, body[:48], printers))
-        if (kind == "导入" or WIN_IMPORT_TEXT in body) and base in body:
+        ocr = _win_ocr_lines(shot_path)
+        if ocr:
+            blob = "".join("".join(l["name"].split()) for l in ocr)
+            if "发送打印任务至" in blob:
+                kind = "打印"
+            elif WIN_IMPORT_TEXT in blob or "导入" in blob:
+                kind = "导入"
+            elif _win_lines_hit_printer(ocr, known, want_name):
+                kind = "打印"  # 发送弹窗下拉当前值 (导入弹窗背景无机名)
+        elif _win_classify_local(ax.texts(), known, want_name) == "send":
+            kind = "打印"  # OCR 引擎不可用才退树签名
+        else:
+            cls = _win_classify_dialog(shot_path)  # 云端视觉兜底
+            kind = str(cls.get("kind") or "unknown")
+            body = str(cls.get("body") or "")
+            printers = [p for p in (cls.get("printers") or []) if p]
+        # OCR 看见了什么带进步骤日志: 远程排障全靠它 (UIA 树掏空是常态)。
+        ocr_dbg = ""
+        if ocr:
+            ocr_dbg = " ocr=[%s]" % "; ".join(
+                l["name"][:20] for l in ocr[:12])
+        rec("classify-dialog", kind in ("打印", "导入"),
+            "kind=%s body=%s printers=%s%s" % (kind, body[:48], printers, ocr_dbg))
+        if kind not in ("打印", "导入"):
+            # 2026-10-29 修正: OCR/视觉都没认出标记时 kind 是 "" 而不是
+            # "unknown", 旧判定 == "unknown" 永远不成立, 空 kind 会掉进
+            # 循环底部的兜底分支 —— 行为恰好也是取消, 但报错误导排障方向。
+            ax.press_cancel_strict()
+            result["error"] = ("弹窗内容判读不出 (UIA/本地OCR/视觉都空手), "
+                               "已取消未派单")
+            rec("check-target", False, result["error"] + ocr_dbg)
+            return result
+        if kind == "导入":
+            # 文件核对: 视觉正文 / 本地 OCR 都给得到才算数; 全屏 OCR 认不出
+            # (小字拆部首) 时裁弹窗放大重读; 两条 OCR 路都不可用才退流程位置
+            # —— 文件来自本进程 0.5s 前发的 deeplink, 选项页又已核对过文件名,
+            # 这里的 confirm 也不派单, 放行。
+            zoom_dbg = ""
+            if body:
+                file_ok = base in body
+            elif ocr is not None:
+                file_ok = _win_file_in_lines(ocr, base)
+                if not file_ok:
+                    zoom = _win_ocr_dialog_lines(shot_path, ax.dialog_frame())
+                    if zoom:
+                        file_ok = _win_file_in_lines(zoom, base)
+                        zoom_dbg = " zoom=[%s]" % "; ".join(
+                            l["name"][:20] for l in zoom[:8])
+                    else:
+                        zoom_dbg = " zoom=none"
+            else:
+                file_ok = True
+            if not file_ok:
+                ax.press_cancel_strict()
+                result["error"] = ("导入弹窗核对不到文件「%s」, 已取消未派单"
+                                   % base)
+                rec("check-file", False, result["error"] + ocr_dbg + zoom_dbg)
+                return result
             # 导入确认弹窗 (正文含标记 + 文件名核对): strict confirm
             ok = ax.press_confirm_strict()
             if not ok:
@@ -1189,7 +1621,10 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
                 rec("click-import", False, result["error"])
                 return result
             imported = True
-            rec("click-import", True, "第%d轮: 已确认导入 (视觉核对正文)" % rnd)
+            rec("click-import", True,
+                "第%d轮: 已确认导入 (%s核对正文)"
+                % (rnd, "视觉" if body else "本地OCR" if ocr is not None
+                   else "流程位置"))
             time.sleep(1.5)
             continue
         if kind in ("打印", "选择") and want_name:
@@ -1200,15 +1635,38 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
             cur = {t for t in ax.texts() if t}
             shown = _win_target_shown(cur, want_name, known, serial)
             if not shown:
-                ok2, why = _win_pick_printer(shot_path, want_name, known, serial)
+                ok2, why = _win_pick_printer(shot_path, want_name, known,
+                                             serial, ocr=ocr)
                 rec("select-device", ok2, why)
                 if not ok2:
                     ax.press_cancel_strict()
                     result["error"] = ("发送弹窗切机失败: %s, 已取消未派单" % why)
                     rec("check-target", False, result["error"])
                     return result
+                # 选完再确认一次: 选机内部已经 _win_wait_target 过, 这里只是
+                # 给界面一个刷新窗口, 拿最终值。
+                shown = _win_wait_target(want_name, known, serial, timeout=1.0)
                 cur = {t for t in ax.texts() if t}
-                shown = _win_target_shown(cur, want_name, known, serial)
+            if not shown:
+                # texts 掏空兜底 (Chromium 懒加载常态): 重预热 a11y 再读;
+                # 还没有就本地 OCR 全屏, 目标名**逐字**命中才放行 (OCR 有
+                # 同音错字风险, 不吃模糊)。序列号门在下面照旧把关。
+                try:
+                    ax.enable_ax()
+                except Exception:  # noqa: BLE001
+                    pass
+                shown = _win_wait_target(want_name, known, serial, timeout=0.8)
+            if not shown:
+                full2 = shot_path + ".verify"
+                if ax.screenshot(full2):
+                    v = _win_ocr_lines(full2)
+                    want_n = _norm_printer_name(want_name)
+                    for l in (v or []):
+                        if _norm_printer_name(l["name"]) == want_n:
+                            shown = want_name
+                            rec("check-target-ocr", True,
+                                "texts 掏空, 本地OCR 逐字命中「%s」" % l["name"])
+                            break
             if not shown:
                 ax.press_cancel_strict()
                 result["error"] = ("发送弹窗当前机名核对不到目标「%s」"
@@ -1216,8 +1674,13 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
                                    % (want_name, sorted(cur)[:8]))
                 rec("check-target", False, result["error"])
                 return result
-            # 名字对上了还要对序列号 (重名机保护)
-            if known.get(want_name) != serial:
+            # 名字对上了还要对序列号 (重名机保护)。查表也按归一化比 (空格/
+            # 大小写/状态后缀都不算差异), 与显示名的匹配口径保持一致。
+            want_serial = next(
+                (s for n, s in known.items()
+                 if _norm_printer_name(n) == _norm_printer_name(want_name)),
+                None)
+            if want_serial != serial:
                 ax.press_cancel_strict()
                 result["error"] = ("机名「%s」与目标序列号 %s 不一致(已知映射:%s), "
                                    "已取消未派单"
@@ -1244,7 +1707,7 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
         # 导入弹窗但文件名对不上 / kind=其他 / 视觉读不出: 一律取消 ——
         # 绝不盲按 confirm (P22 误派教训)。
         ax.press_cancel_strict()
-        result["error"] = ("确认弹窗内容无法核对(视觉: kind=%s body=%s "
+        result["error"] = ("确认弹窗内容无法核对(kind=%s body=%s "
                            "printers=%s), 已取消未派单"
                            % (kind, body[:60], printers))
         rec("check-target", False, result["error"])

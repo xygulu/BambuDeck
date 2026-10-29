@@ -370,7 +370,7 @@ def screenshot(path: str) -> bool:
     """全屏截图 (弹窗正文只活在像素里, 视觉分类的输入)。Pillow 必须。"""
     try:
         from PIL import ImageGrab
-        ImageGrab.grab().save(path)
+        ImageGrab.grab().save(path, "PNG")
         return True
     except Exception as e:  # noqa: BLE001
         _log('screenshot fail:', e)

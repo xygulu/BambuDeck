@@ -387,6 +387,9 @@ def dispatch(serial: str, command: str, params: dict) -> dict:
         res = bp.run(file,
                      stop_before_send=bool(params.get("stop_before_send")),
                      serial=serial, verbose=True,
+                     # select_only: 走到「发送打印任务至」弹窗、切到目标机并
+                     # 核对, 然后取消 —— 不派单, 用来验选机好不好使。
+                     select_only=bool(params.get("select_only")),
                      filament=params.get("filament") or None)
         # 直接返回 run() 的扁平结果（ok/steps/task/printer/error/elapsed_total），
         # 不再包一层 {"result": ...} —— App 侧 CloudPrintResult.fromJson 读的是

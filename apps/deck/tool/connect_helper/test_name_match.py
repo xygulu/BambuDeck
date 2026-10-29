@@ -63,6 +63,57 @@ check('大宇树不算宇树(全局最高分属别机)',
                            S_YUSHU), '')
 check('序列号不符时拒认', bp._win_target_shown({'宇树'}, '宇树', {'宇树': S_OTHER}, S_YUSHU), '')
 
+# --- 空白/大小写归一 (对齐 Mac 侧 _norm_name) -------------------------------
+check('归一: 去空白', bp._norm_printer_name('拓竹 A1 宇树'), '拓竹a1宇树')
+check('归一: 去空白+状态后缀', bp._norm_printer_name('宇树 在线'), '宇树')
+check('归一: 后缀无空格', bp._norm_printer_name('宇树在线'), '宇树')
+check('空格差异也算同一台',
+      bp._win_target_shown({'拓竹A1宇树'}, '拓竹 A1 宇树',
+                           {'拓竹 A1 宇树': S_YUSHU}, S_YUSHU), '拓竹A1宇树')
+check('大小写差异也算同一台',
+      bp._win_target_shown({'A1-Jiaxing'}, 'a1-jiaxing',
+                           {'a1-jiaxing': S_OTHER}, S_OTHER), 'A1-Jiaxing')
+check('状态后缀不影响打分', bp._name_score('宇树 在线', '宇树'), 1.0)
+
+# --- 本地 OCR 解析 (PowerShell 输出) ----------------------------------------
+arr = ('[{"t":"拓竹A1宇树","x":100,"y":200,"w":120,"h":20},'
+       '{"t":"123","x":100,"y":240,"w":60,"h":20}]')
+check('OCR: 数组', bp._win_ocr_parse(arr),
+      [{'name': '拓竹A1宇树', 'x': 100, 'y': 200, 'w': 120, 'h': 20},
+       {'name': '123', 'x': 100, 'y': 240, 'w': 60, 'h': 20}])
+check('OCR: 单对象也收', bp._win_ocr_parse('{"t":"123","x":1,"y":2,"w":3,"h":4}'),
+      [{'name': '123', 'x': 1, 'y': 2, 'w': 3, 'h': 4}])
+check('OCR: 空列表', bp._win_ocr_parse('[]'), [])
+check('OCR: ERR=引擎不可用', bp._win_ocr_parse('ERR: no engine'), None)
+check('OCR: 空输出', bp._win_ocr_parse(''), [])
+check('OCR: 坐标缺=丢行',
+      bp._win_ocr_parse('[{"t":"abc","x":1,"y":2},{"t":"def"}]'),
+      [{'name': 'abc', 'x': 1, 'y': 2, 'w': 0, 'h': 0}])
+
+# --- 本地分类 / 行命中 / 文件核对 --------------------------------------------
+check('本地分类: 树里有已知名=send',
+      bp._win_classify_local(['拓竹A1宇树', 'B2'], KNOWN, '宇树'), 'send')
+check('本地分类: 机型文本不撞 (导入弹窗)',
+      bp._win_classify_local(['A1', 'PLA', '11m', '0.4'], KNOWN, '宇树'), '')
+check('本地分类: 空树', bp._win_classify_local([], KNOWN, '宇树'), '')
+check('本地分类: 别机的机型前缀名也足以判定=send (目标对错由核对管)',
+      bp._win_classify_local(['拓竹A1大宇树'], {'大宇树': S_OTHER}, '宇树'), 'send')
+check('行命中: OCR 里有机名',
+      bp._win_lines_hit_printer([{'name': '拓竹A1宇树', 'x': 0, 'y': 0}],
+                                KNOWN, '宇树'), '拓竹A1宇树')
+check('行命中: 导入弹窗文本不撞',
+      bp._win_lines_hit_printer([{'name': 'A1', 'x': 0, 'y': 0},
+                                 {'name': 'PLA', 'x': 0, 'y': 0}],
+                                KNOWN, '宇树'), '')
+check('行命中: OCR 空', bp._win_lines_hit_printer([], KNOWN, '宇树'), '')
+check('文件核对: 命中主干',
+      bp._win_file_in_lines([{'name': '导入 auto plate swap.3mf'}],
+                            'auto_plate_swap.3mf'), True)
+check('文件核对: 没有就是没有',
+      bp._win_file_in_lines([{'name': '您将导入文件 其他.3mf'}],
+                            'auto_plate_swap.3mf'), False)
+check('文件核对: OCR 不可用', bp._win_file_in_lines(None, 'a.3mf'), False)
+
 # --- _win_parse_options ----------------------------------------------------
 js = '{"options":[{"name":"拓竹A1宇树","x":100,"y":200},{"name":"123","point":[5,6]}]}'
 check('选项解析', bp._win_parse_options(js),
