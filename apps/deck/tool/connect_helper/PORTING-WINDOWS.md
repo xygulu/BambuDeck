@@ -94,14 +94,52 @@ macOS 版靠**中文标签**定位控件（「跳过」是锚、控制图标是�
      卡片文本是「<名> 状态」拼接（点击名需 startswith 兜底）。
   5. **视觉兜底截图**：`screencapture` 是 macOS 命令，Windows 走 PIL ImageGrab。
   另：pywinauto `UIAWrapper` 没有 `is_iconic/restore`，直接 ctypes user32。
-- **阶段 3（未做）**：打印派单（导入 → 打印 → 发送）。deep link 与「导入」交互
-  要重做；`send_target_device`/`selector_frame` 目前是 stub；打印流程还需要
-  云会话（已从 Mac 复制）+ 目标机选择交互。
-- **阶段 4（未做）**：调速档位菜单（详情页温度/风扇区已在 dump 中，
-  `triangle_up/down` 与 ± 按钮带文字，锚定应比 Mac 简单）。
-- **阶段 5（部分）**：目标机已挂 `BambuDeckHelper`（登录自启 + 守护循环）；
-  打包进 deck-hub-windows 部署包待做（嵌入式 Python 已就位：
+- **阶段 3（真机已验证，2026-10-28）**：打印派单（导入 → 打印 → 发送）打通。
+  弹窗正文不进 UIA 树 → 截图 + MiniMax 视觉核对，fail-closed；二按「打印」
+  Invoke 哑火 → 改鼠标点中心；弹窗链 = 导入确认 → 回选项页 → 重按 →
+  发送弹窗（发送 = confirm）。真机 32s。
+- **阶段 4（真机已验证，2026-10-28/29）**：调速档位菜单打通。菜单是 antd
+  Dropdown，Esc 关不掉（点「打印进度」标题才收）。**UI 百分比滞后 9-20s**，
+  所以确认走局域网状态帧的 `spd_lvl`（权威），界面 % 只作参考。
+- **阶段 5（已完成）**：目标机挂了 `BambuDeckHelper`（登录自启 + 守护循环），
+  helper 源码与看护脚本都进了 deck-hub-windows 部署包（嵌入式 Python 在
   `runtime\python\`，依赖 paho-mqtt/pywinauto/comtypes/requests/pillow）。
+
+### 控制链的 OCR 化（2026-10-29）
+
+Connect 的 Chromium 窗口在 Windows 上**会掏空 AX 树**（文本层懒加载，
+读出来是空的），树一空 AX 版代码就一路降级到视觉模型 → MiniMax 429
+「tokenplan 用量不足」直接报给用户。所以控制链改成**截图即真相**：
+
+| 操作 | 锚点 |
+|---|---|
+| 详情页判断 | 「打印进度」标题 |
+| 机器名 | 卡片文本 `_name_score >= 0.8` |
+| 状态 | 状态行「打印中 / 已暂停」 |
+| 进度 % | 进度 % 锚点（`%` + (122,-47) = 暂停，+ (162,-47) = 停止） |
+| 调速触发器 | 「LED灯」行左边的速度百分比 |
+| 调速菜单 | 触发器下方区域 zoom 2.5x 重读（2 字档位名全屏 OCR 有漏读） |
+
+zh-Hans OCR 的两个坑：绿色进度 `%` **有时整个符号丢掉**（只出「44」），
+**有时出全角「％」** → 统一用 `re.fullmatch(r"\d{1,3}\s*[%％]?", text)` 收。
+小 CJK 会退化成偏旁部首，所以关键文本要 zoom 2.5x 重读。
+
+配套的离线自测（不需要 Windows/Connect/真机）：
+`test_ocr_speed.py`（调速锚点与坐标换算）、`test_name_match.py`（机名匹配）、
+`../hub-windows/helper/test_bootstrap_local_conf.py`（本地配置派生）。
+
+### Windows 上的中文编码坑（2026-10-29）
+
+PowerShell 5.1 的 `Get-Content` 不带 `-Encoding` 时按**系统 ANSI 码页**解码
+（中文机器 = GBK）→ 把 UTF-8 文件里的中文读成乱码，再以 UTF-8 写回就是
+**二次编码**。盒子上 `config\hub.json` 的摄像头名（宇树/萤石/嘉兴）就是这么
+坏的，网页上显示成乱码；`bootstrap_helper.ps1` 派生的 `printers.json` 里
+打印机名更糟，成了 U+E076 私有区字符。
+
+规矩：
+- PowerShell 读文件一律显式 UTF-8（`[System.IO.File]::ReadAllText($p, (New-Object System.Text.UTF8Encoding($false)))`）；
+- Python 的 `open()` 一律带 `encoding=`（Windows 默认也是 ANSI）；
+- 派生逻辑尽量写在 Python 里（可离线自测），PowerShell 只负责调它。
 
 ## 怎么验
 
