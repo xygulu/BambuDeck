@@ -932,6 +932,7 @@ class HubServer {
             'latest': c['latest'],
             'hasUpdate': c['hasUpdate'],
             'notes': c['notes'],
+            'releaseUrl': c['releaseUrl'],
           }));
         } else if (action == 'apply') {
           await HubUpdater.stage();
