@@ -1104,9 +1104,11 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
         if n and s and cloud.serial_for_name(n) == s:
             known[n] = s
 
-    if stop_before_send or select_only:
+    if stop_before_send:
         # Windows 没有发送页: 最后的安全停靠点 = 选项页(文件已预载、未按
         # 「打印」)。再往下任何一次 confirm 都等于真派单。
+        # select_only 不在这里停: 它要继续走到「发送打印任务至」弹窗做完
+        # 选机核对再**取消**, 这样测选择器不用真派单。
         rec("stop-before-send", True, "已停在选项页, 未派单")
         result["ok"] = True
         return result
@@ -1221,6 +1223,15 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
                                    "已取消未派单"
                                    % (want_name, serial, known))
                 rec("check-target", False, result["error"])
+                return result
+            if select_only:
+                # 干跑到这里就够: 选择器已把下拉切到目标机并核对过。取消
+                # 掉弹窗 = 不派单, 但拿得到「能不能切到这台」的铁证。
+                ax.press_cancel_strict()
+                result["ok"] = True
+                result["selected"] = shown
+                rec("select-only", True,
+                    "目标「%s」已选中并核对, 按 select_only 取消未派单" % shown)
                 return result
             if not ax.press_confirm_strict():
                 result["error"] = "目标已核对(「%s」)但点不到确认键" % want_name
