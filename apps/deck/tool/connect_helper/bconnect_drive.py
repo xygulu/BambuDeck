@@ -711,7 +711,7 @@ def _ocr_rows() -> list[dict]:
         if not binp:
             return []
         r = subprocess.run([binp, shot()], capture_output=True, text=True,
-                           timeout=15)
+                           encoding="utf-8", errors="replace", timeout=15)
         out = []
         for ln in r.stdout.splitlines():
             try:

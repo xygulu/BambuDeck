@@ -841,6 +841,9 @@ _WIN_OCR_PS = (
     # WinRT 类型必须用带限定的字面量 (2026-10-29 盒子实测): 裸写
     # [Windows.Media.Ocr.OcrEngine] 会报「找不到类型」, 加
     # ,Windows.Foundation,ContentType=WindowsRuntime 才投影得动。
+    # 输出钉 UTF-8: PS 5.1 管道默认跟控制台代码页走, 中文档位名会把
+    # Python 侧 reader 线程炸掉 (GBK UnicodeDecodeError, 2026-10-29)。
+    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
     "$ErrorActionPreference='Stop';"
     "$Path='__PATH__';"
     "try{Add-Type -AssemblyName System.Runtime.WindowsRuntime}"
@@ -924,7 +927,8 @@ def _win_ocr_lines(path: str) -> list[dict] | None:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive",
              "-EncodedCommand", enc],
-            capture_output=True, text=True, timeout=40)
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=40)
         return _win_ocr_parse(r.stdout)
     except Exception as e:  # noqa: BLE001
         _log("local ocr fail:", str(e)[:80])
