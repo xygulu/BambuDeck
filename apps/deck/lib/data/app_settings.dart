@@ -47,6 +47,10 @@ class AppSettings {
     this.visionBaseUrl = 'https://open.bigmodel.cn/api/paas/v4',
     this.visionApiKey = '',
     this.visionModel = 'glm-4v-flash',
+    this.visionFallbackBaseUrl =
+        'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    this.visionFallbackApiKey = '',
+    this.visionFallbackModel = 'qwen3.8-flash',
     this.visionIntervalSec = 60,
     this.visionAutoPause = false,
     this.hubEnabled = false,
@@ -86,6 +90,14 @@ class AppSettings {
   final String visionBaseUrl;
   final String visionApiKey;
   final String visionModel;
+
+  /// 备用视觉模型 (2026-10-29): 主用 429/超时/挂掉时自动换这一条继续判读。
+  /// 默认接阿里云百炼 —— 与智谱不是同一家网关，一边出问题另一边通常还在。
+  /// [visionFallbackApiKey] 为空 = 不启用备用。
+  final String visionFallbackBaseUrl;
+  final String visionFallbackApiKey;
+  final String visionFallbackModel;
+
   final int visionIntervalSec;
 
   /// Auto-pause a print the model flagged as abnormal (suspected 炒面/空打).
@@ -124,6 +136,9 @@ class AppSettings {
     String? visionBaseUrl,
     String? visionApiKey,
     String? visionModel,
+    String? visionFallbackBaseUrl,
+    String? visionFallbackApiKey,
+    String? visionFallbackModel,
     int? visionIntervalSec,
     bool? visionAutoPause,
     bool? hubEnabled,
@@ -147,6 +162,12 @@ class AppSettings {
         visionBaseUrl: visionBaseUrl ?? this.visionBaseUrl,
         visionApiKey: visionApiKey ?? this.visionApiKey,
         visionModel: visionModel ?? this.visionModel,
+        visionFallbackBaseUrl:
+            visionFallbackBaseUrl ?? this.visionFallbackBaseUrl,
+        visionFallbackApiKey:
+            visionFallbackApiKey ?? this.visionFallbackApiKey,
+        visionFallbackModel:
+            visionFallbackModel ?? this.visionFallbackModel,
         visionIntervalSec: visionIntervalSec ?? this.visionIntervalSec,
         visionAutoPause: visionAutoPause ?? this.visionAutoPause,
         hubEnabled: hubEnabled ?? this.hubEnabled,
@@ -171,6 +192,9 @@ class AppSettings {
         'visionBaseUrl': visionBaseUrl,
         'visionApiKey': visionApiKey,
         'visionModel': visionModel,
+        'visionFallbackBaseUrl': visionFallbackBaseUrl,
+        'visionFallbackApiKey': visionFallbackApiKey,
+        'visionFallbackModel': visionFallbackModel,
         'visionIntervalSec': visionIntervalSec,
         'visionAutoPause': visionAutoPause,
         'hubEnabled': hubEnabled,
@@ -197,6 +221,11 @@ class AppSettings {
             'https://open.bigmodel.cn/api/paas/v4',
         visionApiKey: j['visionApiKey'] as String? ?? '',
         visionModel: j['visionModel'] as String? ?? 'glm-4v-flash',
+        visionFallbackBaseUrl: j['visionFallbackBaseUrl'] as String? ??
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        visionFallbackApiKey: j['visionFallbackApiKey'] as String? ?? '',
+        visionFallbackModel: j['visionFallbackModel'] as String? ??
+            'qwen3.8-flash',
         visionIntervalSec: j['visionIntervalSec'] as int? ?? 60,
         visionAutoPause: j['visionAutoPause'] as bool? ?? false,
         hubEnabled: j['hubEnabled'] as bool? ?? false,

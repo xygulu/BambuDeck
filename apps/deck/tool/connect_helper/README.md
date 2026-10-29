@@ -93,6 +93,32 @@ CLI 会自己把 Connect 置前(CGEvent 点的是最顶层窗口)。
 ——换盘本身需要一段时间,等 RUNNING 是多余阻塞。派单后立即返回、释放服务端 busy 锁,
 用户可马上再下停止/暂停等控制。
 
+## 视觉模型队列(主用 + 备用,顺序动态)
+
+`bconnect_vision.py` 的 `vision` 段可以配成**列表**,就是一个模型队列:
+
+```json
+{"vision": [
+  {"provider": "minimax",       "model": "MiniMax-M3",   "api_key": "…"},
+  {"provider": "bailian-token", "model": "qwen3.8-flash", "api_key": "…"}]}
+```
+
+- 从头往后试,**谁成功谁排到队首**,失败的沉到队尾,顺序落盘到 `models.json`
+  ——所以「今天没额度」的那家只会在别人都挂时才被再探一次。
+- 百炼的 key 分两种,配错端点一定 401:`sk-sp-` 是 Token Plan(只能打
+  `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`),
+  按量付费的 `sk-` 才打 `dashscope.aliyuncs.com`。
+- qwen3.8 默认先思考再回答,看图找坐标会白烧 token 甚至回空正文,所以百炼条目
+  会自动带 `enable_thinking: false`(MiniMax 是 `thinking.type=disabled`)。
+
+常用命令:
+
+```bash
+python bconnect_vision.py --show                       # 队列顺序 + key 打码
+python bconnect_vision.py --init --append --provider bailian-token \
+    --model qwen3.8-flash --key sk-…                   # 追加备用
+```
+
 ## 安全
 
 - 只监听 127.0.0.1;请求用 `X-Deck-Token` 校验。

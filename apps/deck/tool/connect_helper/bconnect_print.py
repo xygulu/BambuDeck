@@ -994,6 +994,22 @@ def _win_ocr_dialog_lines(shot_path: str, frame: dict | None) -> list[dict] | No
         return None  # 裁剪/放大失败不致命: 外层还有全屏 OCR 和流程位置放行
 
 
+_CHEVRON_TAIL = re.compile(r"[\s·.,:]*[vV∨⌄˄]$")
+
+
+def _win_trim_chevron(text: str) -> str:
+    """摘掉 OCR 读到的下拉框 chevron 尾巴。
+
+    2026-10-29 盒子实测: 发送弹窗下拉当前值「123」被 zh-Hans OCR 读成
+    「123 v」—— chevron 那个小三角被当成字母 v 拼在行尾。机名比对是
+    **长度敏感**的同位比对 (长度不同 = 另一台机, 防误派), 于是「123 v」
+    对「123」直接 0 分 -> 判成「认不出任何已知机器」-> 选择器几何拿不到
+    -> 退到 UIA 的过期几何 -> 裁出来的图两个字都没有 -> 选机失败。
+    只摘行尾的孤立 chevron 字符, 不动名字中间的内容。
+    """
+    return _CHEVRON_TAIL.sub("", (text or "").strip()).strip()
+
+
 def _win_lines_hit_printer(ocr, known: dict, want_name: str) -> str:
     """OCR 行里有没有哪行像一台已知的机器 -> 返回那行原文。
 
@@ -1008,7 +1024,7 @@ def _win_lines_hit_printer(ocr, known: dict, want_name: str) -> str:
         names.append(want_name)
     for l in ocr:
         for n in names:
-            if _name_score(l["name"], n) >= 0.8:
+            if _name_score(_win_trim_chevron(l["name"]), n) >= 0.8:
                 return l["name"]
     return ""
 
@@ -1315,12 +1331,12 @@ def _win_pick_printer(shot_path: str, want_name: str, known: dict,
                 for v in vlines:
                     if not v.get("w"):
                         continue
-                    scr = {"name": v["name"],
+                    vname = _win_trim_chevron(v["name"])  # 「123 v」-> 「123」
+                    scr = {"name": vname,
                            "x": int(box[0] + v["x"] / 2.5),
                            "y": int(box[1] + v["y"] / 2.5),
                            "w": int(v["w"] / 2.5), "h": int(v["h"] / 2.5)}
-                    if any(_name_score(scr["name"], n) >= 0.8
-                           for n in names):
+                    if any(_name_score(vname, n) >= 0.8 for n in names):
                         hit_line = scr
                         break
                 _log("picker value-zoom: title=(%d,%d) vlines=%s hit=%s" % (
@@ -1423,7 +1439,9 @@ def _win_pick_printer(shot_path: str, want_name: str, known: dict,
         if ocr is None:
             return None  # 引擎不可用
         # 裁剪图坐标平移回屏幕; 只留选择器下缘以下的行 (上头是弹窗标题)
-        keep = [{"name": o["name"], "x": o["x"] + rx, "y": o["y"] + ry}
+        # 选项行尾也可能带 chevron/勾标 (读成 'v'/'√'), 统一摘掉再比对
+        keep = [{"name": _win_trim_chevron(o["name"]),
+                 "x": o["x"] + rx, "y": o["y"] + ry}
                 for o in ocr if o["y"] + ry >= g["y"] + g["h"] - 4]
         _log("picker ocr[%s]: crop=%dx%d+%d+%d raw=%d keep=%d %s" % (
             tag, rw, rh, rx, ry, len(ocr), len(keep),

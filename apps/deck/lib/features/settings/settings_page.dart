@@ -37,6 +37,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final _visionBase = TextEditingController();
   late final _visionKey = TextEditingController();
   late final _visionModel = TextEditingController();
+  late final _visionFallbackBase = TextEditingController();
+  late final _visionFallbackKey = TextEditingController();
+  late final _visionFallbackModel = TextEditingController();
   late final _helperUrl = TextEditingController();
   late final _helperToken = TextEditingController();
   late final _hubPort = TextEditingController();
@@ -48,6 +51,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _visionBase.text = s.visionBaseUrl;
     _visionKey.text = s.visionApiKey;
     _visionModel.text = s.visionModel;
+    _visionFallbackBase.text = s.visionFallbackBaseUrl;
+    _visionFallbackKey.text = s.visionFallbackApiKey;
+    _visionFallbackModel.text = s.visionFallbackModel;
     _helperUrl.text = s.helperUrl;
     _helperToken.text = s.helperToken;
     _hubPort.text = '${s.hubPort}';
@@ -60,6 +66,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _visionBase.dispose();
     _visionKey.dispose();
     _visionModel.dispose();
+    _visionFallbackBase.dispose();
+    _visionFallbackKey.dispose();
+    _visionFallbackModel.dispose();
     _helperUrl.dispose();
     _helperToken.dispose();
     _hubPort.dispose();
@@ -313,6 +322,59 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ),
               ),
             ]),
+            const SizedBox(height: 8),
+            // 备用视觉模型 (2026-10-29): 主用配额用完/超时/网关挂了时自动
+            // 换这一条。默认留给阿里云百炼 —— 和智谱不是同一家，一边出事
+            // 另一边通常还在。Key 留空 = 不启用。
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: Text(
+                settings.visionFallbackApiKey.isEmpty
+                    ? '备用视觉模型（未启用）'
+                    : '备用视觉模型：${settings.visionFallbackModel}',
+                style: const TextStyle(fontSize: 13),
+              ),
+              subtitle: const Text('主用不可用时自动改用这一条，失败原因见运行日志',
+                  style: TextStyle(fontSize: 11)),
+              children: [
+                TextField(
+                  controller: _visionFallbackBase,
+                  decoration: const InputDecoration(
+                      labelText: '备用 API 地址',
+                      hintText: 'https://token-plan.cn-beijing.maas.aliyuncs.com'
+                          '/compatible-mode/v1',
+                      helperText: '百炼「Token Plan」的 key 是 sk-sp- 开头, 只能配'
+                          '这个北京端点; 按量付费的 sk- key 用 '
+                          'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                      helperMaxLines: 2),
+                  onChanged: (v) => save(
+                      settings.copyWith(visionFallbackBaseUrl: v.trim())),
+                ),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _visionFallbackKey,
+                      obscureText: true,
+                      decoration:
+                          const InputDecoration(labelText: '备用 API Key'),
+                      onChanged: (v) => save(
+                          settings.copyWith(visionFallbackApiKey: v.trim())),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: _visionFallbackModel,
+                      decoration: const InputDecoration(
+                          labelText: '备用模型', hintText: 'qwen3.8-flash'),
+                      onChanged: (v) => save(
+                          settings.copyWith(visionFallbackModel: v.trim())),
+                    ),
+                  ),
+                ]),
+              ],
+            ),
             const SizedBox(height: 8),
             Row(children: [
               const Text('判读间隔',
@@ -685,13 +747,8 @@ Future<String> testVisionNow(WidgetRef ref, AppSettings settings) async {
         preferMounted: false,
         timeout: const Duration(seconds: 10));
     if (png == null) continue;
-    final client = VisionLlmClient(
-      baseUrl: settings.visionBaseUrl,
-      apiKey: settings.visionApiKey,
-      model: settings.visionModel,
-      log: LogBuffer.instance.add,
-    );
-    final reply = await client.analyzeFrame(png);
+    final chain = VisionChain.fromSettings(settings, log: LogBuffer.instance.add);
+    final reply = await chain.analyzeFrame(png);
     final verdict = reply == null ? null : parseVisionVerdict(reply);
     if (verdict == null) {
       return '❌ 判读失败(检查 API 地址 / Key / 模型,详情见运行日志)';

@@ -118,7 +118,9 @@ class VisionGuard {
   bool _printing(BambuState s) => s.gcodeState == GcodeState.running;
 
   Future<void> _tick() async {
-    final enabled = settings.visionEnabled && settings.visionApiKey.isNotEmpty;
+    // 只配了备用也算可用 —— 主用空了不该连带把备用一起禁掉。
+    final enabled = settings.visionEnabled &&
+        VisionChain.fromSettings(settings).isConfigured;
     if (!enabled) return;
     final interval = Duration(seconds: settings.visionIntervalSec);
     for (final entry in _states.entries) {
@@ -196,13 +198,7 @@ class VisionGuard {
     if (override != null) {
       verdict = await override(png, s);
     } else {
-      final client = VisionLlmClient(
-        baseUrl: s.visionBaseUrl,
-        apiKey: s.visionApiKey,
-        model: s.visionModel,
-        log: log,
-      );
-      reply = await client.analyzeFrame(png);
+      reply = await VisionChain.fromSettings(s, log: log).analyzeFrame(png);
       verdict = reply == null ? null : parseVisionVerdict(reply);
     }
     if (verdict == null) {

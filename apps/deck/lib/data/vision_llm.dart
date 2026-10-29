@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'app_settings.dart';
+
 /// What the vision model decided about one frame. Field names mirror the
 /// strict JSON the prompt demands, so [parseVisionVerdict] is a thin,
 /// lenient decode.
@@ -114,6 +116,117 @@ const visionPrompt =
 ///   Code ecosystem uses - e.g. MiniMax's `https://api.minimaxi.com/anthropic`
 ///   (M2/M3). A URL whose path contains `anthropic` takes this branch;
 ///   posting /chat/completions there answers 404 (实测 2026-10-24).
+/// 模型队列的动态顺序（2026-10-29）。
+///
+/// 刚刚可用的排最前，刚刚失败的沉到最后：一次 429 或一把过期的 key 之后，
+/// 下一次判读直接先问能用的那家，不用每次都先白等一轮超时。
+/// 进程内记忆即可 —— 重启后从设置里的顺序重新开始。
+class VisionRotation {
+  VisionRotation._();
+
+  static final List<String> _ids = <String>[];
+
+  static String idOf(VisionLlmClient c) => '${c.baseUrl}|${c.model}';
+
+  /// 成功 = 升到队首。
+  static void success(VisionLlmClient c) {
+    final id = idOf(c);
+    _ids.remove(id);
+    _ids.insert(0, id);
+  }
+
+  /// 失败 = 沉到队尾（下次轮到它时再探活）。
+  static void failure(VisionLlmClient c) {
+    final id = idOf(c);
+    _ids.remove(id);
+    _ids.add(id);
+  }
+
+  /// 没见过的模型排在已知模型后面，保持设置里的原始先后。
+  static int rank(VisionLlmClient c) {
+    final i = _ids.indexOf(idOf(c));
+    return i < 0 ? 1 << 20 : i;
+  }
+
+  /// 测试用。
+  static void reset() => _ids.clear();
+}
+
+/// Primary + backup, tried in queue order (2026-10-29).
+///
+/// 一次 429 或一把过期的 key 不该让整台打印机的视觉巡检停摆：主用没回
+/// 就换备用再问一遍，只有全部失败才算这一帧判读不可用。
+class VisionChain {
+  VisionChain(this.clients, {this.log});
+
+  final List<VisionLlmClient> clients;
+  final void Function(String line)? log;
+
+  /// Primary always; backup only when it has both a key and a model. Same
+  /// endpoint as the primary is dropped - retrying the same broken thing
+  /// just doubles the wait.
+  factory VisionChain.fromSettings(AppSettings s,
+      {void Function(String line)? log}) {
+    final primary = VisionLlmClient(
+      baseUrl: s.visionBaseUrl,
+      apiKey: s.visionApiKey,
+      model: s.visionModel,
+      log: log,
+    );
+    final clients = <VisionLlmClient>[primary];
+    final backupReady = s.visionFallbackApiKey.isNotEmpty &&
+        s.visionFallbackModel.isNotEmpty;
+    final sameAsPrimary = s.visionFallbackBaseUrl == s.visionBaseUrl &&
+        s.visionFallbackApiKey == s.visionApiKey &&
+        s.visionFallbackModel == s.visionModel;
+    if (backupReady && !sameAsPrimary) {
+      clients.add(VisionLlmClient(
+        baseUrl: s.visionFallbackBaseUrl,
+        apiKey: s.visionFallbackApiKey,
+        model: s.visionFallbackModel,
+        log: log,
+      ));
+    }
+    return VisionChain(clients, log: log);
+  }
+
+  /// True when at least one model is configured to answer.
+  bool get isConfigured =>
+      clients.any((c) => c.apiKey.isNotEmpty && c.model.isNotEmpty);
+
+  Future<String?> analyzeFrame(Uint8List image,
+      {String mimeType = 'image/png'}) async {
+    final queue = _queue();
+    for (var i = 0; i < queue.length; i++) {
+      final client = queue[i];
+      final reply = await client.analyzeFrame(image, mimeType: mimeType);
+      if (reply != null) {
+        VisionRotation.success(client);
+        return reply;
+      }
+      VisionRotation.failure(client);
+      if (i + 1 < queue.length) {
+        log?.call('[vision] ${client.model} 没有回复，改用队列里的 '
+            '${queue[i + 1].model}');
+      }
+    }
+    return null;
+  }
+
+  /// 按动态排序取一份队列快照：刚成功的在前，刚失败的在后，
+  /// 其余保持设置里的先后。
+  List<VisionLlmClient> _queue() {
+    final indexed = <(int, int, VisionLlmClient)>[
+      for (var i = 0; i < clients.length; i++)
+        (VisionRotation.rank(clients[i]), i, clients[i]),
+    ]..sort((a, b) {
+        final byRank = a.$1.compareTo(b.$1);
+        return byRank != 0 ? byRank : a.$2.compareTo(b.$2);
+      });
+    return [for (final e in indexed) e.$3];
+  }
+}
+
 class VisionLlmClient {
   VisionLlmClient({
     required this.baseUrl,
@@ -241,6 +354,10 @@ class VisionLlmClient {
           ],
         },
       ],
+      // qwen3.8 这类推理模型会先把 max_tokens 烧在思考上、正文回空，
+      // 判读就变成「请求失败」。百炼/通义用顶层 enable_thinking 关掉思考
+      // （2026-10-29 实测 token-plan 端点有效）。
+      if (model.toLowerCase().startsWith('qwen3')) 'enable_thinking': false,
       // A short cap keeps verdict latency snappy; the JSON verdict is tiny.
       'max_tokens': 300,
       'temperature': 0.1,
