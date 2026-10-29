@@ -24,6 +24,7 @@ import 'data/settings_providers.dart';
 import 'data/vision_guard.dart';
 import 'data/providers.dart';
 import 'features/home/home_page.dart';
+import 'features/settings/update_reminder.dart';
 
 /// flutter_secure_storage backed adapter (Keychain / Credential Manager /
 /// Keystore depending on platform).
@@ -95,6 +96,9 @@ Future<void> main() async {
     // Notifications are best-effort; the app must run without them.
     debugPrint('notification init failed: $e');
   }
+
+  // 版本更新提醒: 检查全自动 (启动后 8s + 每 12h), 有新版弹窗由人决定装不装。
+  UpdateReminder.start();
 
   runApp(ProviderScope(
     overrides: [
@@ -419,6 +423,7 @@ class _DeckAppState extends ConsumerState<DeckApp> {
     return MaterialApp(
       title: 'BambuDeck',
       debugShowCheckedModeBanner: false,
+      navigatorKey: deckNavKey,
       theme: buildDeckTheme(),
       home: const HomePage(),
     );

@@ -99,6 +99,21 @@
     border-bottom: 1px solid var(--border); font-size: 13px;
   }
   .svc-row:last-child { border-bottom: 0; }
+  /* 版本更新常驻条 (2026-10-30): 自动检查发现新版时出现在页头下沿 */
+  .updbanner {
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px max(14px, env(safe-area-inset-left));
+    background: rgba(245, 158, 11, .12); color: var(--text);
+    border-bottom: 1px solid rgba(245, 158, 11, .35);
+    font-size: 13px;
+  }
+  .updbanner.hidden { display: none; }
+  .updbanner button {
+    border: 1px solid var(--border); background: transparent; color: var(--text);
+    border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer;
+  }
+  .updbanner button:hover { background: rgba(255, 255, 255, .08); }
+  .updbanner .x { border: 0; padding: 3px 6px; color: var(--text2); }
   .svc-row i { width: 8px; height: 8px; border-radius: 50%; background: var(--text2); flex: none; }
   .svc-row.ok i { background: var(--running); }
   .svc-row.bad i { background: var(--error); }
@@ -849,6 +864,12 @@
   </button>
   <span id="clock"></span>
 </header>
+
+<div id="updbanner" class="updbanner hidden">
+  <span id="upd-txt">发现新版本</span>
+  <button id="upd-go" type="button">查看更新</button>
+  <button id="upd-x" type="button" class="x" aria-label="本次不再提示">×</button>
+</div>
 
 <main>
   <section id="s-printers">
@@ -2471,6 +2492,12 @@ function apply(data) {
     syncWalls();
     syncCameras();
   }
+  // 服务端自动检查的版本结论 (2026-10-30): 有新版就常驻提示
+  if (data.update) {
+    updAuto = data.update;
+    syncUpdBanner(data.update);
+    if (svcModalOpen) renderSvcModal();
+  }
   renderAll();
   renderCameras(lastCameras);
   // 翻转/旋转/静音/码流/云台状态每秒都可能变, 但只改现有 DOM —— 重画
@@ -2676,13 +2703,27 @@ function renderSvcModal() {
 }
 
 // ---- 自更新 (2026-10-29): Windows 部署包可原地换装, 其它平台只给下载页。
-let updData = null;
+let updData = null;      // 手动「检查更新」的结果, 优先于自动检查
+let updAuto = null;      // 服务端后台自动检查 (随 /ws 快照来)
+let updDismissed = '';   // 本次会话里点 × 关掉的新版本号
+function syncUpdBanner(u) {
+  const el = document.getElementById('updbanner');
+  if (!el) return;
+  if (u.hasUpdate !== true || updDismissed === u.latest) {
+    el.classList.add('hidden');
+    return;
+  }
+  $('upd-txt').textContent = '发现新版本 v' + u.latest +
+    (u.current ? ' (当前 v' + u.current + ')' : '');
+  el.classList.remove('hidden');
+}
 function updRow() {
   const v = (svcData && svcData.version) || '';
   const plat = (svcData && svcData.platform) || '';
   const canApply = plat === 'windows';
-  const latest = updData ? updData.latest : '';
-  const has = updData && updData.hasUpdate;
+  const au = updData || updAuto;
+  const latest = au ? au.latest : '';
+  const has = au && au.hasUpdate;
   const err = updData && updData.error;
   const checking = updData && updData.checking;
   const line = checking
@@ -2697,7 +2738,7 @@ function updRow() {
     ? `<div class="svc-row warn"><i></i><span class="k">新版本</span>` +
       `<span class="v">${esc(latest)} 可更新</span></div>`
     : `<div class="svc-row"><i></i><span class="k">版本</span>` +
-      `<span class="v">${esc(v)}${updData ? ' · 已是最新' : ''}</span></div>`;
+      `<span class="v">${esc(v)}${au ? ' · 已是最新' : ''}</span></div>`;
   // canApply 必须管住按钮本身: Mac hub 点「立即更新」只会弹「只支持 Windows」(2026-10-29)
   const rel = (updData && updData.releaseUrl)
     || 'https://github.com/xygulu/BambuDeck/releases/latest';
@@ -2754,6 +2795,17 @@ async function applyUpdate() {
   }
 }
 $('svc').addEventListener('click', openSvcModal);
+(function () {
+  const go = $('upd-go'), x = $('upd-x');
+  if (!go || !x) return;
+  go.addEventListener('click', openSvcModal);
+  x.addEventListener('click', () => {
+    const au = updData || updAuto;
+    if (au && au.latest) updDismissed = au.latest;
+    const el = document.getElementById('updbanner');
+    if (el) el.classList.add('hidden');
+  });
+})();
 setInterval(refreshSvc, 30000);
 /* iPhone 壳 (DeckShell) 会注入 deckServer 消息桥。只有桥在的时候才露出
    齿轮 —— 浏览器和 Mac App 没有这个桥, 改服务器地址走 App 自己的设置。 */

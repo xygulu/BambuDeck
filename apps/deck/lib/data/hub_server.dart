@@ -711,11 +711,14 @@ class HubServer {
     _heartbeat ??= Timer.periodic(const Duration(seconds: 10), (_) {
       if (_clients.isNotEmpty) _broadcast();
     });
+    _startUpdateLoop();
   }
 
   Future<void> stop() async {
     _heartbeat?.cancel();
     _heartbeat = null;
+    _updateTimer?.cancel();
+    _updateTimer = null;
     final srv = _server;
     _server = null;
     for (final r in _relays.values) {
@@ -903,6 +906,29 @@ class HubServer {
   //                             以 42 退出, 守护循环 apply-update.ps1 换装。
   //                             其它平台 apply 直接拒绝 (fail-closed)。
   bool _exiting = false;
+
+  // -- 自动检查 (2026-10-30): 启动后 45s 查一次, 之后每 6h; GitHub 被断是
+  // 常态时段, 失败静默等下一轮。结果进 _snapshot() 推给页面常驻提示,
+  // 换装本身仍要点「立即更新」—— 检查自动、安装人工确认。
+  Timer? _updateTimer;
+  Map<String, dynamic>? _updateInfo;
+
+  void _startUpdateLoop() {
+    _updateTimer?.cancel();
+    _updateTimer = Timer(const Duration(seconds: 45), _autoCheckUpdate);
+  }
+
+  Future<void> _autoCheckUpdate() async {
+    try {
+      final c = await HubUpdater.check(force: true);
+      final changed = _updateInfo == null ||
+          _updateInfo!['latest'] != c['latest'] ||
+          _updateInfo!['hasUpdate'] != c['hasUpdate'];
+      _updateInfo = c;
+      if (changed && _clients.isNotEmpty) _broadcast();
+    } catch (_) {}
+    _updateTimer = Timer(const Duration(hours: 6), _autoCheckUpdate);
+  }
 
   Future<void> _handleUpdate(HttpRequest req) async {
     req.response.headers.contentType = ContentType.json;
@@ -1452,6 +1478,14 @@ class HubServer {
               'suspended': a.suspended,
             },
         ],
+        // 自动检查的最新版结论 (没有就是还没查到过): 页面据此常驻提示
+        if (_updateInfo != null)
+          'update': {
+            'current': _updateInfo!['current'],
+            'latest': _updateInfo!['latest'],
+            'hasUpdate': _updateInfo!['hasUpdate'],
+            'checkedAt': _updateInfo!['checkedAt'],
+          },
       };
 
   Map<String, dynamic> _printerJson(PrinterProfile p) {

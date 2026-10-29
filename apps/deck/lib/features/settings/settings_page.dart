@@ -19,6 +19,7 @@ import '../../data/settings_providers.dart';
 import '../../data/vision_guard.dart';
 import '../../data/vision_llm.dart';
 import 'app_update.dart';
+import 'update_reminder.dart';
 
 /// Settings center (PRD FR-10, MVP slice): notification switches, run log,
 /// config backup via clipboard, about. Theme/accent/i18n land with M5.
@@ -191,63 +192,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             content: Text('已是最新版本 ${info['current'] ?? deckVersion}')));
         return;
       }
-      await _showUpdateDialog(context, info);
+      await showUpdateDialog(context, info);
     } catch (e) {
       if (!context.mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
       messenger.showSnackBar(SnackBar(content: Text('检查更新失败: $e')));
     }
-  }
-
-  Future<void> _showUpdateDialog(
-      BuildContext context, Map<String, dynamic> info) async {
-    final notes = (info['notes'] ?? '').toString().trim();
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('发现新版本 ${info['latest']}'),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('当前版本 ${info['current'] ?? deckVersion}'),
-              if (notes.isNotEmpty) ...[
-                const SizedBox(height: 10),
-                Text(notes, style: const TextStyle(fontSize: 12)),
-              ],
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('稍后'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              final apk = (info['apkUrl'] ?? '').toString();
-              final messenger = ScaffoldMessenger.of(context);
-              Navigator.of(ctx).pop();
-              if (apk.isEmpty) {
-                await AppUpdate.openRelease(
-                    (info['releaseUrl'] ?? '').toString());
-                return;
-              }
-              messenger.showSnackBar(
-                  const SnackBar(content: Text('正在下载新版本…')));
-              try {
-                await AppUpdate.downloadAndInstall(apk);
-              } catch (e) {
-                messenger.showSnackBar(
-                    SnackBar(content: Text('安装未完成: $e')));
-              }
-            },
-            child: const Text('下载并安装'),
-          ),
-        ],
-      ),
-    );
   }
 
   Widget _sectionLabel(String text) => Padding(
