@@ -975,7 +975,7 @@ def _win_pick_printer(shot_path: str, want_name: str, known: dict,
     cx, cy = int(chev[0]), int(chev[1])
 
     tried = set()
-    for _round in range(2):
+    for _round in range(3):
         # 展开下拉 → 截图 → 视觉读选项(名字+坐标)
         if not ax.press_at(cx, cy):
             return False, "点不下拉箭头"
@@ -1006,7 +1006,10 @@ def _win_pick_printer(shot_path: str, want_name: str, known: dict,
             shown = _win_target_shown(ax.texts(), want_name, known, serial)
             if shown:
                 return True, "已选中「%s」(下拉框当前值已核对)" % shown
-        # 都没中: 再来一轮 (展开状态可能已经变了)
+            # 没选中: 弹窗收起后旧坐标失效, 重新展开再点下一个候选
+            if not ax.press_at(cx, cy):
+                break
+            time.sleep(1.0)
     return False, "候选都点过仍没选中「%s」(试过: %s)" % (
         want_name, ",".join(sorted(tried)))
 

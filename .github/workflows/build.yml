@@ -55,13 +55,22 @@ jobs:
           cache: true
       - run: flutter pub get
         working-directory: apps/deck
-      - run: flutter build macos --release --dart-define=DECK_VERSION=${{ env.VERSION }}
+      # CI runner 没有 Apple 开发者证书, 签不了名 (Xcode 找不到 dev.bambudeck.deck
+      # 的 provisioning profile)。CI 产物一律 --no-codesign: 本地签名构建
+      # 不受影响; 下载来的 .app 首次打开需右键「打开」(未签名应用)。
+      - run: flutter build macos --release --no-codesign --dart-define=DECK_VERSION=${{ env.VERSION }}
         working-directory: apps/deck
       - name: Collect app bundle
         run: |
+          set -e
+          APP='apps/deck/build/macos/Build/Products/Release/BambuDeck.app'
+          # --no-codesign 的产物在 Keychain 前会挂 (flutter_secure_storage 存
+          # 打印机凭据), ad-hoc 签一下就正常了: 非沙箱签名 -> 默认 keychain
+          # 组可用。签不上也不阻断 (只是 Keychain 持久化失效, 重新登录即可)。
+          codesign --force --deep --sign - "$APP" || \
+            echo "note: ad-hoc signing failed, app still launches (keychain persistence off)"
           mkdir -p dist
-          ditto -c -k --sequesterRsrc --keepParent \
-            apps/deck/build/macos/Build/Products/Release/BambuDeck.app dist/deck-macos.zip
+          ditto -c -k --sequesterRsrc --keepParent "$APP" dist/deck-macos.zip
       - uses: actions/upload-artifact@v4
         with:
           name: deck-macos
@@ -129,39 +138,11 @@ jobs:
           Copy-Item tool/connect_helper/bconnect_*.py "$d/helper/"
           Copy-Item tool/connect_helper/requirements-windows.txt "$d/helper/"
         working-directory: apps/deck
-      # Connect helper 的 Python 运行时 (Windows 嵌入版 + 依赖):
-      # 官方 embeddable zip + 预编译 wheel。wheel 就是 zip, 直接解压进
-      # site-packages —— 不用 pip, 也不执行任何外部安装脚本。
-      - name: Bundle helper Python runtime
-        shell: pwsh
-        run: |
-          $d = 'deploy/deck-hub-windows'
-          $sp = "$d/runtime/python/Lib/site-packages"
-          $zip = "$env:RUNNER_TEMP/python.zip"
-          Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip' -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath "$d/runtime/python" -Force
-          # embeddable 默认禁 site-packages -> 依赖装不进去, 打开它
-          $pth = Get-ChildItem "$d/runtime/python" -Filter 'python*._pth' | Select-Object -First 1
-          if ($pth) {
-            $lines = @(Get-Content $pth.FullName)
-            $lines = $lines | ForEach-Object { if ($_ -eq '#import site') { 'import site' } else { $_ } }
-            if (-not ($lines -contains 'import site')) { $lines += 'import site' }
-            if (-not ($lines -contains 'Lib\site-packages')) { $lines += 'Lib\site-packages' }
-            Set-Content -Path $pth.FullName -Value $lines -Encoding ASCII
-          }
-          New-Item -ItemType Directory -Force -Path $sp | Out-Null
-          # 用 runner 自带的 python 只做「下载」: wheel 是二进制包, 不执行
-          python -m pip download --only-binary=:all: --platform win_amd64 `
-            --implementation cp --python-version 3.12 --abi cp312 `
-            -r "$d/helper/requirements-windows.txt" -d "$env:RUNNER_TEMP/wheels"
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          Get-ChildItem "$env:RUNNER_TEMP/wheels/*.whl" | ForEach-Object {
-            [System.IO.Compression.ZipFile]::ExtractToDirectory($_.FullName, $sp)
-          }
-          # .dist-info 里 RECORD 会写绝对路径, 删掉免得 python 报噪声
-          Get-ChildItem $sp -Recurse -Filter RECORD | Remove-Item -Force
-          & "$d/runtime/python/python.exe" -c "import pywinauto, paho.mqtt.client, requests, PIL; print('helper runtime ok')"
-        working-directory: apps/deck
+      # Connect helper 的 Python 运行时: **不在 CI 里打包**。
+      # 运行时(嵌入式 Python + pywinauto/paho 等依赖)是目标机的一次性准备,
+      # 由运维侧提供 (复制已装好的 runtime\python 目录, 或按
+      # helper/requirements-windows.txt 自行安装)。CI 只带源码 + 依赖清单 +
+      # 看护脚本, 避免在 CI 里执行任何下载来的包代码。
       - name: Zip hub deploy package
         shell: pwsh
         run: |

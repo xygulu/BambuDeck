@@ -30,6 +30,9 @@ class AppUpdate {
     req.headers.set('Accept', 'application/vnd.github+json');
     final res = await req.close().timeout(const Duration(seconds: 20));
     final body = await res.transform(utf8.decoder).join();
+    if (res.statusCode == 404) {
+      throw '仓库还没有发布过版本';
+    }
     if (res.statusCode != 200) {
       throw '检查失败: HTTP ${res.statusCode}';
     }
