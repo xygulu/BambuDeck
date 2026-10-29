@@ -27,8 +27,39 @@ class HubUpdater {
       'https://api.github.com/repos/$repo/releases/latest';
   static const _ua = 'BambuDeck-hub';
 
+  /// 2026-10-29 盒子+Mac 实测: GitHub 被断时 TLS 握手挂 5-20s+, 20s 超时
+  /// 叠加清单二次拉取能把一个「检查更新」拖到 40s+, 隧道侧直接 524。
+  /// 8s 快速失败 + 重定向兜底。
+  static const _timeout = Duration(seconds: 8);
+
   static final HttpClient _http = HttpClient()
     ..userAgent = _ua;
+
+  /// GET 一个 URL, 非 200 抛错; [noRedirect] 时 30x 也原样返回。
+  static Future<(int, String, String)> _get(String url,
+      {bool noRedirect = false}) async {
+    final req = await _http.openUrl('GET', Uri.parse(url));
+    if (noRedirect) req.followRedirects = false;
+    final res = await req.close().timeout(_timeout);
+    final body = await res.transform(utf8.decoder).join();
+    return (res.statusCode, body, res.headers.value('location') ?? '');
+  }
+
+  /// api.github.com 不可达时的兜底: `github.com/<repo>/releases/latest`
+  /// 会 302 到 `/releases/tag/<tag>`, Location 末段就是最新 tag —— 不用
+  /// JSON, 且 github.com 与 api.github.com 被断的时段经常错开。失败返回 ''。
+  static Future<String> _latestTagViaRedirect() async {
+    try {
+      final (code, _, loc) = await _get(
+          'https://github.com/$repo/releases/latest',
+          noRedirect: true);
+      if (code >= 300 && code < 400) {
+        final m = RegExp(r'/releases/tag/([^/?#]+)$').firstMatch(loc);
+        return m?[1] ?? '';
+      }
+    } catch (_) {}
+    return '';
+  }
 
   /// 最近一次检查结果缓存 (重复点按钮不打爆 API; 匿名限额 60 次/小时/IP)。
   static Map<String, dynamic>? _last;
@@ -46,13 +77,27 @@ class HubUpdater {
     }
     final req = await _http.getUrl(Uri.parse(_apiLatest));
     req.headers.set('Accept', 'application/vnd.github+json');
-    final res = await req.close().timeout(const Duration(seconds: 20));
-    final body = await res.transform(utf8.decoder).join();
-    if (res.statusCode != 200) {
-      throw 'GitHub API ${res.statusCode}: ${body.substring(0, body.length.clamp(0, 200))}';
+    String body;
+    String tag;
+    try {
+      final res = await req.close().timeout(_timeout);
+      body = await res.transform(utf8.decoder).join();
+      if (res.statusCode != 200) {
+        throw 'GitHub API ${res.statusCode}: ${body.substring(0, body.length.clamp(0, 200))}';
+      }
+      final rel = jsonDecode(body) as Map<String, dynamic>;
+      tag = (rel['tag_name'] as String?)?.trim() ?? '';
+    } catch (e) {
+      // api 不通 -> 302 兜底 (只拿得到 tag, notes/资产清单降级为空)
+      tag = await _latestTagViaRedirect();
+      if (tag.isEmpty) {
+        throw 'GitHub API 不可达: $e';
+      }
+      body = '';
     }
-    final rel = jsonDecode(body) as Map<String, dynamic>;
-    final tag = (rel['tag_name'] as String?)?.trim() ?? '';
+    final rel = body.isEmpty
+        ? <String, dynamic>{}
+        : jsonDecode(body) as Map<String, dynamic>;
     final assets = (rel['assets'] as List? ?? const []).cast<Map>();
     String? manifestUrl(String name) {
       for (final a in assets) {
@@ -62,18 +107,25 @@ class HubUpdater {
     }
 
     // 清单优先 (有 sha256); 没有就直接用 tag 比较, 但 apply 必须有清单。
+    // 清单是 github.com 的 release 资产 (被墙重灾区), 直连失败按
+    // GhMirror 的镜像顺序重试 (内容真伪由 sha256 把关, 镜像不参与信任)。
+    Future<Map<String, dynamic>?> fetchManifest(String url) async {
+      for (final u in GhMirror.candidates(url)) {
+        try {
+          final (code, body, _) = await _get(u);
+          if (code == 200) {
+            return jsonDecode(body) as Map<String, dynamic>;
+          }
+        } catch (_) {}
+      }
+      return null;
+    }
+
     Map<String, dynamic>? manifest;
     final mUrl = manifestUrl('version.json');
     if (mUrl != null) {
-      try {
-        final mreq = await _http.getUrl(Uri.parse(mUrl));
-        final mres = await mreq.close().timeout(const Duration(seconds: 20));
-        manifest =
-            jsonDecode(await mres.transform(utf8.decoder).join())
-                as Map<String, dynamic>;
-      } catch (_) {
-        manifest = null; // 清单拉不到: 检查降级, apply 拒绝
-      }
+      // 清单拉不到: 检查降级, apply 拒绝 (fail-closed)
+      manifest = await fetchManifest(mUrl);
     }
     final latest = (manifest?['version'] as String?) ??
         tag.replaceFirst(RegExp(r'^[vV]'), '');
@@ -181,19 +233,27 @@ class HubUpdater {
 
   static Future<Map<String, dynamic>?> _manifest() async {
     // check() 不回传 manifest 全文, 这里直接从 Release 资产再取一次
-    // (清单很小; 5 分钟的检查缓存不影响这条路径)。
-    final req = await _http.getUrl(Uri.parse(_apiLatest));
-    req.headers.set('Accept', 'application/vnd.github+json');
-    final res = await req.close().timeout(const Duration(seconds: 20));
-    final rel = jsonDecode(await res.transform(utf8.decoder).join())
-        as Map<String, dynamic>;
+    // (清单很小; 5 分钟的检查缓存不影响这条路径)。api 不通时用 302
+    // 兜底拿 tag 再走镜像试清单 —— apply 本来就要求清单, 拿不到就拒绝。
+    Map<String, dynamic>? rel;
+    try {
+      final (code, body, _) = await _get(_apiLatest);
+      if (code == 200) {
+        rel = jsonDecode(body) as Map<String, dynamic>;
+      }
+    } catch (_) {}
+    if (rel == null) return null;
     for (final a in (rel['assets'] as List? ?? const []).cast<Map>()) {
       if (a['name'] == 'version.json') {
-        final mreq = await _http.getUrl(
-            Uri.parse(a['browser_download_url'] as String));
-        final mres = await mreq.close().timeout(const Duration(seconds: 20));
-        return jsonDecode(await mres.transform(utf8.decoder).join())
-            as Map<String, dynamic>;
+        final url = a['browser_download_url'] as String;
+        for (final u in GhMirror.candidates(url)) {
+          try {
+            final (code, body, _) = await _get(u);
+            if (code == 200) {
+              return jsonDecode(body) as Map<String, dynamic>;
+            }
+          } catch (_) {}
+        }
       }
     }
     return null;

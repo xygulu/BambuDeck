@@ -801,12 +801,25 @@ class HubServer {
           } else if (am != null) {
             await _serveAudio(req, am.group(1)!);
           } else {
+            // 404 必须带 JSON body: 网页端 fetch().json() 解析空 body 会抛
+            // SyntaxError (2026-10-29 iOS 反馈; 旧二进制没有 /api/update
+            // 路由时就走到了这), 报「HTTP 404」才是人话。
             req.response.statusCode = HttpStatus.notFound;
+            req.response.headers.contentType = ContentType.json;
+            req.response.write(jsonEncode(
+                {'ok': false, 'error': '接口不存在: $path'}));
             await req.response.close();
           }
       }
     } catch (e) {
       _log('[网页] $path 处理异常: $e');
+      try {
+        // 响应还没写过就补一个 JSON 500 (写过会 throw, 忽略即可);
+        // 空 body = 网页端 json() 的 SyntaxError。
+        req.response.statusCode = HttpStatus.internalServerError;
+        req.response.headers.contentType = ContentType.json;
+        req.response.write(jsonEncode({'ok': false, 'error': '$e'}));
+      } catch (_) {}
       try {
         await req.response.close();
       } catch (_) {}

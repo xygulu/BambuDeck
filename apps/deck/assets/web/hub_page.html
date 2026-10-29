@@ -2683,7 +2683,17 @@ function updRow() {
   const canApply = plat === 'windows';
   const latest = updData ? updData.latest : '';
   const has = updData && updData.hasUpdate;
-  const line = has
+  const err = updData && updData.error;
+  const checking = updData && updData.checking;
+  const line = checking
+    ? `<div class="svc-row"><i></i><span class="k">版本</span>` +
+      `<span class="v">${esc(v)} · 正在检查更新…</span></div>`
+    : err && !has
+    ? `<div class="svc-row warn"><i></i><span class="k">检查失败</span>` +
+      `<span class="v">${esc(err)}</span></div>` +
+      `<div class="svc-row"><i></i><span class="k">版本</span>` +
+      `<span class="v">${esc(v)}</span></div>`
+    : has
     ? `<div class="svc-row warn"><i></i><span class="k">新版本</span>` +
       `<span class="v">${esc(latest)} 可更新</span></div>`
     : `<div class="svc-row"><i></i><span class="k">版本</span>` +
@@ -2696,29 +2706,40 @@ function updRow() {
     : '<div class="svc-checked">当前平台不支持自动换装, 检查更新会给出下载页</div>';
   return line + `<div class="svc-checked">${btn}</div>` + note;
 }
-async function checkUpdate() {
+// fetch + JSON 解析容错: 401/404/524 的纯文本或 HTML body 交给
+// JSON.parse 会抛 SyntaxError (2026-10-29 iOS 反馈), 这里统一换成
+// 带 HTTP 状态码的人话错误。
+async function fetchJson(u, opt) {
+  const r = await fetch(u, opt);
+  const t = await r.text();
   try {
-    const r = await fetch(api('/api/update'), {
+    return JSON.parse(t);
+  } catch (_) {
+    throw new Error('HTTP ' + r.status + ' (非 JSON 响应)');
+  }
+}
+async function checkUpdate() {
+  updData = { checking: true };
+  renderSvcModal();
+  try {
+    updData = await fetchJson(api('/api/update'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'check' }),
     });
-    const j = await r.json();
-    updData = j;
-    renderSvcModal();
   } catch (e) {
-    alert('检查更新失败: ' + e);
+    updData = { ok: false, error: '检查更新失败: ' + e.message };
   }
+  renderSvcModal();
 }
 async function applyUpdate() {
   if (!confirm('下载并换装新版本? 服务会重启几秒。')) return;
   try {
-    const r = await fetch(api('/api/update'), {
+    const j = await fetchJson(api('/api/update'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'apply' }),
     });
-    const j = await r.json();
     if (!j.ok) { alert('更新失败: ' + (j.error || '未知错误')); return; }
     $('modal-body').innerHTML =
       '<div class="svc-checked">已下载新版本, 服务正在重启换装… 稍后刷新页面。</div>';
