@@ -55,22 +55,41 @@ jobs:
           cache: true
       - run: flutter pub get
         working-directory: apps/deck
-      # CI runner 没有 Apple 开发者证书, 签不了名 (Xcode 找不到 dev.bambudeck.deck
-      # 的 provisioning profile)。CI 产物一律 --no-codesign: 本地签名构建
-      # 不受影响; 下载来的 .app 首次打开需右键「打开」(未签名应用)。
-      - run: flutter build macos --release --no-codesign --dart-define=DECK_VERSION=${{ env.VERSION }}
+      # CI runner 没有 Apple 开发者证书。项目 Release 配置写死了
+      # CODE_SIGN_IDENTITY = "Apple Development" + 开发团队, 直接编译会在签名
+      # 这一步失败; 而 `flutter build macos` 没有 --no-codesign 参数 (那是
+      # `flutter build ipa/ios` 的)。
+      # 所以分两步: flutter 只生成工程配置 (--config-only), 再由 xcodebuild
+      # 用 CODE_SIGNING_ALLOWED=NO 编出未签名产物, 最后 ad-hoc 签一下。
+      - run: flutter build macos --release --config-only --dart-define=DECK_VERSION=${{ env.VERSION }}
         working-directory: apps/deck
-      - name: Collect app bundle
+      - name: Build unsigned app bundle
+        working-directory: apps/deck
         run: |
           set -e
-          APP='apps/deck/build/macos/Build/Products/Release/BambuDeck.app'
-          # --no-codesign 的产物在 Keychain 前会挂 (flutter_secure_storage 存
-          # 打印机凭据), ad-hoc 签一下就正常了: 非沙箱签名 -> 默认 keychain
-          # 组可用。签不上也不阻断 (只是 Keychain 持久化失效, 重新登录即可)。
+          DD="$GITHUB_WORKSPACE/apps/deck/build/macos"
+          cd macos
+          xcodebuild -workspace Runner.xcworkspace -configuration Release -scheme Runner \
+            -derivedDataPath "$DD" \
+            -destination 'platform=macOS' \
+            OBJROOT="$DD/Build/Intermediates.noindex" \
+            SYMROOT="$DD/Build/Products" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            -quiet build
+      - name: Ad-hoc sign and zip
+        working-directory: apps/deck
+        run: |
+          set -e
+          # 产物名就是 target 名 (deck.app), 不是显示名 BambuDeck —— 用通配取,
+          # 将来改名也不会挂。
+          APP=$(ls -d build/macos/Build/Products/Release/*.app | head -1)
+          # 未签名的产物在 Keychain 前会挂 (flutter_secure_storage 存打印机
+          # 凭据), ad-hoc 签一下就正常了: 非沙箱签名 -> 默认 keychain 组可用。
           codesign --force --deep --sign - "$APP" || \
             echo "note: ad-hoc signing failed, app still launches (keychain persistence off)"
-          mkdir -p dist
-          ditto -c -k --sequesterRsrc --keepParent "$APP" dist/deck-macos.zip
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$GITHUB_WORKSPACE/dist/deck-macos.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: deck-macos
