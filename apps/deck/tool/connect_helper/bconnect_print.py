@@ -821,21 +821,51 @@ def select_device(want_name: str, cur_target: str | None = None) -> bool:
             _restore_frontmost(prev)
 
 
+def _win_classify_dialog(img_path: str) -> dict:
+    """截图 + 视觉模型读弹窗内容 -> {kind, body, buttons, printers, selected}。
+
+    弹窗正文不进 UIA 树 (2026-10-29 实测), 视觉是唯一内容来源。读不出/
+    模型不可用一律返回 kind=unknown, 调用方 fail-closed 取消。
+    """
+    try:
+        import bconnect_vision as vision
+        prompt = (
+            "这是 Bambu Connect 打印软件弹窗的截图。只输出一个 JSON 对象, "
+            "不要输出其它文字: {\"kind\": \"导入|打印|选择|其他\", "
+            "\"body\": \"弹窗正文逐字原文(标题下的说明文字, 含文件名要原样保留)\", "
+            "\"buttons\": [\"弹窗内按钮文字\"], "
+            "\"printers\": [\"弹窗中出现的打印机名称, 逐字; 没有则空数组\"], "
+            "\"selected\": \"能看出被选中/高亮的打印机名, 否则空字符串\"}。"
+            "kind 判定: 正文含『您将导入文件』=导入; 标题/正文含『发送打印"
+            "任务至』(打印机下拉+发送按钮)=打印; 列出多台打印机网格供点选"
+            "=选择。printers 要包含打印机下拉框里当前显示的机名。"
+            "逐字引用, 不要推断补全。")
+        js = vision.ask_vision(img_path, prompt)
+        m = re.search(r"\{.*\}", js or "", re.S)
+        if not m:
+            return {"kind": "unknown", "raw": (js or "")[:200]}
+        return json.loads(m.group(0))
+    except Exception as e:  # noqa: BLE001
+        return {"kind": "unknown", "raw": str(e)[:200]}
+
+
 def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
              before_id, stop_before_send: bool, select_only: bool,
              filament: list[str] | None, verbose: bool, t0: float) -> dict:
     """Windows 派单流程 (2026-10-29 P17–P22 真机全链路实测)。
 
     与 Mac 的差异: 深链直达打印选项页(文件预载), 没有 Mac 的导入弹窗、
-    「发送打印任务至」发送页和下拉选机。实测链:
-      选项页「打印」钮 -> 导入确认弹窗(正文「您将导入文件"x"」, 确认钮
-      name='confirm') -> 确认后 ~2s 内自动接打印确认弹窗 -> 第二次 confirm
-      = 真派单 -> 直跳设备详情页(『123』『打印进度』『0 / 46 | -11m』)。
+    「发送打印任务至」发送页和下拉选机。实测链 (两种行为都要兼容):
+      v9(1024x768):    选项页「打印」-> 导入确认弹窗 -> 确认后 ~2s 自动接
+                       打印确认弹窗 -> confirm = 真派单 -> 设备详情页。
+      当前构建(1920x1080): 导入确认后回选项页(预览出现), 要再按一次
+                       「打印」才出打印确认弹窗 -> confirm = 真派单。
 
-    目标机校验因此换了位置: 派单 confirm 前必须在弹窗文字里核对到目标机名
-    (名→序列号反查==serial)。核对不到(懒加载/结构未知/选机弹窗语义未验证)
-    一律 press_cancel_strict 放弃 —— 宁可这次换盘失败, 不能把任务打进别的
-    机器 (P22 误派教训)。选机弹窗的真机结构待首次授权实测捕获后放行。
+    弹窗正文不进 UIA 树 (confirm/cancel 钮名是树里仅有的信号), 内容分类
+    = 截图 + 视觉 (_win_classify_dialog)。派单 confirm 前必须在视觉读回的
+    弹窗内容里核对到目标机名 (名→序列号反查==serial); 读不出/核对不到/
+    选机点选失败一律 press_cancel_strict 放弃 —— 宁可这次换盘失败, 不能
+    把任务打进别的机器 (P22 误派教训)。
     """
     base = os.path.basename(path)
 
@@ -870,34 +900,73 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
         result["ok"] = True
         return result
 
-    # 3) 派单: 按「打印」-> 弹窗循环 (导入确认可能多轮, 打印确认=派单)。
+    # 3) 派单: 按「打印」-> 弹窗状态机。弹窗正文不进 UIA 树 (2026-10-29
+    #    实测 18s 纹丝不动), 内容分类 = 截图 + 视觉 (_win_classify_dialog);
+    #    视觉读不出一律取消 (fail-closed, P22 教训)。
+    #    两种实测行为都要兼容: v9 会话导入确认后 ~2s 自动接打印弹窗; 当前
+    #    构建(1920x1080)导入确认后回选项页, 要再按一次「打印」才出打印弹窗。
     if not press_text("打印"):
         result["error"] = "点不到「打印」按钮"
         rec("click-print", False, result["error"])
         return result
     rec("click-print", True, "已按「打印」, 等确认弹窗")
 
+    shot_path = os.path.join(tempfile.gettempdir(), "deck_win_dialog.png")
+    pressed = 1        # 「打印」按下次数 (上限 2: 首次 + 导入回选项页后一次)
+    imported = False
     dispatched = False
-    for rnd in range(1, 5):
-        # 弹窗出现探测: 用 confirm 钮在树里出现兜底(选项页/详情页都没有
-        # confirm 钮, v9 实测空操作), 再等 1.5s 让正文懒加载刷出来。
-        # 注意不能用按钮名「导入Gcode 3MF文件」探弹窗 —— 选项页的「浏览
-        # 换文件」按钮同名, 永远假阳性 (v9 教训)。
-        if not wait_probe(20 if rnd == 1 else 8, buttons=["confirm"]):
-            break  # 没弹窗: 可能直接派单了, 交给云端任务回读裁决
-        time.sleep(1.5)
-        # 分类只认内容: 机名命中=打印确认/选机弹窗; 正文标记=导入弹窗;
-        # 两者都不沾=未知弹窗, 一律取消放弃 —— 绝不盲按 confirm (P22 教训)。
-        ts = set()
-        hit = []
-        for _ in range(3):
-            ts = {t for t in ax.texts() if t}
-            hit = [n for n in known if n in ts]
-            if hit:
+    for rnd in range(1, 8):
+        # 弹窗出现探测: cancel+confirm 钮对同时在树里 = 有弹层 (选项页/
+        # 详情页都没有这对钮)。不能用「导入Gcode 3MF文件」按钮名探弹窗 ——
+        # 选项页「浏览换文件」钮同名, 永远假阳性 (v9 教训)。
+        d = None
+        deadline = time.time() + (25 if rnd == 1 else 12)
+        while time.time() < deadline:
+            d = ax.dialog_frame()
+            if d:
                 break
-            time.sleep(1.2)
-        if WIN_IMPORT_TEXT in ts and not hit:
-            # 导入确认弹窗(正文已核对): strict confirm, 一次懒加载重试
+            time.sleep(0.6)
+        if not d:
+            # 没弹窗: 已导入且还有一次「打印」额度 -> 再按一次进打印弹窗;
+            # 否则交给云端任务回读裁决 (可能没弹框直接派单了)。
+            if pressed >= 2 or not wait_probe(6, buttons=["打印"]):
+                break
+            btn = ax.button_rect("打印")
+            if imported and btn:
+                # 实测 (2026-10-29 p_press2): 导入确认回选项页后, UIA
+                # Invoke 按「打印」哑火 (返回 True 但界面无响应), 物理鼠标
+                # 点按钮中心 2s 内必弹「发送打印任务至」。
+                ok = ax.press_at((btn[0] + btn[2]) // 2, (btn[1] + btn[3]) // 2)
+                how = "mouse"
+            else:
+                ok = press_text("打印")
+                how = "invoke"
+                if not ok and btn:
+                    ok = ax.press_at((btn[0] + btn[2]) // 2,
+                                     (btn[1] + btn[3]) // 2)
+                    how = "mouse"
+            if not ok:
+                result["error"] = "第%d次按「打印」失败" % (pressed + 1)
+                rec("click-print", False, result["error"])
+                return result
+            pressed += 1
+            rec("click-print", True,
+                "第%d次按「打印」(%s, 进打印确认)" % (pressed, how))
+            continue
+        time.sleep(1.5)  # 弹窗进场动画/渲染稳定 (弹窗缩放动画会给出中间态)
+        if not ax.screenshot(shot_path):
+            ax.press_cancel_strict()
+            result["error"] = "弹窗截图失败, 已取消未派单"
+            rec("classify-dialog", False, result["error"])
+            return result
+        cls = _win_classify_dialog(shot_path)
+        kind = str(cls.get("kind") or "unknown")
+        body = str(cls.get("body") or "")
+        printers = [p for p in (cls.get("printers") or []) if p]
+        rec("classify-dialog", True, "kind=%s body=%s printers=%s"
+            % (kind, body[:48], printers))
+        if (kind == "导入" or WIN_IMPORT_TEXT in body) and base in body:
+            # 导入确认弹窗 (正文含标记 + 文件名核对): strict confirm
             ok = ax.press_confirm_strict()
             if not ok:
                 time.sleep(1.5)
@@ -906,35 +975,71 @@ def _run_win(rec, result: dict, *, path: str, serial: str, dev: dict,
                 result["error"] = "导入确认弹窗(第%d轮)点不到确认键" % rnd
                 rec("click-import", False, result["error"])
                 return result
-            rec("click-import", True, "第%d轮: 已确认导入(正文已核对)" % rnd)
-            time.sleep(1.5)  # 实测 ~2s 内自动接打印确认弹窗
+            imported = True
+            rec("click-import", True, "第%d轮: 已确认导入 (视觉核对正文)" % rnd)
+            time.sleep(1.5)
             continue
-        verified = None
-        if len(hit) == 1 and known[hit[0]] == serial:
-            verified = hit[0]
-        elif len(hit) > 1:
-            # 选机弹窗(兼容机不止一台): 结构与选中态语义未验证, 不赌 ——
-            # 取消并附上弹窗文字, 待首次授权实测捕获后再放行自动选机。
+        if kind in ("打印", "选择") and want_name:
+            # 打印确认/选机弹窗: 先核对目标机名, 选机弹窗还要先视觉点选
+            hit = [n for n in printers if n == want_name]
+            if not hit and kind == "打印" and want_name in body:
+                hit = [want_name]
+            if kind == "选择" and len(printers) > 1:
+                try:
+                    import bconnect_vision as vision
+                    xy = vision.ask_coords(
+                        shot_path, "打印机「%s」的选项行/卡片中心" % want_name)
+                except Exception:
+                    xy = None
+                if not xy or not ax.press_at(int(xy[0]), int(xy[1])):
+                    ax.press_cancel_strict()
+                    result["error"] = ("选机弹窗(可选:%s)读不到/点不中「%s」, "
+                                       "已取消未派单" % (printers, want_name))
+                    rec("select-device", False, result["error"])
+                    return result
+                rec("select-device", True, "已点选「%s」@%s" % (want_name, xy))
+                time.sleep(1.2)
+                if not ax.screenshot(shot_path):
+                    ax.press_cancel_strict()
+                    result["error"] = "选机后核对截图失败, 已取消未派单"
+                    rec("check-target", False, result["error"])
+                    return result
+                cls2 = _win_classify_dialog(shot_path)
+                sel = str(cls2.get("selected") or "").strip()
+                p2 = [p for p in (cls2.get("printers") or []) if p]
+                if sel != want_name and p2 == [want_name]:
+                    sel = want_name  # 列表只剩目标 = 已选中进入确认态
+                if sel != want_name:
+                    ax.press_cancel_strict()
+                    result["error"] = ("选机弹窗选中态核对不到「%s」(视觉:%s), "
+                                       "已取消未派单" % (want_name, sel or "?"))
+                    rec("check-target", False, result["error"])
+                    return result
+                hit = [want_name]
+            if hit and known.get(hit[0]) == serial:
+                if not ax.press_confirm_strict():
+                    result["error"] = "目标已核对(「%s」)但点不到确认键" % hit[0]
+                    rec("click-dispatch", False, result["error"])
+                    return result
+                dispatched = True
+                rec("click-dispatch", True,
+                    "目标「%s」已核对(视觉), 已确认派单" % hit[0])
+                break
             ax.press_cancel_strict()
-            result["error"] = ("选机弹窗(可见:%s)语义未验证, 已取消未派单; "
-                               "目标「%s」需人工选择或待结构捕获后自动处理"
-                               % (sorted(hit), want_name or serial))
-            rec("select-device", False, result["error"])
-            return result
-        if verified is None:
-            ax.press_cancel_strict()
-            result["error"] = ("确认弹窗内容未知(可见文字:%s), 已取消未派单; "
-                               "若这是打印确认框说明机名未暴露, 结构待捕获"
-                               % sorted(ts)[:10])
+            result["error"] = ("打印确认弹窗核对不到目标「%s」(kind=%s "
+                               "printers=%s body=%s), 已取消未派单"
+                               % ((want_name or serial), kind, printers,
+                                  body[:60]))
             rec("check-target", False, result["error"])
             return result
-        if not ax.press_confirm_strict():
-            result["error"] = "目标已核对(「%s」)但点不到确认键" % verified
-            rec("click-dispatch", False, result["error"])
-            return result
-        dispatched = True
-        rec("click-dispatch", True, "目标「%s」已核对, 已确认派单" % verified)
-        break
+        # 导入弹窗但文件名对不上 / kind=其他 / 视觉读不出: 一律取消 ——
+        # 绝不盲按 confirm (P22 误派教训)。
+        ax.press_cancel_strict()
+        result["error"] = ("确认弹窗内容无法核对(视觉: kind=%s body=%s "
+                           "printers=%s), 已取消未派单"
+                           % (kind, body[:60], printers))
+        rec("check-target", False, result["error"])
+        return result
 
     if not dispatched:
         # 两种可能: (a) 没弹确认框直接派单了 (v9 未观察到此路径, 以云端为准);
@@ -1028,20 +1133,29 @@ def run(path: str, stop_before_send: bool = False,
         enable_ax()
         rec("enable-ax", True, "AXManualAccessibility=true")
     except Exception as e:  # noqa: BLE001
-        result["error"] = str(e)
-        rec("enable-ax", False, str(e))
-        return result
+        if _IS_WIN:
+            # 2026-10-29 07:53 实测: Connect 自更新/重启期间窗口短暂消失
+            # (探针 8 分钟后确认窗口自己回来了), find_window 找不到不该整单
+            # 失败 —— 后面选项页 wait_probe 每 10 轮重设 a11y 并重找窗口,
+            # 真不在 40s 自然超时报错。
+            rec("enable-ax", False,
+                "窗口暂不可见(Connect 可能重启中), 交给选项页等待: %s"
+                % str(e)[:60])
+        else:
+            result["error"] = str(e)
+            rec("enable-ax", False, str(e))
+            return result
 
     # 清掉上一轮残留的弹窗（只按 cancel，不动 confirm，避免误派单）。
     if _IS_WIN:
-        # Windows: 残留只有可能是导入确认弹窗(正文标记; 选项页残留不必清,
-        # 深链重进会重新预载)。strict cancel, 点不到就留着报给下一步。
-        if wait_probe(4, texts=[WIN_IMPORT_TEXT]):
+        # Windows: 残留弹窗探测用 cancel+confirm 钮对 (弹窗正文不进 UIA 树,
+        # 文字探测永远扑空)。strict cancel, 点不到就留着报给下一步。
+        if ax.dialog_frame():
             if ax.press_cancel_strict():
-                rec("reset", True, "关闭残留导入弹窗")
+                rec("reset", True, "关闭残留弹窗")
                 time.sleep(1.5)
             else:
-                rec("reset", False, "有残留导入弹窗但点不到 cancel")
+                rec("reset", False, "有残留弹窗但点不到 cancel")
     else:
         # 一次短路 probe 同时探两个页面标记，替代两次全量 texts() 遍历（省 ~18s）。
         r = ax.probe(texts=[SEND_PAGE, IMPORT_PAGE])

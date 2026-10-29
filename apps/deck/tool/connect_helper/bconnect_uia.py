@@ -342,6 +342,52 @@ def press_cancel_strict() -> bool:
     return press_escape()
 
 
+def dialog_frame() -> dict | None:
+    """探测弹层: cancel+confirm 钮对同时在树里 -> {'cancel':rect,'confirm':rect}。
+
+    选项页/详情页/列表页都没有这两颗钮 (v9 实测 press_desc('confirm') 空操作),
+    钮对出现 = 有弹层。弹窗正文文字不进 UIA 树 (2026-10-29 实测: 18s 纹丝不动,
+    只有像素里有), 内容分类要靠调用方截图 + 视觉, 这里只给「有弹层」和按钮矩形。
+    """
+    snap = _snapshot()
+    cancel = confirm = None
+    for (c, t, n, au, r) in snap:
+        if t != 'Button' or r is None:
+            continue
+        if n == 'cancel' and cancel is None:
+            cancel = r
+        elif n == 'confirm' and confirm is None:
+            confirm = r
+    if cancel is None or confirm is None:
+        return None
+    return {
+        'cancel': [cancel.left, cancel.top, cancel.right, cancel.bottom],
+        'confirm': [confirm.left, confirm.top, confirm.right, confirm.bottom],
+    }
+
+
+def screenshot(path: str) -> bool:
+    """全屏截图 (弹窗正文只活在像素里, 视觉分类的输入)。Pillow 必须。"""
+    try:
+        from PIL import ImageGrab
+        ImageGrab.grab().save(path)
+        return True
+    except Exception as e:  # noqa: BLE001
+        _log('screenshot fail:', e)
+        return False
+
+
+def button_rect(name: str):
+    """指定按钮名的矩形 [l,t,r,b] (物理鼠标点按用); 找不到返回 None。"""
+    try:
+        for b in buttons():
+            if b.get("name") == name and b.get("rect"):
+                return b["rect"]
+    except Exception as e:  # noqa: BLE001
+        _log('button_rect fail:', e)
+    return None
+
+
 def press_at(x: float, y: float) -> bool:
     from pywinauto import mouse
     try:
