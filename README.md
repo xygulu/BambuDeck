@@ -5,8 +5,8 @@
 
 - **客户端模式**:App 直连打印机与摄像头,无需服务端
 - **Hub 服务端模式**:常驻服务聚合多打印机/多摄像头,手机/平板开网页即用,支持公网远程访问
-- **客户端**:macOS、Android(Releases 可下载);iOS 等其它设备走网页端;
-  Windows 上部署的是 Hub 服务端(见下)
+- **客户端**:macOS、Android、Windows(Releases 可下载);iOS 等其它设备走网页端;
+  Windows 也可部署 Hub 服务端常驻(见下)
 
 > 本项目由 [BambuHelper](../BambuHelper)(ESP32 小屏固件)改造而来,是全新的独立项目。
 
@@ -57,13 +57,14 @@
 |---|---|
 | `deck-android.apk` | Android 客户端,直接安装 |
 | `deck-macos.zip` | macOS 客户端,解压拖进「应用程序」 |
+| `deck-windows.zip` | Windows 客户端,解压后运行 `deck.exe`(刚提供下载,未经充分真机验证;云端派单需另装 Connect helper) |
 | `deck-hub-windows.zip` | Windows 部署包(Hub 服务端 + 派单 helper + ffmpeg) |
 
 ## 部署
 
 ### 方式一:客户端直连(最简单)
 
-1. 安装并打开 App(上表 apk / macos.zip)
+1. 安装并打开 App(上表 apk / macos.zip / windows.zip)
 2. 右下角「添加打印机」:
    - **局域网直连**:填打印机 IP + 序列号 + 局域网访问码(打印机屏幕:设置 → 局域网 可查)
    - **拓竹云端**:账号登录(手机号/邮箱 + 密码,或验证码),打印机自动同步进来
@@ -125,8 +126,8 @@ ffmpeg(拉 RTSP 流用)Windows 包已内置,其它平台自带,无需安装。
 ## 后续功能规划(还没做完,别当成已有功能)
 
 - **Kiosk 大屏轮播**:代码里有骨架,但还没有入口,当前不可用
-- **iOS / Windows / Linux 独立客户端**:iOS 用网页端已可完整使用;
-  Windows/Linux 客户端尚未发布下载
+- **iOS / Linux 独立客户端**:iOS 用网页端已可完整使用;Linux 客户端尚未开发;
+  Windows 客户端刚提供下载,未经充分真机验证
 - **ONVIF 深度发现、小米云摄像头接入**:未实现
 
 ## 版本更新机制
