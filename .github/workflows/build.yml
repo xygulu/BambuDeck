@@ -180,6 +180,17 @@ jobs:
         with:
           name: deck-hub-windows
           path: apps/deck/dist/deck-hub-windows.zip
+      # Windows 桌面客户端: GUI 产物 (ffmpeg.exe 已在上面放进 Release 目录)
+      # 整目录打 zip, 解压后运行 deck.exe 即用。
+      - name: Zip Windows client
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'build/windows/x64/runner/Release/*' -DestinationPath 'dist/deck-windows.zip' -Force
+        working-directory: apps/deck
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deck-windows-app
+          path: apps/deck/dist/deck-windows.zip
 
   # tag 构建才发 Release: 汇总三个平台产物 + 生成 version.json 清单
   # (每个资产的 sha256, 自更新下载后本地校验, 对不上就放弃更新)。
@@ -202,7 +213,8 @@ jobs:
           cp deck-android-apk/deck-android.apk deck-android.apk 2>/dev/null || true
           cp deck-hub-windows/deck-hub-windows.zip deck-hub-windows.zip 2>/dev/null || true
           cp deck-macos/deck-macos.zip deck-macos.zip 2>/dev/null || true
-          rm -rf deck-android-apk deck-hub-windows deck-macos
+          cp deck-windows-app/deck-windows.zip deck-windows.zip 2>/dev/null || true
+          rm -rf deck-android-apk deck-hub-windows deck-macos deck-windows-app
           ls -la
       - name: Write version manifest
         run: |
@@ -213,7 +225,8 @@ jobs:
           assets = {}
           for key, fn in (('android_apk', 'deck-android.apk'),
                           ('hub_windows', 'deck-hub-windows.zip'),
-                          ('macos', 'deck-macos.zip')):
+                          ('macos', 'deck-macos.zip'),
+                          ('windows_app', 'deck-windows.zip')):
               p = os.path.join('dist', fn)
               if not os.path.exists(p):
                   continue
@@ -234,10 +247,10 @@ jobs:
           set -e
           cd dist
           gh release create "$VERSION" \
-            deck-android.apk deck-hub-windows.zip deck-macos.zip version.json \
+            deck-android.apk deck-hub-windows.zip deck-macos.zip deck-windows.zip version.json \
             --title "BambuDeck $VERSION" --notes "BambuDeck $VERSION" || \
           gh release upload "$VERSION" \
-            deck-android.apk deck-hub-windows.zip deck-macos.zip version.json \
+            deck-android.apk deck-hub-windows.zip deck-macos.zip deck-windows.zip version.json \
             --clobber
 
   # 非 tag 构建也上传汇总产物, 方便本地/CI 下载最新包
@@ -256,7 +269,8 @@ jobs:
           cp deck-android-apk/deck-android.apk deck-android.apk 2>/dev/null || true
           cp deck-hub-windows/deck-hub-windows.zip deck-hub-windows.zip 2>/dev/null || true
           cp deck-macos/deck-macos.zip deck-macos.zip 2>/dev/null || true
-          rm -rf deck-android-apk deck-hub-windows deck-macos
+          cp deck-windows-app/deck-windows.zip deck-windows.zip 2>/dev/null || true
+          rm -rf deck-android-apk deck-hub-windows deck-macos deck-windows-app
       - uses: actions/upload-artifact@v4
         with:
           name: deck-all
