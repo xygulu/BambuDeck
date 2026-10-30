@@ -203,6 +203,7 @@ const defaultProbePaths = [
   '/Streaming/Channels/101', // Hikvision main stream
   '/h264/ch1/main/av_stream', // EZVIZ main stream
   '/cam/realmonitor?channel=1&subtype=0', // Dahua main stream
+  '/h264Preview_01_main', // Reolink main stream (legacy firmware)
   '/onvif1',
   '/',
 ];
