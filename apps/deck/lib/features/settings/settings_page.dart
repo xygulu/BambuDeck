@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:bambu_protocol/bambu_protocol.dart';
@@ -12,6 +13,7 @@ import '../../data/camera_providers.dart';
 import '../../data/cloud_print_helper.dart';
 import '../../data/hcnetsdk.dart' show detectLocalIpv4;
 import '../../data/hub_server.dart';
+import '../../data/hub_service_control.dart';
 import '../../data/log_buffer.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
@@ -63,7 +65,111 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    // 独立 hub 服务状态轮询 (仅 mac/win): 设置页开着时每 4s 探一次,
+    // 开关操作后 _probeSoon 补两刀让界面尽快跟上。
+    if (HubServiceControl.instance.supported) {
+      _svcTimer = Timer.periodic(
+          const Duration(seconds: 4), (_) => _probeSvc());
+    }
+  }
+
+  Timer? _svcTimer;
+  HubServiceStatus? _svcStatus;
+  bool _svcProbing = false;
+
+  Future<void> _probeSvc() async {
+    if (_svcProbing || !mounted) return;
+    final s = ref.read(appSettingsProvider).valueOrNull;
+    if (s == null) return;
+    _svcProbing = true;
+    try {
+      final st = await HubServiceControl.instance.probe(s);
+      if (!mounted) return;
+      final old = _svcStatus;
+      if (old == null ||
+          old.installed != st.installed ||
+          old.serving != st.serving ||
+          old.managerState != st.managerState ||
+          old.error != st.error) {
+        setState(() => _svcStatus = st);
+      }
+    } finally {
+      _svcProbing = false;
+    }
+  }
+
+  void _probeSoon() {
+    Future.delayed(const Duration(milliseconds: 1500), _probeSvc);
+    Future.delayed(const Duration(seconds: 4), _probeSvc);
+  }
+
+  /// 设置页里明确的「关」动作才停独立服务 (App 启动/改配置绝不主动停,
+  /// 见 main.dart _syncHub 的注释)。
+  Future<void> _stopStandalone(AppSettings s) async {
+    final svc = HubServiceControl.instance;
+    final st = await svc.probe(s);
+    if (!st.installed) return;
+    if (mounted) setState(() => _svcStatus = st);
+    final err = await svc.stop(s);
+    await _probeSvc();
+    if (err != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('停止独立服务失败: $err')));
+    }
+  }
+
+  /// 服务状态行: 独立服务的运行/停止/未安装 + 安装指引。
+  Widget _svcStatusLine(AppSettings settings) {
+    final svc = HubServiceControl.instance;
+    if (!svc.supported) return const SizedBox.shrink();
+    const style = TextStyle(fontSize: 11, color: DeckColors.textSecondary);
+    final st = _svcStatus;
+    Widget pad(Widget w) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 0), child: w);
+    if (st == null) {
+      return pad(const Text('正在检查 hub 服务状态…', style: style));
+    }
+    if (!st.installed) {
+      return pad(const Text(
+          '未安装独立 hub 服务 —— 当前是 App 内置网页服务,App 退出即停。'
+          '要 7×24 常驻(App 关了照跑、开机自启): Windows 用部署包 '
+          'deck-hub-windows.zip 里的 install-service.bat 一键安装;'
+          'macOS 见 README「进阶:独立网页服务」。', style: style));
+    }
+    if (st.busy) {
+      return pad(const Text('正在启动/停止独立服务…', style: style));
+    }
+    return pad(Column(crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+      Row(children: [
+        Icon(
+            st.serving ? Icons.check_circle_rounded : Icons.stop_circle_outlined,
+            size: 14,
+            color: st.serving ? Colors.green : DeckColors.textSecondary),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+              st.serving
+                  ? '独立 hub 服务运行中(端口 ${settings.hubPort}) — '
+                      'App 关闭后继续服务'
+                  : '独立 hub 服务已停止(开关打开即启动;停用后不再开机自启)',
+              style: style),
+        ),
+      ]),
+      if (st.error != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Text('上次操作失败: ${st.error}',
+              style: const TextStyle(fontSize: 11, color: DeckColors.error)),
+        ),
+    ]));
+  }
+
+  @override
   void dispose() {
+    _svcTimer?.cancel();
     _visionBase.dispose();
     _visionKey.dispose();
     _visionModel.dispose();
@@ -523,15 +629,24 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       _sectionLabel('网页访问'),
       SwitchListTile(
         title: const Text('启用网页端'),
-        subtitle: const Text('局域网内浏览器打开即可查看打印机状态与摄像头画面',
-            style: TextStyle(fontSize: 12)),
+        subtitle: Text(
+            _svcStatus?.installed == true
+                ? '开关控制独立 hub 服务:打开即启动(App 关闭不影响),'
+                    '关闭即停止并撤掉开机自启'
+                : '局域网内浏览器打开即可查看打印机状态与摄像头画面',
+            style: const TextStyle(fontSize: 12)),
         value: settings.hubEnabled,
         onChanged: (v) {
           var token = settings.hubToken;
           if (v && token.isEmpty) token = generateHubToken();
           save(settings.copyWith(hubEnabled: v, hubToken: token));
+          // 「关」是用户在界面上的明确动作: 停独立服务并撤掉开机自启。
+          // 「开」交给 main.dart 的设置监听(_syncHub)去拉服务。
+          if (!v) unawaited(_stopStandalone(settings));
+          _probeSoon();
         },
       ),
+      _svcStatusLine(settings),
       if (settings.hubEnabled) ...[
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),

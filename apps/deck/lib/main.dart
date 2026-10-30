@@ -15,6 +15,7 @@ import 'data/camera_providers.dart';
 import 'data/cloud_print_helper.dart';
 import 'data/hub_config.dart';
 import 'data/hub_server.dart';
+import 'data/hub_service_control.dart';
 import 'data/log_buffer.dart';
 import 'data/plate_swap.dart';
 import 'data/print_events.dart';
@@ -342,7 +343,8 @@ class _DeckAppState extends ConsumerState<DeckApp> {
       CloudPrintHelper.instance.settings = s;
       printEvents.settings = s;
       visionGuard.settings = s;
-      _syncHub(s);
+      // 串行化: 快速连续改设置时避免并发 probe/start 抢同一个服务管理器。
+      _hubSyncChain = _hubSyncChain.then((_) => _syncHub(s));
     }
 
     final loaded = ref.read(appSettingsProvider).valueOrNull;
@@ -407,16 +409,43 @@ class _DeckAppState extends ConsumerState<DeckApp> {
     }());
   }
 
-  /// Start/stop the web hub (网页访问) with its switch; a port change while
-  /// running restarts the listener.
-  void _syncHub(AppSettings s) {
+  /// Start/stop the web hub (网页访问) with its switch (2026-10-31 重构).
+  ///
+  /// 装了独立 hub 服务(mac launchd / Windows 计划任务)的机器: 开关打开就把
+  /// 独立服务拉起(幂等), 内置网页服务让位 —— 独立服务不随 App 退出而停。
+  /// **「关」不在这里执行**: App 启动/改配置都不该顺手把正在跑的服务停掉
+  /// (比如盒子上手工装好的 hub 不该被一次无关的设置改动杀掉), 停止只发生
+  /// 在设置页里明确的开关动作(settings_page._stopStandalone)。
+  /// 没装独立服务的机器保持原行为: 内置服务, 随 App 存活。
+  Future<void> _syncHub(AppSettings s) async {
     hubServer.settings = s;
+    final svc = HubServiceControl.instance;
+    if (svc.supported) {
+      final st = await svc.probe(s);
+      if (st.installed) {
+        // 独立服务接管 8787, 内置服务停掉避免抢端口。
+        if (hubServer.running) await hubServer.stop();
+        if (s.hubEnabled) {
+          final err = await svc.start(s);
+          if (err != null) {
+            svc.lastStatus = HubServiceStatus(
+                installed: true,
+                serving: svc.lastStatus.serving,
+                error: err);
+            LogBuffer.instance.add('[网页服务] 独立服务启动失败: $err');
+          }
+        }
+        return;
+      }
+    }
     if (s.hubEnabled && (!hubServer.running || hubServer.port != s.hubPort)) {
-      hubServer.stop().whenComplete(hubServer.start);
+      await hubServer.stop().whenComplete(hubServer.start);
     } else if (!s.hubEnabled && hubServer.running) {
-      hubServer.stop();
+      await hubServer.stop();
     }
   }
+
+  Future<void> _hubSyncChain = Future.value();
 
   @override
   Widget build(BuildContext context) {
