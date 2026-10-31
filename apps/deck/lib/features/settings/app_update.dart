@@ -261,7 +261,7 @@ if errorlevel 8 (
   ping -n 3 127.0.0.1 >nul
   goto copyloop
 )
-rmdir /s /q "%SRC%" >> "%LOG%" 2>&1
+rmdir /s /q "%ZIP%.unzipped" >> "%LOG%" 2>&1
 del /q "%ZIP%" >> "%LOG%" 2>&1
 echo %date% %time% relaunch >> "%LOG%"
 start "" "%INSTALL%\\deck.exe"
