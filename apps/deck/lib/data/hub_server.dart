@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:bambu_protocol/bambu_protocol.dart';
 
+import '../core/gh_mirror.dart';
 import '../core/version.dart';
 import 'app_settings.dart';
 import 'bambu_mjpeg.dart';
@@ -799,10 +800,13 @@ class HubServer {
         default:
           final m = RegExp(r'^/stream/([^/]+)$').firstMatch(path);
           final am = RegExp(r'^/audio/([^/]+)$').firstMatch(path);
+          final dm = RegExp(r'^/dl/([A-Za-z0-9._-]+)$').firstMatch(path);
           if (m != null) {
             await _serveMjpeg(req, m.group(1)!);
           } else if (am != null) {
             await _serveAudio(req, am.group(1)!);
+          } else if (dm != null) {
+            await _serveDownload(req, dm.group(1)!);
           } else {
             // 404 必须带 JSON body: 网页端 fetch().json() 解析空 body 会抛
             // SyntaxError (2026-10-29 iOS 反馈; 旧二进制没有 /api/update
@@ -943,6 +947,7 @@ class HubServer {
           'checkedAt': c['checkedAt'],
           'releaseUrl': c['releaseUrl'],
           'platform': Platform.operatingSystem,
+          'downloads': c['downloads'],
         }));
       } else if (req.method == 'POST') {
         final body = await utf8.decoder.bind(req).join();
@@ -959,6 +964,7 @@ class HubServer {
             'hasUpdate': c['hasUpdate'],
             'notes': c['notes'],
             'releaseUrl': c['releaseUrl'],
+            'downloads': c['downloads'],
           }));
         } else if (action == 'apply') {
           await HubUpdater.stage();
@@ -979,6 +985,71 @@ class HubServer {
         req.response.write(jsonEncode({'ok': false, 'error': '$e'}));
       }
     }
+    await req.response.close();
+  }
+
+  // -- 网页端安装包代下 (2026-10-31) --------------------------------------
+  //
+  // GET /dl/<file>  服务端代下 Release 资产: 浏览器只跟 hub 打交道, 页面上
+  // 不出现任何 github 地址。直连不通按 GhMirror 镜像顺序换通道; 响应头写出
+  // 前失败可以换下一个候选, 已开始吐字节后失败只能断流 (浏览器端表现为
+  // 下载中断, 重试即可)。
+  Future<void> _serveDownload(HttpRequest req, String file) async {
+    final meta = HubUpdater.packages[file];
+    if (meta == null) {
+      req.response.statusCode = HttpStatus.notFound;
+      req.response.headers.contentType = ContentType.json;
+      req.response.write(jsonEncode({'ok': false, 'error': '没有这个安装包: $file'}));
+      await req.response.close();
+      return;
+    }
+    String? src;
+    try {
+      final c = await HubUpdater.check();
+      src = ((c['assets'] as Map?) ?? const {})[file] as String?;
+    } catch (_) {}
+    if (src == null || src.isEmpty) {
+      req.response.statusCode = HttpStatus.badGateway;
+      req.response.headers.contentType = ContentType.json;
+      req.response.write(jsonEncode(
+          {'ok': false, 'error': '暂时拿不到下载地址 (GitHub 不可达?), 稍后重试'}));
+      await req.response.close();
+      return;
+    }
+    _log('[网页] 代下 $file (${meta.$1})');
+    for (final u in GhMirror.candidates(src)) {
+      HttpClientResponse? up;
+      try {
+        final creq =
+            await HubUpdater.httpClient.openUrl('GET', Uri.parse(u));
+        up = await creq.close().timeout(const Duration(seconds: 10));
+        if (up.statusCode != 200) {
+          await up.drain<void>().catchError((_) {});
+          up = null;
+          continue;
+        }
+      } catch (_) {
+        up = null;
+        continue;
+      }
+      final r = req.response;
+      r.headers.contentType = ContentType.parse(meta.$2);
+      r.headers.set('Content-Disposition', 'attachment; filename="$file"');
+      if (up.contentLength > 0) r.contentLength = up.contentLength;
+      try {
+        await up.pipe(r);
+      } catch (e) {
+        _log('[网页] 下载中断 $file: $e');
+        try {
+          await r.close();
+        } catch (_) {}
+      }
+      return;
+    }
+    req.response.statusCode = HttpStatus.badGateway;
+    req.response.headers.contentType = ContentType.json;
+    req.response.write(
+        jsonEncode({'ok': false, 'error': '下载失败: 直连与镜像都不通, 稍后重试'}));
     await req.response.close();
   }
 
@@ -1485,6 +1556,7 @@ class HubServer {
             'latest': _updateInfo!['latest'],
             'hasUpdate': _updateInfo!['hasUpdate'],
             'checkedAt': _updateInfo!['checkedAt'],
+            'downloads': _updateInfo!['downloads'],
           },
       };
 

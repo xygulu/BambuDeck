@@ -94,6 +94,25 @@ jobs:
         with:
           name: deck-macos
           path: dist/deck-macos.zip
+      # macOS Hub 独立服务包: dart build cli 产出 bundle/{bin/hub, lib/*.dylib}
+      # (`dart compile exe` 不支持 objective_c 的 build hooks)。zip 根是
+      # deck-hub-macos/, 解开就是部署布局 —— hub 自更新 (hub_update.dart 的
+      # _applyMacos) 靠 pending/deck-hub-macos/bin/hub 这个相对路径换装。
+      - name: Build hub CLI bundle
+        working-directory: apps/deck
+        run: |
+          set -e
+          dart build cli -t bin/hub.dart -o build/hubstage
+          mv build/hubstage/bundle build/deck-hub-macos
+          rm -rf build/hubstage
+          # hub 运行时从二进制旁的 version.txt 认版本 (dart build cli 没有
+          # 编译期注入); 自更新换装后也由换装脚本重写这个文件。
+          printf '%s' "$VERSION" > build/deck-hub-macos/bin/version.txt
+          ditto -c -k --keepParent build/deck-hub-macos "$GITHUB_WORKSPACE/dist/deck-hub-macos.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deck-hub-macos
+          path: dist/deck-hub-macos.zip
 
   windows:
     name: Windows
@@ -212,9 +231,10 @@ jobs:
           cd dist
           cp deck-android-apk/deck-android.apk deck-android.apk 2>/dev/null || true
           cp deck-hub-windows/deck-hub-windows.zip deck-hub-windows.zip 2>/dev/null || true
+          cp deck-hub-macos/deck-hub-macos.zip deck-hub-macos.zip 2>/dev/null || true
           cp deck-macos/deck-macos.zip deck-macos.zip 2>/dev/null || true
           cp deck-windows-app/deck-windows.zip deck-windows.zip 2>/dev/null || true
-          rm -rf deck-android-apk deck-hub-windows deck-macos deck-windows-app
+          rm -rf deck-android-apk deck-hub-windows deck-hub-macos deck-macos deck-windows-app
           ls -la
       - name: Write version manifest
         run: |
@@ -225,6 +245,7 @@ jobs:
           assets = {}
           for key, fn in (('android_apk', 'deck-android.apk'),
                           ('hub_windows', 'deck-hub-windows.zip'),
+                          ('hub_macos', 'deck-hub-macos.zip'),
                           ('macos', 'deck-macos.zip'),
                           ('windows_app', 'deck-windows.zip')):
               p = os.path.join('dist', fn)
@@ -247,10 +268,10 @@ jobs:
           set -e
           cd dist
           gh release create "$VERSION" \
-            deck-android.apk deck-hub-windows.zip deck-macos.zip deck-windows.zip version.json \
+            deck-android.apk deck-hub-windows.zip deck-hub-macos.zip deck-macos.zip deck-windows.zip version.json \
             --title "BambuDeck $VERSION" --notes "BambuDeck $VERSION" || \
           gh release upload "$VERSION" \
-            deck-android.apk deck-hub-windows.zip deck-macos.zip deck-windows.zip version.json \
+            deck-android.apk deck-hub-windows.zip deck-hub-macos.zip deck-macos.zip deck-windows.zip version.json \
             --clobber
 
   # 非 tag 构建也上传汇总产物, 方便本地/CI 下载最新包
@@ -268,9 +289,10 @@ jobs:
           cd dist
           cp deck-android-apk/deck-android.apk deck-android.apk 2>/dev/null || true
           cp deck-hub-windows/deck-hub-windows.zip deck-hub-windows.zip 2>/dev/null || true
+          cp deck-hub-macos/deck-hub-macos.zip deck-hub-macos.zip 2>/dev/null || true
           cp deck-macos/deck-macos.zip deck-macos.zip 2>/dev/null || true
           cp deck-windows-app/deck-windows.zip deck-windows.zip 2>/dev/null || true
-          rm -rf deck-android-apk deck-hub-windows deck-macos deck-windows-app
+          rm -rf deck-android-apk deck-hub-windows deck-hub-macos deck-macos deck-windows-app
       - uses: actions/upload-artifact@v4
         with:
           name: deck-all

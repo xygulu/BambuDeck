@@ -2720,7 +2720,7 @@ function syncUpdBanner(u) {
 function updRow() {
   const v = (svcData && svcData.version) || '';
   const plat = (svcData && svcData.platform) || '';
-  const canApply = plat === 'windows';
+  const canApply = plat === 'windows' || plat === 'macos';
   const au = updData || updAuto;
   const latest = au ? au.latest : '';
   const has = au && au.hasUpdate;
@@ -2739,22 +2739,33 @@ function updRow() {
       `<span class="v">${esc(latest)} 可更新</span></div>`
     : `<div class="svc-row"><i></i><span class="k">版本</span>` +
       `<span class="v">${esc(v)}${au ? ' · 已是最新' : ''}</span></div>`;
-  // canApply 必须管住按钮本身: Mac hub 点「立即更新」只会弹「只支持 Windows」(2026-10-29)
-  const rel = (updData && updData.releaseUrl)
-    || 'https://github.com/xygulu/BambuDeck/releases/latest';
+  // canApply 管住按钮本身 (2026-10-29 的教训: 按钮在、后端拒绝 = 白点)。
+  // 2026-10-31 起 macOS hub 也能原地换装 (launchd KeepAlive 拉起新二进制)。
   const btn = !has
     ? `<a href="#" id="svc-update">检查更新</a>`
     : canApply
     ? `<a href="#" id="svc-apply">立即更新</a> · <a href="#" id="svc-update">重新检查</a>`
-    : `<a href="${esc(rel)}" target="_blank" rel="noopener">打开下载页</a>` +
-      ` · <a href="#" id="svc-update">重新检查</a>`;
+    : `<a href="#" id="svc-update">重新检查</a>`;
   // 只在「真有新版且本平台换不了」才提示 (2026-10-31 iOS 反馈: 平时面板
   // 一打开就常驻这句, 让人以为更新出了问题)。平台未知 (svcData 没加载好)
   // 也不提示。
   const note = !canApply && has && plat
-    ? '<div class="svc-checked">此平台不支持自动换装, 请从下载页手动更新</div>'
+    ? '<div class="svc-checked">此平台不支持自动换装, 可在下方下载安装包手动更新</div>'
     : '';
-  return line + `<div class="svc-checked">${btn}</div>` + note;
+  return line + `<div class="svc-checked">${btn}</div>` + note + dlRow();
+}
+// 安装包下载区 (2026-10-31): 链接指向本服务 /dl/<file>, 由服务端代下
+// (直连不通自动换镜像), 页面上不出现 github 地址。没有可用清单就不显示。
+function dlRow() {
+  const au = updData || updAuto;
+  const dls = (au && au.downloads) || [];
+  if (!dls.length) return '';
+  const items = dls.map(d => {
+    const mb = d.size ? ' · ' + Math.round(d.size / 1048576) + ' MB' : '';
+    return `<a href="${esc(api('/dl/' + d.file))}" ` +
+      `download="${esc(d.file)}">${esc(d.label)}${mb}</a>`;
+  }).join(' · ');
+  return `<div class="svc-checked">下载安装包 (本服务代下): ${items}</div>`;
 }
 // fetch + JSON 解析容错: 401/404/524 的纯文本或 HTML body 交给
 // JSON.parse 会抛 SyntaxError (2026-10-29 iOS 反馈), 这里统一换成

@@ -19,13 +19,29 @@ import 'log_buffer.dart';
 ///   2. 调用方 (hub_server) 先把 HTTP 响应发回去, 延迟几秒;
 ///   3. `exit(42)` → run-hub.cmd 守护循环看到 42 → apply-update.ps1 把
 ///      pending 覆盖包根 (config/logs/update 不动) → 循环重启 hub.exe。
-/// macOS hub 由 launchd KeepAlive 拉起, 同样的 42 退出安全 (v1 mac 只检查,
-/// apply 限 Windows 包布局)。
+/// macOS 同样 42 退出安全: launchd KeepAlive=true 无条件拉起。差别在换装
+/// 时机 —— macOS 允许 rename 正在运行的可执行文件, 所以 `stage()` 里就
+/// **原地换好** bin/hub (旧进程继续用旧 inode, 服务不中断), 之后 42 退出
+/// 让 launchd 直接跑新文件; 42 之前进程被杀也一样, 磁盘上已经是新版。
 class HubUpdater {
   static const repo = 'xygulu/BambuDeck';
   static const _apiLatest =
       'https://api.github.com/repos/$repo/releases/latest';
   static const _ua = 'BambuDeck-hub';
+
+  /// 网页端「下载安装包」清单 (2026-10-31): 文件名 -> (展示名, MIME)。
+  /// `/dl/<file>` 代下路由与页面下载区共用这张表。
+  static const packages = <String, (String, String)>{
+    'deck-android.apk': ('Android 客户端 APK',
+        'application/vnd.android.package-archive'),
+    'deck-macos.zip': ('macOS 客户端', 'application/zip'),
+    'deck-windows.zip': ('Windows 客户端', 'application/zip'),
+    'deck-hub-windows.zip': ('Windows Hub 部署包', 'application/zip'),
+    'deck-hub-macos.zip': ('macOS Hub 服务包', 'application/zip'),
+  };
+
+  /// 路由层代下 Release 资产用 (镜像候选由 GhMirror 出, 这里只管客户端)。
+  static HttpClient get httpClient => _http;
 
   /// 2026-10-29 盒子+Mac 实测: GitHub 被断时 TLS 握手挂 5-20s+, 20s 超时
   /// 叠加清单二次拉取能把一个「检查更新」拖到 40s+, 隧道侧直接 524。
@@ -134,6 +150,36 @@ class HubUpdater {
       return a?[key]?['url'] as String?;
     }
 
+    // 网页端「下载安装包」(2026-10-31): 清单带 url+size 就用清单, 没有清单
+    // 退化到 Release 资产名直查 (没有 size)。键是文件名, /dl/<file> 直接用。
+    final dlUrl = <String, String>{};
+    final dlSize = <String, int>{};
+    (manifest?['assets'] as Map?)?.forEach((k, v) {
+      if (v is! Map) return;
+      final f = (v['file'] as String?) ?? '';
+      final u = (v['url'] as String?) ?? '';
+      if (packages.containsKey(f) && u.isNotEmpty) {
+        dlUrl[f] = u;
+        if (v['size'] is int) dlSize[f] = v['size'] as int;
+      }
+    });
+    for (final a in assets) {
+      final n = a['name'] as String?;
+      if (n != null && packages.containsKey(n) && !dlUrl.containsKey(n)) {
+        final u = a['browser_download_url'] as String?;
+        if (u != null) dlUrl[n] = u;
+      }
+    }
+    final downloads = <Map<String, dynamic>>[
+      for (final e in packages.entries)
+        if (dlUrl.containsKey(e.key))
+          {
+            'file': e.key,
+            'label': e.value.$1,
+            if (dlSize.containsKey(e.key)) 'size': dlSize[e.key],
+          },
+    ];
+
     final releaseUrl =
         'https://github.com/$repo/releases/latest';
     final out = <String, dynamic>{
@@ -144,6 +190,8 @@ class HubUpdater {
       'checkedAt': DateTime.now().toIso8601String(),
       'apkUrl': assetUrl('android_apk'),
       'releaseUrl': releaseUrl,
+      'assets': dlUrl,
+      'downloads': downloads,
       'manifestOk': manifest != null,
     };
     _last = out;
@@ -151,11 +199,11 @@ class HubUpdater {
     return out;
   }
 
-  /// Windows: 下载 hub_windows 包 → sha256 校验 → 解到 `update/pending/`。
-  /// 成功返回后由调用方延迟 exit(42) 换装。
-  /// 其它平台 / 清单缺失 / 校验失败 → 抛异常, 什么都不动 (fail-closed)。
+  /// 下载当前平台的 hub 包 → sha256 校验 → Windows 解到 `update/pending/`
+  /// / macOS 原地换好 bin/hub。成功返回后由调用方延迟 exit(42), 由各自的
+  /// 守护者 (run-hub.cmd / launchd KeepAlive) 拉起新版。
+  /// 清单缺失 / 校验失败 → 抛异常, 什么都不动 (fail-closed)。
   static Future<void> stage() async {
-    if (!isWindows) throw '自更新目前只支持 Windows 部署包 (macOS 请手动替换)';
     final m = await _manifest();
     if (m == null) throw 'Release 缺 version.json 清单, 拒绝更新';
     final latest = (m['version'] as String?)?.trim() ?? '';
@@ -164,12 +212,13 @@ class HubUpdater {
       throw '已是最新版 $deckVersionRuntime';
     }
     final a = m['assets'] as Map?;
-    final hubAsset = a?['hub_windows'] as Map?;
-    if (hubAsset == null) throw '清单里没有 hub_windows 资产';
+    final assetKey = isWindows ? 'hub_windows' : 'hub_macos';
+    final hubAsset = a?[assetKey] as Map?;
+    if (hubAsset == null) throw '清单里没有 $assetKey 资产';
     final url = hubAsset['url'] as String;
     final wantSha = (hubAsset['sha256'] as String).toLowerCase();
 
-    final root = _packageRoot();
+    final root = isWindows ? _packageRoot() : _bundleRoot();
     final upd = Directory('$root/update');
     await upd.create(recursive: true);
     final pendingDir = Directory('${upd.path}/pending');
@@ -185,27 +234,81 @@ class HubUpdater {
       await File(zipPath).delete().catchError((_) => File(zipPath));
       throw 'sha256 不符 (期望 $wantSha, 实得 $got), 已删除';
     }
-    LogBuffer.instance.add('[更新] sha256 校验通过, 解压暂存');
-    // -Command 后面整串当一个脚本执行, 参数不会再被单独引用 —— 路径带空格
-    // (C:\Program Files\...) 时必须自己加引号, 所以拼成一条命令再传。
-    String q(String s) => "'${s.replaceAll("'", "''")}'";
-    final p = await Process.run('powershell', [
-      '-NoProfile', '-NonInteractive', '-Command',
-      'Expand-Archive -LiteralPath ${q(zipPath)} '
-          '-DestinationPath ${q(pendingDir.path)} -Force',
-    ]);
+    LogBuffer.instance.add('[更新] sha256 校验通过');
+
+    if (isWindows) {
+      LogBuffer.instance.add('[更新] 解压暂存');
+      // -Command 后面整串当一个脚本执行, 参数不会再被单独引用 —— 路径带空格
+      // (C:\Program Files\...) 时必须自己加引号, 所以拼成一条命令再传。
+      String q(String s) => "'${s.replaceAll("'", "''")}'";
+      final p = await Process.run('powershell', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        'Expand-Archive -LiteralPath ${q(zipPath)} '
+            '-DestinationPath ${q(pendingDir.path)} -Force',
+      ]);
+      if (p.exitCode != 0) {
+        throw '解压失败: ${p.stderr}';
+      }
+      if (!await File('${pendingDir.path}/hub.exe').exists()) {
+        throw '包里没有 hub.exe, 拒绝换装';
+      }
+      await File('${upd.path}/stage.json').writeAsString(jsonEncode({
+        'version': latest,
+        'stagedAt': DateTime.now().toIso8601String(),
+      }));
+      LogBuffer.instance.add('[更新] 已暂存 v$latest, 即将退出换装');
+    } else {
+      await _applyMacos(zipPath, latest);
+    }
+  }
+
+  /// macOS 换装: 解包后**先原地换好 bin/hub**再返回。macOS 允许 rename
+  /// 正在运行的可执行文件 —— 旧进程继续用旧 inode 服务不受影响; 随后调用
+  /// 方 exit(42), launchd KeepAlive 直接拉起新文件。就算 42 之前进程被杀,
+  /// 磁盘上也已经是新版, 不会「换装失败服务起不来」。换失败会把旧的挪回。
+  static Future<void> _applyMacos(String zipPath, String latest) async {
+    final bundle = _bundleRoot();
+    final upd = '$bundle/update';
+    // 解包到 update/pending (zip 根目录是 deck-hub-macos/)
+    final uz = await Process.run(
+        '/usr/bin/unzip', ['-oq', zipPath, '-d', '$upd/pending']);
+    if (uz.exitCode != 0) {
+      throw '解压失败: ${uz.stderr}';
+    }
+    String q(String s) => "'${s.replaceAll("'", "'\\''")}'";
+    final script = '''
+set -e
+cd ${q(bundle)}
+[ -d update/pending ] || exit 9
+[ -f update/pending/deck-hub-macos/bin/hub ] || exit 10
+mv bin/hub update/hub.old
+if ! mv update/pending/deck-hub-macos/bin/hub bin/hub; then
+  mv update/hub.old bin/hub
+  exit 11
+fi
+chmod 755 bin/hub
+if [ -d update/pending/deck-hub-macos/lib ]; then
+  rm -rf update/lib.old
+  if [ -d lib ]; then mv lib update/lib.old; fi
+  mv update/pending/deck-hub-macos/lib lib
+fi
+printf '%s' '$latest' > bin/version.txt
+rm -rf update/pending
+''';
+    final p = await Process.run('/bin/bash', ['-c', script]);
     if (p.exitCode != 0) {
-      throw '解压失败: ${p.stderr}';
+      throw '换装失败 (${p.exitCode}): ${p.stderr}';
     }
-    if (!await File('${pendingDir.path}/hub.exe').exists()) {
-      throw '包里没有 hub.exe, 拒绝换装';
-    }
-    await File('${upd.path}/stage.json').writeAsString(jsonEncode({
+    await File('$upd/stage.json').writeAsString(jsonEncode({
       'version': latest,
       'stagedAt': DateTime.now().toIso8601String(),
     }));
-    LogBuffer.instance.add('[更新] 已暂存 v$latest, 即将退出换装');
+    LogBuffer.instance.add('[更新] 已换装 v$latest, 即将重启生效');
   }
+
+  /// macOS 部署根 = bin/hub 的上一级 (~/.bambudeck/bin/deck_hub_bundle)。
+  static String _bundleRoot() =>
+      File(Platform.resolvedExecutable).parent.parent.path;
 
   /// stage() 之后调用: 给 HTTP 响应留几秒, 然后 42 退出交给守护循环。
   static void exitForSwap() {
