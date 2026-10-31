@@ -2748,9 +2748,12 @@ function updRow() {
     ? `<a href="#" id="svc-apply">立即更新</a> · <a href="#" id="svc-update">重新检查</a>`
     : `<a href="${esc(rel)}" target="_blank" rel="noopener">打开下载页</a>` +
       ` · <a href="#" id="svc-update">重新检查</a>`;
-  const note = canApply
-    ? ''
-    : '<div class="svc-checked">此平台不支持自动换装, 请从下载页手动更新</div>';
+  // 只在「真有新版且本平台换不了」才提示 (2026-10-31 iOS 反馈: 平时面板
+  // 一打开就常驻这句, 让人以为更新出了问题)。平台未知 (svcData 没加载好)
+  // 也不提示。
+  const note = !canApply && has && plat
+    ? '<div class="svc-checked">此平台不支持自动换装, 请从下载页手动更新</div>'
+    : '';
   return line + `<div class="svc-checked">${btn}</div>` + note;
 }
 // fetch + JSON 解析容错: 401/404/524 的纯文本或 HTML body 交给
