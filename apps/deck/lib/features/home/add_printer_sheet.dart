@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
 import '../../data/bambu_mjpeg.dart';
+import '../../data/log_buffer.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 
@@ -553,6 +556,14 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
     if (added == 0 && skipped > 0) {
       setState(() => _error = '所选打印机均已添加过');
       return;
+    }
+    // 云端给了访问码的新打印机: 后台补一次 LAN 发现, 命中就升级直连
+    // (机内摄像头的开关只对 LAN 模式放开)。失败不打扰添加流程, App 下次
+    // 启动还会再试 (2026-10-31)。
+    if (devices.any((d) => d.accessCode.isNotEmpty)) {
+      final list = ref.read(printersProvider).valueOrNull ?? const [];
+      unawaited(backfillLanIps(notifier, list,
+          log: LogBuffer.instance.add));
     }
     Navigator.of(context).pop();
   }

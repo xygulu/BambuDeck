@@ -137,12 +137,22 @@ Widget cameraSectionHeader(
               color: lan
                   ? DeckColors.textSecondary
                   : DeckColors.textSecondary.withValues(alpha: 0.4))),
-      Switch(
-        value: builtinOn,
-        activeThumbColor: DeckColors.running,
-        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        onChanged: lan ? (v) => setBuiltinCam(ref, profile, v) : null,
-      ),
+      Builder(builder: (ctx) {
+        final sw = Switch(
+          value: builtinOn,
+          activeThumbColor: DeckColors.running,
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          onChanged: lan ? (v) => setBuiltinCam(ref, profile, v) : null,
+        );
+        // 置灰要说清原因: 云模式没有局域网直连, 机内画面拉不了 (2026-10-31)。
+        return lan
+            ? sw
+            : Tooltip(
+                message: '云端模式:在编辑打印机里补上 IP 和访问码,'
+                    '转为局域网直连后才能开启',
+                child: sw,
+              );
+      }),
       const SizedBox(width: 4),
       TextButton.icon(
         onPressed: () => PrinterCameraSection.editBindings(

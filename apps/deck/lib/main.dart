@@ -19,6 +19,7 @@ import 'data/hub_service_control.dart';
 import 'data/log_buffer.dart';
 import 'data/plate_swap.dart';
 import 'data/print_events.dart';
+import 'data/lan_printer_probe.dart' show needsLanIp;
 import 'data/printer_profile.dart';
 import 'data/rtsp_quality.dart';
 import 'data/settings_providers.dart';
@@ -372,6 +373,14 @@ class _DeckAppState extends ConsumerState<DeckApp> {
         visionGuard.printers = list;
         hubServer.printers = list;
         _exportHub();
+        // 云端添加的打印机 (有访问码没 IP): 补一次 LAN 发现, 命中就升级
+        // LAN 直连 —— 机内摄像头的开关只对 LAN 模式放开 (2026-10-31)。
+        if (!_lanBackfillRan && list.any(needsLanIp)) {
+          _lanBackfillRan = true;
+          unawaited(backfillLanIps(
+              ref.read(printersProvider.notifier), list,
+              log: LogBuffer.instance.add));
+        }
       }
     }, fireImmediately: true);
   }
@@ -446,6 +455,10 @@ class _DeckAppState extends ConsumerState<DeckApp> {
   }
 
   Future<void> _hubSyncChain = Future.value();
+
+  /// 云端添加的打印机缺 IP: 启动后补一次 LAN 发现 (每次进程生命周期一次,
+  /// 失败等下次启动, 不重试风暴 —— 与独立服务 _resolveLanIps 同策略)。
+  bool _lanBackfillRan = false;
 
   @override
   Widget build(BuildContext context) {

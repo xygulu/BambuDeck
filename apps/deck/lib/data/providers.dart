@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'cloud_api.dart';
 import 'hub_server.dart';
+import 'lan_printer_probe.dart' show applyLanIps, discoverLanPrinterIps, needsLanIp;
 import 'print_events.dart';
 import 'printer_link.dart';
 import 'printer_profile.dart';
@@ -67,6 +68,25 @@ class PrintersNotifier extends AsyncNotifier<List<PrinterProfile>> {
     }
     return null;
   }
+}
+
+/// 云端添加的打印机缺 IP 时跑一次 LAN 发现 (SSDP → 8883 扫网+访问码认证),
+/// 命中就补 IP 并把云模式升级为 LAN 直连 —— 机内画面、秒级控制、换盘都
+/// 依赖直连 (2026-10-31)。无目标或没扫到时不动清单; 有变化经 [replaceAll]
+/// 落盘, ConnectionNotifier 按 connectionKey 自动重连。返回是否有变化。
+Future<bool> backfillLanIps(PrintersNotifier notifier, List<PrinterProfile> current,
+    {void Function(String)? log}) async {
+  if (!current.any(needsLanIp)) return false;
+  final hits = await discoverLanPrinterIps(current, log: log);
+  final next = applyLanIps(current, hits);
+  if (next == null) return false;
+  await notifier.replaceAll(next);
+  for (final p in next) {
+    if (p.ip.isNotEmpty && current.firstWhere((q) => q.id == p.id).ip.isEmpty) {
+      log?.call('[LAN 发现] ${p.name} → ${p.ip} (LAN 直连)');
+    }
+  }
+  return true;
 }
 
 final printersProvider =

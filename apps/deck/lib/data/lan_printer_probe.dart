@@ -3,6 +3,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:bambu_protocol/bambu_protocol.dart';
+
+import 'printer_profile.dart';
+
 /// LAN 打印机定位 (任务 3 的跨网段一半, 2026-10-28):
 /// SSDP 组播只在同网段有效 (实测本站打印机在 192.168.100.x、Mac 在
 /// 192.168.24.x,组播不过路由;A1 固件甚至不回单播 M-SEARCH), 而唯一
@@ -173,4 +177,100 @@ Future<void> _forEach<T>(
   }
 
   await [for (var k = 0; k < n; k++) worker()].wait;
+}
+
+// -- 云端打印机的 IP 补齐 (2026-10-31, App 启动/云端添加 与 HubService 共用) --
+
+/// 需要补定位的打印机: 有序列号、有访问码、还没 IP。App 内云端添加恒为云
+/// 模式(哪怕 bind 带了 dev_access_code), 独立服务云同步升级出来的也是空
+/// IP —— 这个判据对两种来源一视同仁。
+bool needsLanIp(PrinterProfile p) =>
+    p.serial.trim().isNotEmpty &&
+    p.accessCode.isNotEmpty &&
+    p.ip.trim().isEmpty;
+
+/// 云端来的 LAN 打印机缺 IP 时跑一次发现:
+/// (1) SSDP 组播 (同网段, 零流量) → (2) 8883 扫网+访问码认证 (跨网段;
+/// 组播不过路由, A1 不回单播 M-SEARCH, 只有 MQTT 必通)。
+/// 返回 serial → ip (只含本次要找的目标)。候选网段 = 本机各网卡 + 清单里
+/// 已知打印机的网段 (同站点打印机通常同网段)。
+Future<Map<String, String>> discoverLanPrinterIps(
+    List<PrinterProfile> printers,
+    {void Function(String msg)? log}) async {
+  final need = printers.where(needsLanIp).toList();
+  if (need.isEmpty) return {};
+  final bySerial = <String, String>{};
+
+  // (1) SSDP 组播。
+  try {
+    final hits = await ssdpDiscoverPrinters(wait: const Duration(seconds: 6))
+        .timeout(const Duration(seconds: 40));
+    for (final h in hits) {
+      bySerial[h.serial] = h.ip;
+    }
+  } catch (e) {
+    log?.call('[LAN 发现] SSDP 失败: $e');
+  }
+
+  // (2) 8883 扫网认证, 只补 SSDP 没认出来的。
+  final rest =
+      need.where((p) => !bySerial.containsKey(p.serial.trim())).toList();
+  if (rest.isNotEmpty) {
+    final prefixes = <String>{};
+    try {
+      for (final iface in await NetworkInterface.list()) {
+        for (final a in iface.addresses) {
+          final parts = a.address.split('.');
+          if (parts.length == 4 && a.type == InternetAddressType.IPv4) {
+            prefixes.add(parts.sublist(0, 3).join('.'));
+          }
+        }
+      }
+    } catch (_) {}
+    for (final p in printers) {
+      final parts = p.ip.split('.');
+      if (parts.length == 4) prefixes.add(parts.sublist(0, 3).join('.'));
+    }
+    if (prefixes.isNotEmpty) {
+      try {
+        final found = await locateLanPrinters(
+          targets: [
+            for (final p in rest)
+              LanProbeTarget(
+                  serial: p.serial.trim(), accessCode: p.accessCode),
+          ],
+          subnetPrefixes: prefixes.toList(),
+        ).timeout(const Duration(minutes: 3));
+        bySerial.addAll(found);
+        log?.call('[LAN 发现] 8883 扫网 ${prefixes.join("/")}: '
+            '认出 ${found.length}/${rest.length}');
+      } catch (e) {
+        log?.call('[LAN 发现] 8883 扫网失败: $e');
+      }
+    }
+  }
+
+  // SSDP 可能顺带捡到清单里别的打印机 (已有 IP / 无访问码), 不在本次范围。
+  final wanted = {for (final p in need) p.serial.trim()};
+  bySerial.removeWhere((s, _) => !wanted.contains(s));
+  return bySerial;
+}
+
+/// 把发现结果应用回清单: 命中的补 IP; 云模式顺手升级 LAN 直连 (能被认证
+/// 命中就证明访问码对, 升级安全)。没有变化返回 null, 调用方据此跳过落盘。
+List<PrinterProfile>? applyLanIps(
+    List<PrinterProfile> printers, Map<String, String> hits) {
+  if (hits.isEmpty) return null;
+  var changed = false;
+  final next = <PrinterProfile>[];
+  for (final p in printers) {
+    final ip = hits[p.serial.trim()];
+    if (ip == null || ip == p.ip) {
+      next.add(p);
+      continue;
+    }
+    changed = true;
+    next.add(p.copyWith(ip: ip, mode: PrinterMode.lan));
+  }
+  return changed ? next : null;
 }
