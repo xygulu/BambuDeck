@@ -18,6 +18,7 @@ import '../../data/rtsp_scanner.dart';
 import '../../data/settings_providers.dart';
 import '../../ui/camera_tile.dart';
 import '../monitor/overview_wall.dart';
+import 'ezviz_cloud_actions.dart';
 import 'ezviz_import_sheet.dart';
 
 /// Cameras tab body (PRD FR-3): a stepless-zoomable wall of live tiles
@@ -349,47 +350,124 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
       backgroundColor: DeckColors.surface,
       showDragHandle: true,
       builder: (ctx) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-            child: Row(children: [
-              const Icon(Icons.videocam_outlined,
-                  size: 18, color: DeckColors.textSecondary),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(camera.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+        // Six tiles can outgrow a short window; let the sheet scroll.
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+              child: Row(children: [
+                const Icon(Icons.videocam_outlined,
+                    size: 18, color: DeckColors.textSecondary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(camera.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w600)),
+                ),
+                Text(camera.sourceType.label,
                     style: const TextStyle(
-                        fontSize: 15, fontWeight: FontWeight.w600)),
+                        fontSize: 12, color: DeckColors.textSecondary)),
+              ]),
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('编辑摄像头'),
+              subtitle: const Text('名称 / 视频源 / 绑定打印机 / 画面翻转'),
+              onTap: () => Navigator.pop(ctx, 'edit'),
+            ),
+            // 老版本导入的 RTSP 摄像头没有设备序列号, 给一条关联入口,
+            // 免得为了用云端功能重新导入一遍。
+            if (camera.ezvizSerial.isEmpty &&
+                camera.sourceType == CameraSourceType.rtsp)
+              ListTile(
+                leading: const Icon(Icons.cloud_sync_outlined),
+                title: const Text('关联萤石云端设备'),
+                subtitle: const Text('已用萤石账号导入的摄像头可一键关联, 启用云端功能'),
+                onTap: () => Navigator.pop(ctx, 'ezviz_link'),
               ),
-              Text(camera.sourceType.label,
-                  style: const TextStyle(
-                      fontSize: 12, color: DeckColors.textSecondary)),
-            ]),
-          ),
-          ListTile(
-            leading: const Icon(Icons.edit_outlined),
-            title: const Text('编辑摄像头'),
-            subtitle: const Text('名称 / 视频源 / 绑定打印机 / 画面翻转'),
-            onTap: () => Navigator.pop(ctx, 'edit'),
-          ),
-          ListTile(
-            leading: const Icon(Icons.delete_outline, color: DeckColors.error),
-            title: const Text('删除摄像头',
-                style: TextStyle(color: DeckColors.error)),
-            subtitle: const Text('从本机移除, 不影响萤石云端设备'),
-            onTap: () => Navigator.pop(ctx, 'delete'),
-          ),
-          const SizedBox(height: 6),
-        ]),
+            // 萤石云端能力 (2026-11-03): 只有从萤石账号导入/关联过的摄像头
+            // 才有设备序列号, 也才能调开放平台接口。
+            if (camera.ezvizSerial.isNotEmpty) ...[
+              const Divider(height: 1),
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 10, 20, 2),
+                child: Row(children: [
+                  Icon(Icons.cloud_outlined,
+                      size: 14, color: DeckColors.textSecondary),
+                  SizedBox(width: 6),
+                  Text('萤石云端',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: DeckColors.textSecondary,
+                          fontWeight: FontWeight.w600)),
+                  Spacer(),
+                  Text('无需局域网',
+                      style: TextStyle(
+                          fontSize: 11, color: DeckColors.textSecondary)),
+                ]),
+              ),
+              ListTile(
+                leading: const Icon(Icons.play_circle_outline),
+                title: const Text('云端直播'),
+                subtitle: const Text('通过萤石云取流, 不在同一局域网也能看'),
+                onTap: () => Navigator.pop(ctx, 'ezviz_live'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.control_camera_outlined),
+                title: const Text('云端云台'),
+                subtitle: const Text('方向键控制, 松开即停'),
+                onTap: () => Navigator.pop(ctx, 'ezviz_ptz'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.info_outline),
+                title: const Text('设备详情 / 抓图'),
+                subtitle: const Text('在线状态、型号、固件, 可云端抓拍一张'),
+                onTap: () => Navigator.pop(ctx, 'ezviz_info'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.drive_file_rename_outline),
+                title: const Text('云端改名'),
+                subtitle: const Text('同步修改萤石账号里的设备名称'),
+                onTap: () => Navigator.pop(ctx, 'ezviz_rename'),
+              ),
+            ],
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: DeckColors.error),
+              title: const Text('删除摄像头',
+                  style: TextStyle(color: DeckColors.error)),
+              subtitle: const Text('从本机移除, 不影响萤石云端设备'),
+              onTap: () => Navigator.pop(ctx, 'delete'),
+            ),
+            const SizedBox(height: 6),
+          ]),
+        ),
       ),
     );
     if (!mounted || action == null) return;
-    if (action == 'edit') {
-      await showAddCameraDialog(context, ref, editing: camera);
-      return;
+    switch (action) {
+      case 'edit':
+        await showAddCameraDialog(context, ref, editing: camera);
+        return;
+      case 'ezviz_live':
+        await showEzvizLiveDialog(context, ref, camera);
+        return;
+      case 'ezviz_ptz':
+        await showEzvizPtzDialog(context, ref, camera);
+        return;
+      case 'ezviz_info':
+        await showEzvizInfoDialog(context, ref, camera);
+        return;
+      case 'ezviz_rename':
+        await showEzvizRenameDialog(context, ref, camera);
+        return;
+      case 'ezviz_link':
+        await showEzvizLinkDialog(context, ref, camera);
+        return;
     }
+    if (!mounted) return;
     final yes = await showDialog<bool>(
       context: context,
       builder: (dctx) => AlertDialog(

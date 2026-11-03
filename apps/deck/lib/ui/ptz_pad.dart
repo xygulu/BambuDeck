@@ -15,6 +15,7 @@ class PtzPad extends StatefulWidget {
     required this.client,
     this.invertPan = false,
     this.invertTilt = false,
+    this.unavailableHint = '云台不可用 - 请确认摄像头支持 ONVIF 或萤石本地服务',
   });
 
   final PtzClient client;
@@ -26,6 +27,10 @@ class PtzPad extends StatefulWidget {
   /// as the video, never by remapping commands.
   final bool invertPan;
   final bool invertTilt;
+
+  /// Tooltip shown while no PTZ transport is reachable; the cloud dialog
+  /// overrides it because ONVIF is not the transport in use there.
+  final String unavailableHint;
 
   @override
   State<PtzPad> createState() => _PtzPadState();
@@ -134,10 +139,7 @@ class _PtzPadState extends State<PtzPad> {
       ),
     );
     if (_available || _probing) return pad;
-    return Tooltip(
-      message: '云台不可用 - 请确认摄像头支持 ONVIF 或萤石本地服务',
-      child: pad,
-    );
+    return Tooltip(message: widget.unavailableHint, child: pad);
   }
 
   /// One directional key pinned to an edge of the circular pad; press and

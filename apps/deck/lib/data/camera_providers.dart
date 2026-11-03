@@ -1,8 +1,11 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'app_settings.dart';
 import 'camera_profile.dart';
+import 'ezviz_session.dart';
 import 'log_buffer.dart';
 import 'printer_profile.dart' show TombstoneStore;
+import 'settings_providers.dart';
 
 /// Riverpod wiring for the camera list (kept out of [CameraProfile]'s file so
 /// the data class / store stay pure Dart for the standalone web service).
@@ -62,3 +65,10 @@ final cameraStoreProvider = Provider<CameraStore>(
 final camerasProvider =
     AsyncNotifierProvider<CamerasNotifier, List<CameraProfile>>(
         CamerasNotifier.new);
+
+/// Shared EZVIZ account session (token cache) for the cloud camera actions.
+final ezvizSessionProvider = Provider<EzvizSession>((ref) => EzvizSession(
+      settings: () =>
+          ref.read(appSettingsProvider).valueOrNull ?? const AppSettings(),
+      log: LogBuffer.instance.add,
+    ));

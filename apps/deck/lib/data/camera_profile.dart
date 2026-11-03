@@ -42,6 +42,7 @@ class CameraProfile {
     this.rotationDeg = 0,
     this.ptzInvertPan = false,
     this.ptzInvertTilt = false,
+    this.ezvizSerial = '',
     this.createdAt = 0,
   });
 
@@ -78,6 +79,13 @@ class CameraProfile {
   final bool ptzInvertPan;
   final bool ptzInvertTilt;
 
+  /// 萤石开放平台设备序列号 (deviceSerial). Non-empty when this camera was
+  /// imported from (or linked to) an EZVIZ account; enables the cloud
+  /// management actions (云端直播 / 云台 / 改名 / 详情抓图, 2026-11-03).
+  /// Stored alongside the profile so the cloud features survive a LAN
+  /// address change; older profiles simply carry ''.
+  final String ezvizSerial;
+
   /// 加入时间 (毫秒时间戳, 列表排序 2026-10-27)。0 = 本功能之前的旧条目,
   /// 视为最早且彼此保持原有顺序, 免迁移。
   final int createdAt;
@@ -92,6 +100,8 @@ class CameraProfile {
     int? rotationDeg,
     bool? ptzInvertPan,
     bool? ptzInvertTilt,
+    String? ezvizSerial,
+    int? createdAt,
   }) =>
       CameraProfile(
         id: id,
@@ -105,6 +115,8 @@ class CameraProfile {
         rotationDeg: rotationDeg ?? this.rotationDeg,
         ptzInvertPan: ptzInvertPan ?? this.ptzInvertPan,
         ptzInvertTilt: ptzInvertTilt ?? this.ptzInvertTilt,
+        ezvizSerial: ezvizSerial ?? this.ezvizSerial,
+        createdAt: createdAt ?? this.createdAt,
       );
 
   /// Playback URL, resolving the bambu type against the printer profile
@@ -156,6 +168,7 @@ class CameraProfile {
         'rotationDeg': rotationDeg,
         'ptzInvertPan': ptzInvertPan,
         'ptzInvertTilt': ptzInvertTilt,
+        'ezvizSerial': ezvizSerial,
         'createdAt': createdAt,
       };
 
@@ -179,6 +192,7 @@ class CameraProfile {
       rotationDeg: j['rotationDeg'] as int? ?? 0,
       ptzInvertPan: j['ptzInvertPan'] as bool? ?? false,
       ptzInvertTilt: j['ptzInvertTilt'] as bool? ?? false,
+      ezvizSerial: j['ezvizSerial'] as String? ?? '',
       createdAt: j['createdAt'] as int? ?? 0,
     );
   }

@@ -113,21 +113,20 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
       await ref.read(appSettingsProvider.notifier).set(
           (ref.read(appSettingsProvider).valueOrNull ?? const AppSettings())
               .copyWith(ezvizAppKey: key, ezvizAppSecret: secret));
-      // Prefill code/ip from cameras already configured with the same
-      // serial (manually added earlier), so a re-import fills itself in.
+      // Prefill code/ip from the camera already linked to this exact serial.
+      // (The old code took the *first* RTSP camera for every device, which
+      // could stamp one camera's credentials onto all of them - wrong even
+      // before serials existed, dangerous once they link profiles.)
       final existing = ref.read(camerasProvider).valueOrNull ?? const [];
       for (final d in list) {
         final codeCtrl = TextEditingController();
         final ipCtrl = TextEditingController();
-        for (final c in existing) {
-          final code = verificationCodeFromUrl(c.url);
-          if (code == null) continue;
-          final u = Uri.tryParse(c.url);
-          if (u == null || u.host.isEmpty) continue;
-          // RTSP URLs don't carry the serial; match on the code the user
-          // gave before - verification codes are unique per device.
-          if (codeCtrl.text.isEmpty) codeCtrl.text = code;
-          if (ipCtrl.text.isEmpty) ipCtrl.text = u.host;
+        final match = _bySerial(existing, d.serial);
+        if (match != null) {
+          final code = verificationCodeFromUrl(match.url);
+          final host = Uri.tryParse(match.url)?.host ?? '';
+          if (code != null && code.isNotEmpty) codeCtrl.text = code;
+          if (host.isNotEmpty) ipCtrl.text = host;
         }
         _codeCtrls[d.serial] = codeCtrl;
         _ipCtrls[d.serial] = ipCtrl;
@@ -182,8 +181,8 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
     // must not be touched across that gap.
     final messenger = ScaffoldMessenger.of(context);
     final cameras = ref.read(camerasProvider).valueOrNull ?? const [];
-    final existingUrls = [for (final c in cameras) c.url];
     final added = <String>[];
+    final linked = <String>[];
     final skipped = <String>[];
     for (final d in _devices) {
       if (!_checked.contains(d.serial)) continue;
@@ -193,28 +192,62 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
         skipped.add('${d.name.isEmpty ? d.serial : d.name}(缺验证码或 IP)');
         continue;
       }
+      final label = d.name.isEmpty ? d.serial : d.name;
       final url = ezvizRtspUrl(ip: ip, code: code);
-      if (existingUrls.contains(url)) continue; // already configured
+      // A camera added before this version carries the same LAN address but
+      // no serial; link it instead of adding a duplicate, so the cloud
+      // actions become available for cameras imported earlier (2026-11-03).
+      final match = _findExisting(cameras, ip: ip, code: code);
+      if (match != null && match.ezvizSerial != d.serial) {
+        await ref
+            .read(camerasProvider.notifier)
+            .replace(match.copyWith(ezvizSerial: d.serial));
+        linked.add(label);
+        continue;
+      }
+      if (match != null) continue; // already configured
       await ref.read(camerasProvider.notifier).add(CameraProfile(
             id: 'c_${DateTime.now().millisecondsSinceEpoch}_${added.length}',
-            name: d.name.isEmpty ? d.serial : d.name,
+            name: label,
             sourceType: CameraSourceType.rtsp,
             url: url,
+            ezvizSerial: d.serial,
             createdAt: DateTime.now().millisecondsSinceEpoch,
           ));
-      added.add(d.name.isEmpty ? d.serial : d.name);
+      added.add(label);
     }
     if (mounted) Navigator.of(context).pop();
-    if (added.isEmpty && skipped.isEmpty) {
+    if (added.isEmpty && linked.isEmpty && skipped.isEmpty) {
       messenger.showSnackBar(const SnackBar(content: Text('没有新的摄像头可导入')));
     } else {
       messenger.showSnackBar(SnackBar(
           content: Text([
         if (added.isNotEmpty) '已导入 ${added.length} 个: ${added.join('、')}'
-        else '未导入新摄像头',
+        else if (linked.isEmpty) '未导入新摄像头',
+        if (linked.isNotEmpty) '已关联 ${linked.length} 个: ${linked.join('、')}',
         if (skipped.isNotEmpty) '跳过: ${skipped.join('; ')}',
       ].join('  ·  '))));
     }
+  }
+
+  static CameraProfile? _bySerial(List<CameraProfile> cameras, String serial) {
+    for (final c in cameras) {
+      if (c.ezvizSerial == serial) return c;
+    }
+    return null;
+  }
+
+  /// An already-configured camera at the same address with the same
+  /// verification code (the RTSP URL carries no serial, so this is the only
+  /// stable match).
+  CameraProfile? _findExisting(List<CameraProfile> cameras,
+      {required String ip, required String code}) {
+    for (final c in cameras) {
+      final u = Uri.tryParse(c.url);
+      if (u == null || u.host != ip) continue;
+      if (verificationCodeFromUrl(c.url) == code) return c;
+    }
+    return null;
   }
 
   @override

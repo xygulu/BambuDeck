@@ -33,6 +33,32 @@ void main() {
     expect(back.enabled, isTrue);
   });
 
+  test('ezviz serial survives JSON and copyWith, old JSON defaults empty', () {
+    final cam = CameraProfile(
+      id: 'c1',
+      name: '门口',
+      sourceType: CameraSourceType.rtsp,
+      url: 'rtsp://admin:code@10.0.0.3:554/x',
+      ezvizSerial: 'C12345678',
+      createdAt: 1700000000000,
+    );
+    final back = CameraProfile.fromJson(
+        jsonDecode(jsonEncode(cam.toJson())) as Map<String, dynamic>);
+    expect(back.ezvizSerial, 'C12345678');
+    // copyWith fixes the earlier createdAt reset (list sort 2026-10-27).
+    final renamed = back.copyWith(name: '新名字');
+    expect(renamed.ezvizSerial, 'C12345678');
+    expect(renamed.createdAt, 1700000000000);
+    // A profile written before this field existed.
+    final legacy = CameraProfile.fromJson({
+      'id': 'c2',
+      'name': 'old',
+      'sourceType': 'rtsp',
+      'url': 'rtsp://x',
+    });
+    expect(legacy.ezvizSerial, '');
+  });
+
   test('legacy single printerId migrates into printerIds', () {
     final back = CameraProfile.fromJson({
       'id': 'c9',

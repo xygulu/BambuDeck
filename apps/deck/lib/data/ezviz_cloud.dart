@@ -63,6 +63,96 @@ String parseTokenResponse(Map<String, dynamic> doc) {
   return token;
 }
 
+/// 设备详情 (POST /api/lapp/device/info). Status 1 = online, 2 = offline.
+class EzvizDeviceInfo {
+  const EzvizDeviceInfo({
+    required this.serial,
+    required this.name,
+    required this.model,
+    required this.version,
+    required this.online,
+    required this.isEncrypt,
+  });
+
+  final String serial;
+  final String name;
+  final String model;
+  final String version;
+  final bool online;
+  final bool isEncrypt;
+
+  @override
+  String toString() =>
+      'EzvizDeviceInfo($serial "$name" $model v$version '
+      '${online ? "online" : "offline"})';
+}
+
+/// Parses the device/info envelope. `deviceType` carries the model on most
+/// accounts; some firmware returns `model` instead, so prefer whichever is
+/// non-empty.
+EzvizDeviceInfo parseDeviceInfoResponse(Map<String, dynamic> doc) {
+  final data = _unwrap(doc);
+  if (data is! Map<String, dynamic>) {
+    throw EzvizApiException('500', '设备详情应答缺少 data');
+  }
+  final serial = data['deviceSerial']?.toString() ?? '';
+  if (serial.isEmpty) {
+    throw EzvizApiException('500', '设备详情应答缺少 deviceSerial');
+  }
+  final model = (data['deviceType']?.toString() ?? '').isNotEmpty
+      ? data['deviceType'].toString()
+      : data['model']?.toString() ?? '';
+  return EzvizDeviceInfo(
+    serial: serial,
+    name: data['deviceName']?.toString() ?? '',
+    model: model,
+    version: data['deviceVersion']?.toString() ?? '',
+    online: data['status']?.toString() == '1',
+    isEncrypt: data['isEncrypt']?.toString() == '1',
+  );
+}
+
+/// Extracts the first address from a v2 live-address response. The platform
+/// answers `data` as a list of address objects on some deployments and as a
+/// single object (`url`, or `{ret: {url}}`) on others.
+String parseLiveAddressResponse(Map<String, dynamic> doc) {
+  final data = _unwrap(doc);
+  String urlOf(dynamic item) {
+    if (item is! Map) return '';
+    final ret = item['ret'];
+    return (item['url'] ?? (ret is Map ? ret['url'] : null))?.toString() ?? '';
+  }
+
+  String url = '';
+  if (data is List) {
+    for (final item in data) {
+      url = urlOf(item);
+      if (url.isNotEmpty) break;
+    }
+  } else {
+    url = urlOf(data);
+  }
+  if (url.isEmpty) {
+    throw EzvizApiException('500', '取流应答缺少 url');
+  }
+  return url;
+}
+
+/// Extracts `data.picUrl` from a capture response.
+String parseCaptureResponse(Map<String, dynamic> doc) {
+  final data = _unwrap(doc);
+  final url = data is Map<String, dynamic>
+      ? data['picUrl']?.toString() ??
+          ((data['picUrlList'] as List?)?.isNotEmpty == true
+              ? data['picUrlList'].first.toString()
+              : '')
+      : '';
+  if (url.isEmpty) {
+    throw EzvizApiException('500', '抓图应答缺少 picUrl');
+  }
+  return url;
+}
+
 /// One page of the device list (POST /api/lapp/device/list).
 List<EzvizDevice> parseDeviceListResponse(Map<String, dynamic> doc) {
   final data = _unwrap(doc);
@@ -147,5 +237,88 @@ class EzvizCloudClient {
       if (chunk.length < 50) break;
     }
     return devices;
+  }
+
+  /// 设备详情 (POST /api/lapp/device/info).
+  Future<EzvizDeviceInfo> fetchDeviceInfo(
+      String accessToken, String deviceSerial) async {
+    final doc = await _post('/device/info', {
+      'accessToken': accessToken,
+      'deviceSerial': deviceSerial,
+    });
+    return parseDeviceInfoResponse(doc);
+  }
+
+  /// 云端改名 (POST /api/lapp/device/name/update). [deviceName] is capped by
+  /// the platform at 50 bytes; callers validate before calling.
+  Future<void> renameDevice(
+      String accessToken, String deviceSerial, String deviceName) async {
+    final doc = await _post('/device/name/update', {
+      'accessToken': accessToken,
+      'deviceSerial': deviceSerial,
+      'deviceName': deviceName,
+    });
+    _unwrap(doc);
+  }
+
+  /// 云端抓图 (POST /api/lapp/device/capture). Returns a picture URL valid
+  /// for about two hours; the platform allows one capture per 4 seconds.
+  Future<String> capture(String accessToken, String deviceSerial,
+      {int channelNo = 1}) async {
+    final doc = await _post('/device/capture', {
+      'accessToken': accessToken,
+      'deviceSerial': deviceSerial,
+      'channelNo': '$channelNo',
+    });
+    return parseCaptureResponse(doc);
+  }
+
+  /// 云端直播地址 (POST /api/lapp/v2/live/address/get). [protocol]: 1 ezopen,
+  /// 2 HLS, 3 RTMP, 4 FLV (H.264 only); [quality]: 1 main, 2 sub;
+  /// [expireSeconds] 30 .. 720 days.
+  Future<String> liveAddress(String accessToken, String deviceSerial,
+      {int channelNo = 1,
+      int protocol = 4,
+      int quality = 1,
+      int expireSeconds = 3600}) async {
+    final doc = await _post('/v2/live/address/get', {
+      'accessToken': accessToken,
+      'deviceSerial': deviceSerial,
+      'channelNo': '$channelNo',
+      'protocol': '$protocol',
+      'quality': '$quality',
+      'expireTime': '$expireSeconds',
+      'type': '1',
+    });
+    return parseLiveAddressResponse(doc);
+  }
+
+  /// 云台开始转动 (POST /api/lapp/device/ptz/start). [direction]: 0 up,
+  /// 1 down, 2 left, 3 right, 4 up-left, 5 down-left, 6 up-right,
+  /// 7 down-right, 8 zoom in, 9 zoom out, 10 near focus, 11 far focus,
+  /// 16 auto. HIK-backed cameras reject speed 0, so the default is 1.
+  Future<void> ptzStart(String accessToken, String deviceSerial, int direction,
+      {int channelNo = 1, int speed = 1}) async {
+    final doc = await _post('/device/ptz/start', {
+      'accessToken': accessToken,
+      'deviceSerial': deviceSerial,
+      'channelNo': '$channelNo',
+      'direction': '$direction',
+      'speed': '$speed',
+    });
+    _unwrap(doc);
+  }
+
+  /// 云台停止 (POST /api/lapp/device/ptz/stop). The platform requires the
+  /// same direction that was started.
+  Future<void> ptzStop(String accessToken, String deviceSerial, int direction,
+      {int channelNo = 1}) async {
+    final doc = await _post('/device/ptz/stop', {
+      'accessToken': accessToken,
+      'deviceSerial': deviceSerial,
+      'channelNo': '$channelNo',
+      'direction': '$direction',
+    });
+    _unwrap(doc);
   }
 }
