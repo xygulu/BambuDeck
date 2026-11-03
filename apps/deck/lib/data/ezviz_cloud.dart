@@ -82,8 +82,7 @@ class EzvizDeviceInfo {
   final bool isEncrypt;
 
   @override
-  String toString() =>
-      'EzvizDeviceInfo($serial "$name" $model v$version '
+  String toString() => 'EzvizDeviceInfo($serial "$name" $model v$version '
       '${online ? "online" : "offline"})';
 }
 
@@ -157,15 +156,19 @@ String parseCaptureResponse(Map<String, dynamic> doc) {
 List<EzvizDevice> parseDeviceListResponse(Map<String, dynamic> doc) {
   final data = _unwrap(doc);
   if (data is! List) return const [];
-  return data.whereType<Map<String, dynamic>>().map((d) {
-    return EzvizDevice(
-      serial: d['deviceSerial']?.toString() ?? '',
-      name: d['deviceName']?.toString() ?? '',
-      model: d['model']?.toString() ?? '',
-      online: d['status']?.toString() == '1',
-      isEncrypt: d['isEncrypt']?.toString() == '1',
-    );
-  }).where((d) => d.serial.isNotEmpty).toList();
+  return data
+      .whereType<Map<String, dynamic>>()
+      .map((d) {
+        return EzvizDevice(
+          serial: d['deviceSerial']?.toString() ?? '',
+          name: d['deviceName']?.toString() ?? '',
+          model: d['model']?.toString() ?? '',
+          online: d['status']?.toString() == '1',
+          isEncrypt: d['isEncrypt']?.toString() == '1',
+        );
+      })
+      .where((d) => d.serial.isNotEmpty)
+      .toList();
 }
 
 /// EZVIZ open platform client (open.ys7.com lapp v1). The endpoints take
@@ -218,8 +221,8 @@ class EzvizCloudClient {
   /// persisted - fetched on demand).
   Future<String> fetchToken(
       {required String appKey, required String appSecret}) async {
-    final doc = await _post(
-        '/token/get', {'appKey': appKey, 'appSecret': appSecret});
+    final doc =
+        await _post('/token/get', {'appKey': appKey, 'appSecret': appSecret});
     return parseTokenResponse(doc);
   }
 
@@ -291,6 +294,26 @@ class EzvizCloudClient {
       'type': '1',
     });
     return parseLiveAddressResponse(doc);
+  }
+
+  /// 关闭设备视频加密 (POST /api/lapp/device/encrypt/off) - 开了「视频加密」的
+  /// 设备, 所有云端取流接口都会回 60019 加密已开启, 关掉才拿得到地址。
+  /// 60016 (加密未开启) 对调用方等同成功。若平台要求验证码会回 20010,
+  /// 那时只能由用户在萤石App里关。
+  Future<void> encryptOff(String accessToken, String deviceSerial,
+      {String? validateCode}) async {
+    final doc = await _post('/device/encrypt/off', {
+      'accessToken': accessToken,
+      'deviceSerial': deviceSerial,
+      if (validateCode != null && validateCode.isNotEmpty)
+        'validateCode': validateCode,
+    });
+    try {
+      _unwrap(doc);
+    } on EzvizApiException catch (e) {
+      if (e.code == '60016') return;
+      rethrow;
+    }
   }
 
   /// 云台开始转动 (POST /api/lapp/device/ptz/start). [direction]: 0 up,

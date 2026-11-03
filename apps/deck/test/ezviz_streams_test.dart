@@ -194,11 +194,39 @@ void main() {
     expect(calls, 1);
   });
 
-  test('fetchOrThrow rethrows the platform error with its message', () async {
-    var calls = 0;
+  test('60019 自动关闭视频加密后重取成功', () async {
+    var offCalls = 0;
+    var liveCalls = 0;
     final cache = EzvizStreamCache(
       session: sessionWith((uri, fields) async {
-        calls++;
+        if (uri.path.endsWith('/device/encrypt/off')) {
+          offCalls++;
+          expect(fields['deviceSerial'], 'S1');
+          return {'code': '200', 'msg': '操作成功!'};
+        }
+        liveCalls++;
+        if (liveCalls == 1) return {'code': '60019', 'msg': '加密已开启'};
+        return {
+          'code': '200',
+          'data': [
+            {'url': 'https://gw/after_off.flv'},
+          ],
+        };
+      }),
+    );
+    expect(await cache.fetchOrThrow('S1'), 'https://gw/after_off.flv');
+    expect(offCalls, 1);
+    expect(liveCalls, 2); // 60019 -> 关加密 -> 重取
+  });
+
+  test('自动关闭被平台拒绝时给可行动的提示', () async {
+    var offCalls = 0;
+    final cache = EzvizStreamCache(
+      session: sessionWith((uri, fields) async {
+        if (uri.path.endsWith('/device/encrypt/off')) {
+          offCalls++;
+          return {'code': '20010', 'msg': '设备验证码错误'};
+        }
         return {'code': '60019', 'msg': '加密已开启'};
       }),
     );
@@ -206,10 +234,10 @@ void main() {
       cache.fetchOrThrow('S1'),
       throwsA(isA<EzvizApiException>()
           .having((e) => e.code, 'code', '60019')
-          .having((e) => e.message, 'message', '加密已开启')),
+          .having((e) => e.message, 'message', contains('自动关闭失败'))
+          .having((e) => e.message, 'message', contains('设备验证码错误'))),
     );
-    // 一次解析 = FLV(4) 失败退 HLS(2), 共 2 次调用。
-    expect(calls, 2);
+    expect(offCalls, 1);
     expect(cache.cached('S1'), isNull);
   });
 
@@ -229,6 +257,48 @@ void main() {
     expect(await cache.fetchOrThrow('S1'), 'https://gw/live.flv');
     expect(await cache.fetchOrThrow('S1'), 'https://gw/live.flv');
     expect(calls, 1);
+  });
+
+  test('连续断流后优先 HLS; HLS 打不通回落 FLV 即恢复 FLV 优先', () async {
+    final protocols = <String>[];
+    var hlsFails = false;
+    final cache = EzvizStreamCache(
+      session: sessionWith((uri, fields) async {
+        final p = fields['protocol']!;
+        protocols.add(p);
+        if (p == '2' && hlsFails) return {'code': '60000', 'msg': 'HLS 不可用'};
+        return {
+          'code': '200',
+          'data': [
+            {'url': 'https://gw/p$p.m3u8'},
+          ],
+        };
+      }),
+    );
+    expect(await cache.fetch('S1'), 'https://gw/p4.m3u8');
+    expect(protocols, ['4']); // 默认 FLV
+
+    cache
+      ..invalidate('S1')
+      ..invalidate('S1');
+    protocols.clear();
+    expect(await cache.fetch('S1'), 'https://gw/p2.m3u8');
+    expect(protocols, ['2']); // 断两次后改走 HLS
+
+    // HLS 打不通时回落 FLV, FLV 成功即清零计数。
+    hlsFails = true;
+    cache
+      ..invalidate('S1')
+      ..invalidate('S1');
+    protocols.clear();
+    expect(await cache.fetch('S1'), 'https://gw/p4.m3u8');
+    expect(protocols, ['2', '4']);
+
+    // 只断一次 (<2) 就仍优先 FLV —— 证明上面的成功把计数清零了。
+    cache.invalidate('S1');
+    protocols.clear();
+    expect(await cache.fetch('S1'), 'https://gw/p4.m3u8');
+    expect(protocols, ['4']);
   });
 
   test('fetchOrThrow shares the single-flight with fetch', () async {

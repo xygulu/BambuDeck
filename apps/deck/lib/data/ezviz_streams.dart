@@ -29,11 +29,17 @@ class EzvizStreamCache {
   final _entries = <String, _Entry>{};
   final _pending = <String, Future<String?>>{};
   final _lastForceFetch = <String, DateTime>{};
+  final _lastEncryptOff = <String, DateTime>{};
+  final _flvFailures = <String, int>{};
 
   /// How soon after a failure another forced refetch may run - mpv fires
   /// several error events for one dead stream, and a device that is
   /// offline would otherwise be polled once per error.
   static const _forceMinInterval = Duration(seconds: 15);
+
+  /// 同一个序列号两次自动关闭视频加密的最小间隔 - 平台侧真关掉之前不反复
+  /// 打这个写接口; 萤石App 若过几天又打开开关, 超过这个间隔就会自愈。
+  static const _encryptOffMinInterval = Duration(minutes: 10);
 
   /// The current address for [serial], or null when there is none or it
   /// has aged past [ttl] (the platform expires it shortly after; handing
@@ -63,6 +69,7 @@ class EzvizStreamCache {
         return Future.value(cached(serial));
       }
       _lastForceFetch[serial] = _now();
+      _noteDead(serial);
     }
     return _flight(serial).catchError((Object err) {
       log?.call('[ezviz] $serial 取流地址失败: $err');
@@ -89,7 +96,18 @@ class EzvizStreamCache {
 
   /// Stream died - drop the cached address and pull a fresh one so the
   /// next [fetch] (or relay retry) reconnects with a valid signature.
-  void invalidate(String serial) => _entries.remove(serial.trim());
+  void invalidate(String serial) {
+    serial = serial.trim();
+    _entries.remove(serial);
+    _noteDead(serial);
+  }
+
+  /// 记一条断流。连续断两次就认定 FLV 网关在这条网络线路上不稳 (实测
+  /// 地下室的 FLV 频繁 TLS 超时而 HLS 干净), 下次解析改优先 HLS; FLV
+  /// 真正拉通后计数清零、回到优先 FLV。
+  void _noteDead(String serial) {
+    _flvFailures[serial] = (_flvFailures[serial] ?? 0) + 1;
+  }
 
   /// Like [fetch] but rethrows the resolution error - 导入界面要把「加密已开启」
   /// 这类平台原因直接摆给用户 (泛泛的「取流失败」没法行动)。
@@ -104,20 +122,59 @@ class EzvizStreamCache {
   }
 
   Future<String?> _resolve(String serial) async {
+    final preferHls = (_flvFailures[serial] ?? 0) >= 2;
+    final first = preferHls ? 2 : 4;
+    final second = preferHls ? 4 : 2;
     final url = await session.run<String>((token) async {
       try {
-        return await session.client.liveAddress(token, serial,
-            protocol: 4, quality: 1, expireSeconds: expireSeconds);
-      } on EzvizApiException {
+        final url = await _live(token, serial, protocol: first);
+        if (first == 4) _flvFailures.remove(serial);
+        return url;
+      } on EzvizApiException catch (e) {
+        // 加密类错误换协议也一样, 直接把那条更可行动的抛出去。
+        if (e.code == '60019') rethrow;
         // FLV is H.264-only and some gateways only serve HLS - retry once.
-        return await session.client.liveAddress(token, serial,
-            protocol: 2, quality: 1, expireSeconds: expireSeconds);
+        final url = await _live(token, serial, protocol: second);
+        if (second == 4) _flvFailures.remove(serial);
+        return url;
       }
     });
     _entries[serial] = _Entry(url: url, fetchedAt: _now());
     log?.call('[ezviz] $serial 取流地址已刷新 '
         '(${Uri.parse(url).scheme}, ${Uri.parse(url).host})');
     return url;
+  }
+
+  /// One live-address call, healing 60019 加密已开启: a device with 视频加密
+  /// switched on refuses *every* cloud stream, so the fix is the platform's
+  /// encrypt/off followed by one retry (用户 2026-11-03 同意自动关闭).
+  /// 萤石App 过几天可能又把开关打开, 所以按 [_encryptOffMinInterval] 节流
+  /// 重试, 而不是只做一次。
+  Future<String> _live(String token, String serial,
+      {required int protocol}) async {
+    Future<String> call() => session.client.liveAddress(token, serial,
+        protocol: protocol, quality: 1, expireSeconds: expireSeconds);
+    try {
+      return await call();
+    } on EzvizApiException catch (e) {
+      if (e.code != '60019') rethrow;
+      final last = _lastEncryptOff[serial];
+      if (last != null && _now().difference(last) < _encryptOffMinInterval) {
+        rethrow;
+      }
+      _lastEncryptOff[serial] = _now();
+      log?.call('[ezviz] $serial 视频加密已开启, 尝试自动关闭');
+      try {
+        await session.client.encryptOff(token, serial);
+      } on EzvizApiException catch (off) {
+        // 平台可能要设备验证码才让关 (20010) - 这时只能引导用户去App里关。
+        throw EzvizApiException(
+            '60019',
+            '视频加密已开启, 自动关闭失败(${off.message})'
+                '——请在萤石App该摄像头设置里关闭视频加密');
+      }
+      return call();
+    }
   }
 }
 
