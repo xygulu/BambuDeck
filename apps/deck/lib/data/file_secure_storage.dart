@@ -125,7 +125,12 @@ Future<void> seedFileStore(
   Future<Map<String, String>?> tryRead(
       FlutterSecureStorage s, String key) async {
     try {
-      final v = await s.read(key: key);
+      // 超时兜底:换过签名的机器上,读旧 Keychain 条目可能弹授权框并一直
+      // 等待点击 —— 这里在启动路径上,绝不能把 App 卡死在「没响应」。等不到
+      // 就当没有,文件存储本身不受影响。
+      final v = await s
+          .read(key: key)
+          .timeout(const Duration(seconds: 3), onTimeout: () => null);
       return (v == null || v.isEmpty) ? null : {key: v};
     } catch (_) {
       // Keychain 拒读(交互不允许等):安静跳过,不影响文件存储自身。
