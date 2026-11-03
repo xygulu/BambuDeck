@@ -19,6 +19,7 @@ import '../../data/settings_providers.dart';
 import '../../ui/camera_tile.dart';
 import '../monitor/overview_wall.dart';
 import 'ezviz_cloud_actions.dart';
+import 'ezviz_cloud_tile.dart';
 import 'ezviz_import_sheet.dart';
 
 /// Cameras tab body (PRD FR-3): a stepless-zoomable wall of live tiles
@@ -272,13 +273,32 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
   /// One wall cell: the feed fills the cell; 绑定打印机时左上角挂状态角标。
   Widget _wallCell(CameraProfile camera, List<PrinterProfile> printers) {
     final linked = _linkedPrinter(camera, printers);
-    final url = camera.resolveUrl(linked);
+    // 萤石云端画面不走 resolveUrl (地址会过期, 由 EzvizCloudFeed 现取现用)。
+    final isCloud = camera.sourceType == CameraSourceType.ezviz;
+    final url = isCloud ? null : camera.resolveUrl(linked);
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
       child: GestureDetector(
         onLongPress: () => _showCameraActions(camera),
         child: Stack(fit: StackFit.expand, children: [
-        if (url != null && camera.enabled)
+        if (isCloud && camera.enabled)
+          EzvizCloudFeed(
+            camera: camera,
+            builder: (ctx, feedUrl, refetch) => CameraTile(
+              streamUrl: feedUrl,
+              label: camera.name,
+              expand: true,
+              onToggleQuality: qualityToggler(ref, camera),
+              cameraId: camera.id,
+              frameSlot: 'cameras-grid',
+              flipH: camera.flipH,
+              rotationDeg: camera.rotationDeg,
+              ptzInvertPan: camera.ptzInvertPan,
+              ptzInvertTilt: camera.ptzInvertTilt,
+              onStreamFailed: refetch,
+            ),
+          )
+        else if (url != null && camera.enabled)
           CameraTile(
             streamUrl: url,
             label: camera.name,
@@ -669,11 +689,17 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
               ),
               const SizedBox(height: 12),
               SegmentedButton<CameraSourceType>(
-                segments: const [
-                  ButtonSegment(
+                segments: [
+                  const ButtonSegment(
                       value: CameraSourceType.rtsp, label: Text('RTSP/ONVIF')),
-                  ButtonSegment(
+                  const ButtonSegment(
                       value: CameraSourceType.bambu, label: Text('打印机自带')),
+                  // 云端摄像头由「从萤石账号导入」创建 (凭序列号取流, 没有
+                  // 手填地址), 这里只在编辑已有云端摄像头时可选。
+                  ButtonSegment(
+                      value: CameraSourceType.ezviz,
+                      label: const Text('萤石云端'),
+                      enabled: editing != null),
                 ],
                 selected: {type},
                 onSelectionChanged: (s) => setState(() => type = s.first),
@@ -693,6 +719,8 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                   ),
                 ),
                 const SizedBox(height: 14),
+              ],
+              if (type != CameraSourceType.bambu) ...[
                 const Text('画面方向',
                     style: TextStyle(
                         fontSize: 12, color: DeckColors.textSecondary)),
@@ -746,25 +774,27 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                     onChanged: (v) => setState(() => ptzInvertTilt = v),
                   ),
                 ]),
-                // 编辑模式只改名称/连接信息, 网段扫描是添加时的入口。
-                if (editing == null) ...[
-                  const SizedBox(height: 10),
-                  Row(children: [
-                    Expanded(
-                      child: TextField(
-                        controller: subnetCtrl,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                            labelText: '扫描网段前缀', hintText: '192.168.100'),
-                      ),
+              ],
+              // 编辑模式只改名称/连接信息, 网段扫描是添加时的入口。
+              if (type == CameraSourceType.rtsp && editing == null) ...[
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: subnetCtrl,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                          labelText: '扫描网段前缀', hintText: '192.168.100'),
                     ),
-                    const SizedBox(width: 8),
-                    FilledButton.tonal(
-                      onPressed: scanning ? null : () => runScan(setState),
-                      child: Text(scanning ? '扫描中…' : '自动扫描'),
-                    ),
-                  ]),
-                ],
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.tonal(
+                    onPressed: scanning ? null : () => runScan(setState),
+                    child: Text(scanning ? '扫描中…' : '自动扫描'),
+                  ),
+                ]),
+              ],
+              if (type == CameraSourceType.rtsp) ...[
                 if (scanning) ...[
                   const SizedBox(height: 8),
                   LinearProgressIndicator(
@@ -817,6 +847,8 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                       style: TextStyle(
                           fontSize: 11, color: DeckColors.textSecondary)),
                 ],
+              ],
+              if (type != CameraSourceType.bambu) ...[
                 const SizedBox(height: 10),
                 DropdownButtonFormField<PrinterProfile>(
                   initialValue: linked,
@@ -828,7 +860,18 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                   ],
                   onChanged: (p) => setState(() => linked = p),
                 ),
-              ] else ...[
+              ],
+              if (type == CameraSourceType.ezviz) ...[
+                const SizedBox(height: 10),
+                Text(
+                  '萤石云端摄像头:画面凭序列号从萤石云现取现用(地址会过期所以不显示),'
+                  '无需验证码和 IP;云端改名/云台/抓图在画面右下角「⋯」菜单里。',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: DeckColors.textSecondary.withValues(alpha: 0.9)),
+                ),
+              ],
+              if (type == CameraSourceType.bambu) ...[
                 DropdownButtonFormField<PrinterProfile>(
                   initialValue: linked,
                   decoration: const InputDecoration(labelText: '选择打印机(局域网直连)'),

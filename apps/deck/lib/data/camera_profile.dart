@@ -15,11 +15,20 @@ enum CameraSourceType {
   /// credentials. Transport depends on the model: A1/A1 mini/P1/P1P speak
   /// MJPEG over TLS :6000 (bmjpeg:// scheme), X1/P1S/P2S/H2 speak
   /// RTSPS :322.
-  bambu;
+  bambu,
+
+  /// 萤石云端直连 (2026-11-03): the stream comes from the EZVIZ open
+  /// platform, identified only by [ezvizSerial] - no LAN address and no
+  /// verification code. The playback URL is a signed FLV/HLS live address
+  /// that expires, so it is *not* stored here; [EzvizStreamCache] resolves
+  /// and refreshes it on demand and [resolveUrl] intentionally returns
+  /// null for this type.
+  ezviz;
 
   String get label => switch (this) {
         rtsp => 'RTSP / ONVIF',
         bambu => '打印机自带',
+        ezviz => '萤石云端',
       };
 }
 
@@ -125,7 +134,13 @@ class CameraProfile {
   /// cameras as `rtsp://bblp:code@ip/stream_live`; when such an rtsp URL
   /// points at the linked LAN printer it is re-derived from the model so
   /// it rides the right transport instead of hitting mpv blind.
+  ///
+  /// [CameraSourceType.ezviz] always returns null here on purpose: its
+  /// playback address is a signed, expiring cloud URL that only the
+  /// EzvizStreamCache can produce (and refresh), so consumers resolve it
+  /// asynchronously there instead of through this method.
   String? resolveUrl(PrinterProfile? linked) {
+    if (sourceType == CameraSourceType.ezviz) return null;
     if (sourceType == CameraSourceType.bambu) {
       if (linked == null ||
           linked.mode != PrinterMode.lan ||

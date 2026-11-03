@@ -28,8 +28,7 @@ String? verificationCodeFromUrl(String url) {
 /// each one to its LAN address by serial (HCNetSDK login readout), and add
 /// the picked ones as RTSP profiles. The AppKey/Secret persist in settings;
 /// the token is fetched on demand.
-Future<void> showEzvizImportSheet(
-    BuildContext context, WidgetRef ref) async {
+Future<void> showEzvizImportSheet(BuildContext context, WidgetRef ref) async {
   await showDialog(
     context: context,
     builder: (_) => const _EzvizImportDialog(),
@@ -40,14 +39,17 @@ class _EzvizImportDialog extends ConsumerStatefulWidget {
   const _EzvizImportDialog();
 
   @override
-  ConsumerState<_EzvizImportDialog> createState() =>
-      _EzvizImportDialogState();
+  ConsumerState<_EzvizImportDialog> createState() => _EzvizImportDialogState();
 }
 
 class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
   final _appKeyCtrl = TextEditingController();
   final _secretCtrl = TextEditingController();
   final _subnetCtrl = TextEditingController();
+
+  /// 云端直连 (默认): 只凭序列号从萤石云取流, 不需要验证码和 IP。
+  /// 局域网 RTSP: 走老的 验证码+IP 路径 (外网访问/低延迟场景用)。
+  bool _cloudMode = true;
 
   List<EzvizDevice> _devices = const [];
   // Per-device form state, keyed by serial.
@@ -73,8 +75,8 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
       final local = await detectLocalIpv4();
       final parts = local.split('.');
       if (parts.length == 4) {
-        setState(() =>
-            _subnetCtrl.text = '${parts[0]}.${parts[1]}.${parts[2]}');
+        setState(
+            () => _subnetCtrl.text = '${parts[0]}.${parts[1]}.${parts[2]}');
       }
     } catch (_) {
       // leave empty - the user can type the prefix
@@ -135,7 +137,10 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
         _devices = list;
         _checked
           ..clear()
-          ..addAll([for (final d in list) if (d.online) d.serial]);
+          ..addAll([
+            for (final d in list)
+              if (d.online) d.serial
+          ]);
         _fetching = false;
         if (list.isEmpty) _error = '该账号下没有绑定设备';
       });
@@ -150,8 +155,7 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
   Future<void> _lookupIp(String serial) async {
     final code = _codeCtrls[serial]?.text.trim() ?? '';
     final prefix = _subnetCtrl.text.trim();
-    if (code.isEmpty ||
-        !RegExp(r'^\d{1,3}(\.\d{1,3}){2}$').hasMatch(prefix)) {
+    if (code.isEmpty || !RegExp(r'^\d{1,3}(\.\d{1,3}){2}$').hasMatch(prefix)) {
       setState(() => _error = '查 IP 前需填验证码和网段前缀(如 192.168.100)');
       return;
     }
@@ -180,6 +184,61 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
     // Captured before any await - the dialog pops at the end and context
     // must not be touched across that gap.
     final messenger = ScaffoldMessenger.of(context);
+    if (_cloudMode) {
+      await _importCloud(messenger);
+    } else {
+      await _importRtsp(messenger);
+    }
+  }
+
+  /// 云端直连导入: 只凭序列号, 现场从萤石云取一条直播地址放进取流缓存,
+  /// 画面块随即能播。不需要验证码和 IP (直接读云端 2026-11-03)。
+  Future<void> _importCloud(ScaffoldMessengerState messenger) async {
+    final cameras = ref.read(camerasProvider).valueOrNull ?? const [];
+    final cache = ref.read(ezvizStreamsProvider);
+    final added = <String>[];
+    final skipped = <String>[];
+    for (final d in _devices) {
+      if (!_checked.contains(d.serial)) continue;
+      final label = d.name.isEmpty ? d.serial : d.name;
+      if (_bySerial(cameras, d.serial) != null) {
+        skipped.add('$label(已存在)');
+        continue;
+      }
+      try {
+        // 用会抛错的变体: 平台原因(60019 加密已开启等)直接进跳过清单,
+        // 用户才知道去萤石App里关视频加密。
+        await cache.fetchOrThrow(d.serial);
+      } on EzvizApiException catch (e) {
+        skipped.add('$label(${e.message})');
+        continue;
+      } catch (e) {
+        skipped.add('$label(取流失败: $e)');
+        continue;
+      }
+      await ref.read(camerasProvider.notifier).add(CameraProfile(
+            id: 'c_${DateTime.now().millisecondsSinceEpoch}_${added.length}',
+            name: label,
+            sourceType: CameraSourceType.ezviz,
+            ezvizSerial: d.serial,
+            createdAt: DateTime.now().millisecondsSinceEpoch,
+          ));
+      added.add(label);
+    }
+    if (mounted) Navigator.of(context).pop();
+    if (added.isEmpty && skipped.isEmpty) {
+      messenger.showSnackBar(const SnackBar(content: Text('没有新的摄像头可导入')));
+    } else {
+      messenger.showSnackBar(SnackBar(
+          content: Text([
+        if (added.isNotEmpty) '已导入 ${added.length} 个: ${added.join('、')}',
+        if (skipped.isNotEmpty) '跳过: ${skipped.join('; ')}',
+      ].join('  ·  '))));
+    }
+  }
+
+  /// 局域网 RTSP 导入 (老路径): 每台要 验证码 + IP。
+  Future<void> _importRtsp(ScaffoldMessengerState messenger) async {
     final cameras = ref.read(camerasProvider).valueOrNull ?? const [];
     final added = <String>[];
     final linked = <String>[];
@@ -222,8 +281,10 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
     } else {
       messenger.showSnackBar(SnackBar(
           content: Text([
-        if (added.isNotEmpty) '已导入 ${added.length} 个: ${added.join('、')}'
-        else if (linked.isEmpty) '未导入新摄像头',
+        if (added.isNotEmpty)
+          '已导入 ${added.length} 个: ${added.join('、')}'
+        else if (linked.isEmpty)
+          '未导入新摄像头',
         if (linked.isNotEmpty) '已关联 ${linked.length} 个: ${linked.join('、')}',
         if (skipped.isNotEmpty) '跳过: ${skipped.join('; ')}',
       ].join('  ·  '))));
@@ -264,8 +325,31 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
             children: [
               const Text(
                   'AppKey / AppSecret 来自 open.ys7.com 控制台 → 应用信息,一个账号覆盖名下所有摄像头。',
-                  style: TextStyle(
-                      fontSize: 12, color: DeckColors.textSecondary)),
+                  style:
+                      TextStyle(fontSize: 12, color: DeckColors.textSecondary)),
+              const SizedBox(height: 10),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(
+                      value: true,
+                      icon: Icon(Icons.cloud_outlined, size: 18),
+                      label: Text('云端直连(推荐)')),
+                  ButtonSegment(
+                      value: false,
+                      icon: Icon(Icons.lan_outlined, size: 18),
+                      label: Text('局域网 RTSP')),
+                ],
+                selected: {_cloudMode},
+                onSelectionChanged: (s) => setState(() => _cloudMode = s.first),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _cloudMode
+                    ? '云端直连:只凭序列号从萤石云取流,不需要验证码和 IP(手机在外网也能看)。'
+                    : '局域网 RTSP:每台需要设备标签上的 6 位验证码和局域网 IP,同一网络内延迟最低。',
+                style: const TextStyle(
+                    fontSize: 12, color: DeckColors.textSecondary),
+              ),
               const SizedBox(height: 10),
               Row(children: [
                 Expanded(
@@ -279,8 +363,7 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
                   child: TextField(
                     controller: _secretCtrl,
                     obscureText: true,
-                    decoration:
-                        const InputDecoration(labelText: 'AppSecret'),
+                    decoration: const InputDecoration(labelText: 'AppSecret'),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -290,24 +373,24 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
                       ? const SizedBox(
                           width: 16,
                           height: 16,
-                          child:
-                              CircularProgressIndicator(strokeWidth: 2))
+                          child: CircularProgressIndicator(strokeWidth: 2))
                       : const Text('获取设备列表'),
                 ),
               ]),
               const SizedBox(height: 8),
-              TextField(
-                controller: _subnetCtrl,
-                decoration: const InputDecoration(
-                  labelText: '局域网网段前缀(自动查 IP 用)',
-                  hintText: '192.168.100',
+              if (!_cloudMode)
+                TextField(
+                  controller: _subnetCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '局域网网段前缀(自动查 IP 用)',
+                    hintText: '192.168.100',
+                  ),
                 ),
-              ),
               if (_error != null) ...[
                 const SizedBox(height: 8),
                 Text(_error!,
-                    style: const TextStyle(
-                        color: DeckColors.error, fontSize: 13)),
+                    style:
+                        const TextStyle(color: DeckColors.error, fontSize: 13)),
               ],
               const SizedBox(height: 6),
               for (final d in _devices) _deviceRow(d),
@@ -336,58 +419,56 @@ class _EzvizImportDialogState extends ConsumerState<_EzvizImportDialog> {
         color: DeckColors.bg.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(10),
       ),
-      child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              SizedBox(
-                width: 28,
-                child: Checkbox(
-                  value: _checked.contains(d.serial),
-                  onChanged: (v) => setState(() => v == true
-                      ? _checked.add(d.serial)
-                      : _checked.remove(d.serial)),
-                ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          SizedBox(
+            width: 28,
+            child: Checkbox(
+              value: _checked.contains(d.serial),
+              onChanged: (v) => setState(() => v == true
+                  ? _checked.add(d.serial)
+                  : _checked.remove(d.serial)),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              '$name  ·  ${d.online ? "在线" : "离线"}  ·  ${d.model}',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ]),
+        Text(d.serial,
+            style: const TextStyle(fontSize: 11, color: Colors.white54)),
+        if (!_cloudMode) ...[
+          const SizedBox(height: 6),
+          Row(children: [
+            Expanded(
+              child: TextField(
+                controller: _codeCtrls[d.serial],
+                obscureText: true,
+                decoration: const InputDecoration(
+                    labelText: '验证码', hintText: '设备标签上的 6 位码'),
               ),
-              Expanded(
-                child: Text(
-                  '$name  ·  ${d.online ? "在线" : "离线"}  ·  ${d.model}',
-                  style: const TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.w600),
-                  overflow: TextOverflow.ellipsis,
-                ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: _ipCtrls[d.serial],
+                decoration:
+                    const InputDecoration(labelText: 'IP', hintText: '可点右侧自动查'),
               ),
-            ]),
-            Text(d.serial,
-                style:
-                    const TextStyle(fontSize: 11, color: Colors.white54)),
-            const SizedBox(height: 6),
-            Row(children: [
-              Expanded(
-                child: TextField(
-                  controller: _codeCtrls[d.serial],
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                      labelText: '验证码', hintText: '设备标签上的 6 位码'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: TextField(
-                  controller: _ipCtrls[d.serial],
-                  decoration: const InputDecoration(
-                      labelText: 'IP', hintText: '可点右侧自动查'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton(
-                onPressed: _lookingUp.contains(d.serial)
-                    ? null
-                    : () => _lookupIp(d.serial),
-                child: Text(_lookingUp.contains(d.serial) ? '查找中' : '查 IP'),
-              ),
-            ]),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: _lookingUp.contains(d.serial)
+                  ? null
+                  : () => _lookupIp(d.serial),
+              child: Text(_lookingUp.contains(d.serial) ? '查找中' : '查 IP'),
+            ),
           ]),
+        ],
+      ]),
     );
   }
 }

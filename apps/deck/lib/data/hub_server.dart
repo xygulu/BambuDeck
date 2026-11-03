@@ -13,6 +13,8 @@ import 'bambu_mjpeg.dart';
 import 'bambu_mjpeg_hub.dart';
 import 'camera_profile.dart';
 import 'cloud_print_helper.dart';
+import 'ezviz_session.dart';
+import 'ezviz_streams.dart';
 import 'hub_config.dart';
 import 'hub_ptz.dart';
 import 'hub_update.dart';
@@ -111,6 +113,7 @@ class CameraRelay {
     required this.resolveUrl,
     required this.ffmpegPath,
     void Function(String message)? log,
+    this.onSourceDied,
   }) : _log = log ?? _noopLog;
 
   final CameraProfile camera;
@@ -118,6 +121,10 @@ class CameraRelay {
   /// Re-resolved on every (re)start so profile edits apply live.
   final String? Function() resolveUrl;
   final String ffmpegPath;
+
+  /// Stream-level failure while viewers remain (萤石云端地址过期后由
+  /// HubServer 在这里换一条新地址, 下次重连就带上; 本地源为 null).
+  final void Function()? onSourceDied;
   final void Function(String message) _log;
 
   final _frames = StreamController<Uint8List>.broadcast();
@@ -229,6 +236,10 @@ class CameraRelay {
       _log('[网页] ${camera.name}: 网页端开始转码拉流 (${_mask(url)}, '
           'ffmpeg=$ffmpegPath)');
       _runFfmpeg(url);
+    } else if (url.startsWith('http')) {
+      // 萤石云端 FLV/HLS (直接读云端 2026-11-03) - 带签名的地址, 日志照旧打码。
+      _log('[网页] ${camera.name}: 网页端开始云端拉流 (${_mask(url)})');
+      _runFfmpeg(url);
     } else {
       _log('[网页] ${camera.name}: 不支持的源 ${_mask(url)}');
     }
@@ -256,9 +267,27 @@ class CameraRelay {
         '-',
       ];
 
+  /// 萤石云端 FLV/HLS 的命令行 (直接读云端 2026-11-03): http 输入不认
+  /// rtsp 的 `-rtsp_transport/-timeout`, 换通用的 `-rw_timeout` (微秒) 兜住
+  /// 半开连接, 超时后 ffmpeg 退出走正常退避重连。
+  static List<String> cloudVideoArgs(String url) => [
+        '-loglevel', 'error',
+        '-rw_timeout', '10000000',
+        '-i', url,
+        '-an',
+        '-f', 'mjpeg',
+        '-q:v', '5',
+        '-',
+      ];
+
+  /// Per-scheme argument pick: rtsp* keeps the RTSP options, http(s) (萤石
+  /// 云端直连) gets the generic-timeout variant.
+  static List<String> argsFor(String url) =>
+      url.startsWith('rtsp') ? videoArgs(url) : cloudVideoArgs(url);
+
   Future<void> _runFfmpeg(String url) async {
     try {
-      final proc = await Process.start(ffmpegPath, videoArgs(url));
+      final proc = await Process.start(ffmpegPath, argsFor(url));
       _proc = proc;
       _startWatchdog();
       final splitter = JpegSplitter();
@@ -331,6 +360,7 @@ class CameraRelay {
   void _sourceDied() {
     _proc = null;
     if (_disposed || clients == 0) return;
+    onSourceDied?.call();
     _retry ??= Timer(_retryDelay, () {
       _retry = null;
       _retryDelay = _retryDelay * 2 > const Duration(seconds: 10)
@@ -587,6 +617,40 @@ class HubServer {
   AppSettings settings = const AppSettings();
   List<PrinterProfile> printers = const [];
   List<CameraProfile> cameras = const [];
+
+  /// 萤石云端取流缓存 (直接读云端 2026-11-03)。凭 settings 里的
+  /// AppKey/AppSecret 现取直播地址; key 换了就重建 (token 一并换新)。
+  EzvizStreamCache? _ezvizCache;
+  String _ezvizCacheKey = '';
+
+  EzvizStreamCache? _ezviz() {
+    final key = '${settings.ezvizAppKey.trim()}/${settings.ezvizAppSecret.trim()}';
+    if (key == '/') return null; // 未配置云账号
+    if (_ezvizCache == null || _ezvizCacheKey != key) {
+      _ezvizCacheKey = key;
+      _ezvizCache = EzvizStreamCache(
+        session: EzvizSession(settings: () => settings, log: _log),
+        log: _log,
+      );
+    }
+    return _ezvizCache;
+  }
+
+  /// Synced 世界里的统一取流地址解析: 本地源走 [CameraProfile.resolveUrl],
+  /// 萤石云端走缓存 ([EzvizStreamCache.cached]); 云端还没有现成地址时
+  /// 顺手排一次取流 (TTL+单飞兜底, 反复调用不会刷接口), 下次轮询/重连
+  /// 自然拿到。
+  String? _resolvedUrl(CameraProfile c, {PrinterProfile? linked}) {
+    if (c.sourceType == CameraSourceType.ezviz) {
+      final cache = _ezviz();
+      if (cache == null) return null;
+      final url = cache.cached(c.ezvizSerial);
+      if (url != null) return url;
+      unawaited(cache.fetch(c.ezvizSerial));
+      return null;
+    }
+    return c.resolveUrl(linked);
+  }
 
   /// Test seam: when set, `/stream/{id}` subscribes here instead of the
   /// managed relays (the returned stream must be broadcast-capable or
@@ -1654,7 +1718,9 @@ class HubServer {
           if (c.printerIds.contains(p.id)) linked = p;
         }
       }
-      url = c.resolveUrl(linked);
+      // 萤石云端: 解析顺便排取流, 页面下一次轮询就带地址 (缓存 TTL 兜着,
+      // 不会刷接口)。
+      url = _resolvedUrl(c, linked: linked);
     }
     final hasStream = url != null && url.isNotEmpty;
     final isRtsp = c.sourceType == CameraSourceType.rtsp;
@@ -1896,11 +1962,16 @@ class HubServer {
               if (cur.printerIds.contains(p.id)) linked = p;
             }
           }
-          final url = cur.enabled ? cur.resolveUrl(linked) : null;
+          if (!cur.enabled) return null;
+          final url = _resolvedUrl(cur, linked: linked);
           return url != null && url.isNotEmpty ? url : null;
         },
         ffmpegPath: ffmpegPath,
         log: _log,
+        // 萤石云端的地址可能已过期: 源一死立刻作废缓存, 重连时现取新地址。
+        onSourceDied: c.sourceType == CameraSourceType.ezviz
+            ? () => _ezviz()?.invalidate(c.ezvizSerial)
+            : null,
       ),
     );
   }
@@ -1996,7 +2067,8 @@ class HubServer {
         // 和画面一样: 每次重连都重新解析 (码流/地址可能被改过)。
         resolveUrl: () {
           final cur = _findCamera(c.id) ?? c;
-          final url = cur.enabled ? cur.resolveUrl(null) : null;
+          if (!cur.enabled) return null;
+          final url = _resolvedUrl(cur);
           return url != null && url.isNotEmpty ? url : null;
         },
         ffmpegPath: ffmpegPath,

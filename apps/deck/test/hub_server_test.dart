@@ -840,4 +840,24 @@ void _ffmpegArgsTests() {
     expect(CameraRelay.videoArgs('rtsp://cam/live'),
         containsAllInOrder(['-i', 'rtsp://cam/live']));
   });
+
+  test('cloud (http FLV/HLS) sources get the generic-timeout args', () {
+    // 萤石云端直连 (2026-11-03): http 输入不认 rtsp 的私有选项
+    // (-rtsp_transport/-timeout 会报 "Option not found" 直接退出),
+    // 换通用的 -rw_timeout 兜半开连接。
+    for (final url in [
+      'https://gw.open.ys7.com/x.flv?sign=1',
+      'https://open.ys7.com/x.m3u8?sign=1',
+    ]) {
+      final args = CameraRelay.argsFor(url);
+      expect(args, isNot(contains('-rtsp_transport')));
+      expect(args, isNot(contains('-timeout')));
+      expect(args, contains('-rw_timeout'));
+      expect(args, containsAllInOrder(['-i', url]));
+      expect(args, contains('-an')); // 画面流不要声音 (声音是独立一路)
+    }
+    // rtsp 源保持原参数。
+    expect(CameraRelay.argsFor('rtsp://cam/live'),
+        CameraRelay.videoArgs('rtsp://cam/live'));
+  });
 }

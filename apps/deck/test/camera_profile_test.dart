@@ -108,6 +108,26 @@ void main() {
     expect(cam.resolveUrl(null), isNull);
   });
 
+  test('ezviz cloud camera: resolveUrl stays null (address lives in the '
+      'stream cache), type label and serial roundtrip', () {
+    final cam = CameraProfile(
+      id: 'c5',
+      name: '地下室',
+      sourceType: CameraSourceType.ezviz,
+      ezvizSerial: 'BA6***17',
+      createdAt: 42,
+    );
+    // The signed FLV/HLS address expires - it is never stored on the
+    // profile, so resolveUrl must not pretend there is one.
+    expect(cam.resolveUrl(null), isNull);
+    expect(cam.sourceType.label, '萤石云端');
+    final back = CameraProfile.fromJson(cam.toJson());
+    expect(back.sourceType, CameraSourceType.ezviz);
+    expect(back.ezvizSerial, 'BA6***17');
+    expect(back.createdAt, 42);
+    expect(back.copyWith(name: 'x2').ezvizSerial, 'BA6***17');
+  });
+
   test('store roundtrip', () async {
     final store = _MemoryStore();
     expect(await store.load(), isEmpty);

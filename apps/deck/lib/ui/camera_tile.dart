@@ -75,6 +75,7 @@ class CameraTile extends ConsumerStatefulWidget {
     this.onSetRotation,
     this.cameraId,
     this.frameSlot = 'main',
+    this.onStreamFailed,
   });
 
   final String streamUrl;
@@ -116,6 +117,11 @@ class CameraTile extends ConsumerStatefulWidget {
 
   /// Mount-site discriminator for the frame boundary registry.
   final String frameSlot;
+
+  /// Stream-level failure signal (打开失败或播放器报错时触发).
+  /// 萤石云端的地址会过期 - [EzvizCloudFeed] 借这个回调换一条新地址进来,
+  /// didUpdateWidget 随即自动重连. RTSP 等本地源不传它, 行为与之前一致.
+  final VoidCallback? onStreamFailed;
 
   /// Whether the orientation menu is shown (any of its actions present).
   bool get _showOrientation => onToggleFlip != null || onSetRotation != null;
@@ -204,6 +210,7 @@ class _CameraTileState extends ConsumerState<CameraTile> {
     _errSub = player.stream.error.listen((e) {
       LogBuffer.instance.add('[${widget.label}] 视频流错误: $e');
       if (mounted) setState(() => _error = '视频流错误: $e');
+      widget.onStreamFailed?.call();
       // 摄像头偶发半开/断流: 先自己重连几次, 不用回 App 手动刷新。
       _scheduleRetry();
     });
@@ -237,6 +244,7 @@ class _CameraTileState extends ConsumerState<CameraTile> {
     } catch (e) {
       LogBuffer.instance.add('[${widget.label}] 无法连接视频源: $e');
       if (mounted) setState(() => _error = '无法连接视频源: $e');
+      widget.onStreamFailed?.call();
       _scheduleRetry();
     }
   }

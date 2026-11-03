@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app_settings.dart';
 import 'camera_profile.dart';
 import 'ezviz_session.dart';
+import 'ezviz_streams.dart';
 import 'log_buffer.dart';
 import 'printer_profile.dart' show TombstoneStore;
 import 'settings_providers.dart';
@@ -72,3 +73,9 @@ final ezvizSessionProvider = Provider<EzvizSession>((ref) => EzvizSession(
           ref.read(appSettingsProvider).valueOrNull ?? const AppSettings(),
       log: LogBuffer.instance.add,
     ));
+
+/// 萤石云端取流缓存 (直接读云端 2026-11-03): resolves expiring FLV/HLS
+/// addresses for [CameraSourceType.ezviz] cameras; the 画面块 wrapper and
+/// this session share one token cache.
+final ezvizStreamsProvider = Provider<EzvizStreamCache>((ref) =>
+    EzvizStreamCache(session: ref.read(ezvizSessionProvider)));

@@ -10,6 +10,7 @@ import '../../data/rtsp_quality.dart';
 import '../../ui/camera_tile.dart';
 import '../../ui/visible_tile.dart';
 import '../cameras/cameras_page.dart';
+import '../cameras/ezviz_cloud_tile.dart';
 import '../cameras/ezviz_import_sheet.dart';
 import 'monitor_page.dart';
 
@@ -286,28 +287,51 @@ class _CameraPaneState extends ConsumerState<_CameraPane> {
         if (c.printerIds.contains(p.id)) linked = p;
       }
     }
+    final isCloud = c.sourceType == CameraSourceType.ezviz;
     final url = c.resolveUrl(linked);
-    final hasFeed = c.enabled && url != null && url.isNotEmpty;
+    final hasFeed = !isCloud && c.enabled && url != null && url.isNotEmpty;
 
-    final feed = hasFeed
-        ? VisibleOnlyTile(
-            key: ValueKey(c.id),
-            streamId: c.id,
-            child: CameraTile(
-              streamUrl: url,
-              showLabel: false,
-              cameraId: c.id,
-              frameSlot: _zoomed ? 'monitor-pane-zoom' : 'monitor-pane',
-              onToggleQuality: qualityToggler(ref, c),
-              flipH: c.flipH,
-              rotationDeg: c.rotationDeg,
-              ptzInvertPan: c.ptzInvertPan,
-              ptzInvertTilt: c.ptzInvertTilt,
-              onToggleFlip: flipToggler(ref, c),
-              onSetRotation: rotationSetter(ref, c),
+    final feed = isCloud && c.enabled
+        ? EzvizCloudFeed(
+            camera: c,
+            builder: (ctx, feedUrl, refetch) => VisibleOnlyTile(
+              key: ValueKey(c.id),
+              streamId: c.id,
+              child: CameraTile(
+                streamUrl: feedUrl,
+                showLabel: false,
+                cameraId: c.id,
+                frameSlot: _zoomed ? 'monitor-pane-zoom' : 'monitor-pane',
+                onToggleQuality: qualityToggler(ref, c),
+                flipH: c.flipH,
+                rotationDeg: c.rotationDeg,
+                ptzInvertPan: c.ptzInvertPan,
+                ptzInvertTilt: c.ptzInvertTilt,
+                onToggleFlip: flipToggler(ref, c),
+                onSetRotation: rotationSetter(ref, c),
+                onStreamFailed: refetch,
+              ),
             ),
           )
-        : _unavailableBox(c, url);
+        : hasFeed
+            ? VisibleOnlyTile(
+                key: ValueKey(c.id),
+                streamId: c.id,
+                child: CameraTile(
+                  streamUrl: url,
+                  showLabel: false,
+                  cameraId: c.id,
+                  frameSlot: _zoomed ? 'monitor-pane-zoom' : 'monitor-pane',
+                  onToggleQuality: qualityToggler(ref, c),
+                  flipH: c.flipH,
+                  rotationDeg: c.rotationDeg,
+                  ptzInvertPan: c.ptzInvertPan,
+                  ptzInvertTilt: c.ptzInvertTilt,
+                  onToggleFlip: flipToggler(ref, c),
+                  onSetRotation: rotationSetter(ref, c),
+                ),
+              )
+            : _unavailableBox(c, url);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -515,6 +539,7 @@ class _CameraGridCard extends ConsumerWidget {
         if (c.printerIds.contains(p.id)) linked = p;
       }
     }
+    final isCloud = c.sourceType == CameraSourceType.ezviz;
     final url = c.resolveUrl(linked);
 
     return Card(
@@ -523,33 +548,55 @@ class _CameraGridCard extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
-            child: c.enabled && url != null && url.isNotEmpty
-                ? VisibleOnlyTile(
-                    key: ValueKey(c.id),
-                    streamId: c.id,
-                    child: CameraTile(
-                      streamUrl: url,
-                      showLabel: true,
-                      cameraId: c.id,
-                      frameSlot: 'monitor-grid',
-                      onToggleQuality: qualityToggler(ref, c),
-                      flipH: c.flipH,
-                      rotationDeg: c.rotationDeg,
-                      ptzInvertPan: c.ptzInvertPan,
-                      ptzInvertTilt: c.ptzInvertTilt,
-                      onToggleFlip: flipToggler(ref, c),
-                      onSetRotation: rotationSetter(ref, c),
+            child: isCloud && c.enabled
+                ? EzvizCloudFeed(
+                    camera: c,
+                    builder: (ctx, feedUrl, refetch) => VisibleOnlyTile(
+                      key: ValueKey(c.id),
+                      streamId: c.id,
+                      child: CameraTile(
+                        streamUrl: feedUrl,
+                        showLabel: true,
+                        cameraId: c.id,
+                        frameSlot: 'monitor-grid',
+                        onToggleQuality: qualityToggler(ref, c),
+                        flipH: c.flipH,
+                        rotationDeg: c.rotationDeg,
+                        ptzInvertPan: c.ptzInvertPan,
+                        ptzInvertTilt: c.ptzInvertTilt,
+                        onToggleFlip: flipToggler(ref, c),
+                        onSetRotation: rotationSetter(ref, c),
+                        onStreamFailed: refetch,
+                      ),
                     ),
                   )
-                : Container(
-                    color: Colors.black,
-                    alignment: Alignment.center,
-                    child: Text(
-                      !c.enabled ? '已停用' : '未配置视频源',
-                      style: const TextStyle(
-                          fontSize: 13, color: DeckColors.textSecondary),
-                    ),
-                  ),
+                : c.enabled && url != null && url.isNotEmpty
+                    ? VisibleOnlyTile(
+                        key: ValueKey(c.id),
+                        streamId: c.id,
+                        child: CameraTile(
+                          streamUrl: url,
+                          showLabel: true,
+                          cameraId: c.id,
+                          frameSlot: 'monitor-grid',
+                          onToggleQuality: qualityToggler(ref, c),
+                          flipH: c.flipH,
+                          rotationDeg: c.rotationDeg,
+                          ptzInvertPan: c.ptzInvertPan,
+                          ptzInvertTilt: c.ptzInvertTilt,
+                          onToggleFlip: flipToggler(ref, c),
+                          onSetRotation: rotationSetter(ref, c),
+                        ),
+                      )
+                    : Container(
+                        color: Colors.black,
+                        alignment: Alignment.center,
+                        child: Text(
+                          !c.enabled ? '已停用' : '未配置视频源',
+                          style: const TextStyle(
+                              fontSize: 13, color: DeckColors.textSecondary),
+                        ),
+                      ),
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
