@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme.dart';
 import '../../data/bambu_mjpeg.dart';
+import '../../data/cloud_add_plan.dart';
 import '../../data/log_buffer.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
@@ -528,17 +529,24 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
     }
     final existing =
         ref.read(printersProvider).valueOrNull ?? const <PrinterProfile>[];
-    final existingSerials = existing.map((p) => p.serial).toSet();
     final notifier = ref.read(printersProvider.notifier);
+    // 已存在但缺访问码的打印机:云端这次给了码就就地补上(2026-11-03)。
+    // 之前只按 serial 判「已添加」直接跳过 —— 恢复数据后打印机没有访问码,
+    // 再点一键全部添加永远补不上,用户只能手输。决策抽成纯函数,见
+    // cloud_add_plan.dart(有单测)。
+    final plan = planCloudAdd(
+      existing: existing,
+      devices: devices,
+      token: token,
+      userId: userId,
+    );
+    final patched = plan.patches;
     var added = 0;
-    var skipped = 0;
+    final merged = patched.length;
+    final skipped = plan.skipped;
     var failed = 0;
     Object? firstError;
-    for (final d in devices) {
-      if (existingSerials.contains(d.devId)) {
-        skipped++;
-        continue;
-      }
+    for (final d in plan.toAdd) {
       // 逐台容错(2026-11-03):某台的保存失败不能打断整批 —— 之前循环里
       // 一次 throw 就让「一键全部添加」只加进第一台,用户看到的是「只加了
       // 一台」。
@@ -563,14 +571,25 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
         LogBuffer.instance.add('[云端添加] ${_deviceName(d)} 保存失败: $e');
       }
     }
+    if (patched.isNotEmpty) {
+      try {
+        await notifier.replaceAll([
+          for (final p in ref.read(printersProvider).valueOrNull ?? existing)
+            patched[p.id] ?? p,
+        ]);
+      } catch (e) {
+        failed++;
+        firstError ??= e;
+      }
+    }
     if (!mounted) return;
-    if (added == 0 && skipped > 0) {
+    if (added == 0 && merged == 0 && skipped > 0) {
       setState(() => _error = '所选打印机均已添加过');
       return;
     }
     if (failed > 0) {
       // 有失败就留在面板上如实报告,不再假装全部成功。
-      setState(() => _error = '已添加 $added 台,失败 $failed 台: $firstError');
+      setState(() => _error = '已添加 $added 台、补码 $merged 台,失败 $failed 台: $firstError');
       return;
     }
     // 云端给了访问码的新打印机: 后台补一次 LAN 发现, 命中就升级直连
