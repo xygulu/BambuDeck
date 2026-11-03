@@ -421,50 +421,70 @@ class _DeckAppState extends ConsumerState<DeckApp> {
   /// 产品化(2026-10-28):accounts 段(网页登录的云账号)与 accountId 归属的
   /// 打印机是网页服务(云同步)的地盘, App 导出不得覆盖 —— 按盘上现有文件合并:
   /// 云账号原样带回, 云账号名下的打印机在 App 本地清单之外原样追加。
+  /// 导出排队(2026-11-03): 打印机/摄像头在同一次操作里连续变化时,
+  /// [_exportHub] 会被连发多次。以前每次各自异步读盘再写盘,先读到旧快照
+  /// 的那次可能后落盘 —— 云端补码那一刻实测: secure_store 已经写进 4 个
+  /// 摄像头,hub.json 里却只剩 1 个,网页端就少了三台机内摄像头。现在串行
+  /// 执行,并在真正执行时才读 provider: 拿到的永远是最新状态;执行期间的新
+  /// 触发只置脏标,排到下一轮再导一次。
+  Future<void> _exportChain = Future<void>.value();
+  bool _exportDirty = false;
+
   void _exportHub() {
     // 自救(启动回填)完成前不许写盘 —— 否则 Keychain 降级状态会先冲掉盘上
     // 的完整数据,自救就没了数据源(2026-11-02 19:56 的数据丢失正是这个顺序)。
     if (!_hubRescueDone) return;
+    _exportDirty = true;
+    _exportChain = _exportChain.then((_) async {
+      if (!_exportDirty) return;
+      _exportDirty = false;
+      try {
+        await _exportHubNow();
+      } catch (e) {
+        LogBuffer.instance.add('[导出] hub.json 写入失败: $e');
+      }
+    });
+  }
+
+  Future<void> _exportHubNow() async {
     final printers = ref.read(printersProvider).valueOrNull;
     final cameras = ref.read(camerasProvider).valueOrNull;
     final settings = ref.read(appSettingsProvider).valueOrNull;
     // 三个 provider 任一还在载入就不导出: 用空列表兜底会把「半空状态」写盘,
     // 冷启动 Keychain 慢时尤其危险(hub.log 里 0/0→1/0→1/1 的渐进重载即此)。
     if (settings == null || printers == null || cameras == null) return;
-    unawaited(() async {
-      final disk = await loadHubConfig();
-      // 非破坏性导出(2026-11-03):设置段里 App 空着的密钥/地址类字段一律用
-      // 盘上值补(rescueSettings 的补空逻辑复用, 含 hubToken)。Keychain 一旦
-      // 降级,导出再也不能成为「把盘上密钥冲掉」的第二事故源。
-      final settingsOut = rescueSettings(settings, disk.settings) ?? settings;
-      // 打印机段:App 清单可能因存储降级而少(不是用户删的)。只有墓碑里的
-      // 那台才允许消失,其余以盘上为准 —— 导出不再是「把盘上清空」的第二
-      // 事故源(2026-11-03 事故链最后一环)。
-      final pStore = ref.read(storeProvider);
-      final tombstones = pStore is TombstoneStore
-          ? await (pStore as TombstoneStore).loadTombstones()
-          : const <String>{};
-      final merged = mergeExportPrinters(
-          app: printers, disk: disk.printers, tombstoned: tombstones);
-      // 摄像头段:同样只让「用户显式删过的」消失。
-      final cStore = ref.read(cameraStoreProvider);
-      final camTombstones = cStore is TombstoneStore
-          ? await (cStore as TombstoneStore).loadTombstones()
-          : const <String>{};
-      final mergedCams = [
-        ...cameras,
-        for (final c in disk.cameras)
-          if (!cameras.any((q) => q.id == c.id) &&
-              !camTombstones.contains('c:${c.id}'))
-            c,
-      ];
-      await saveHubConfig(HubConfig(
-        settings: settingsOut,
-        printers: merged,
-        cameras: mergedCams,
-        accounts: disk.accounts,
-      ));
-    }());
+    final disk = await loadHubConfig();
+    // 非破坏性导出(2026-11-03):设置段里 App 空着的密钥/地址类字段一律用
+    // 盘上值补(rescueSettings 的补空逻辑复用, 含 hubToken)。Keychain 一旦
+    // 降级,导出再也不能成为「把盘上密钥冲掉」的第二事故源。
+    final settingsOut = rescueSettings(settings, disk.settings) ?? settings;
+    // 打印机段:App 清单可能因存储降级而少(不是用户删的)。只有墓碑里的
+    // 那台才允许消失,其余以盘上为准 —— 导出不再是「把盘上清空」的第二
+    // 事故源(2026-11-03 事故链最后一环)。
+    final pStore = ref.read(storeProvider);
+    final tombstones = pStore is TombstoneStore
+        ? await (pStore as TombstoneStore).loadTombstones()
+        : const <String>{};
+    final merged = mergeExportPrinters(
+        app: printers, disk: disk.printers, tombstoned: tombstones);
+    // 摄像头段:同样只让「用户显式删过的」消失。
+    final cStore = ref.read(cameraStoreProvider);
+    final camTombstones = cStore is TombstoneStore
+        ? await (cStore as TombstoneStore).loadTombstones()
+        : const <String>{};
+    final mergedCams = [
+      ...cameras,
+      for (final c in disk.cameras)
+        if (!cameras.any((q) => q.id == c.id) &&
+            !camTombstones.contains('c:${c.id}'))
+          c,
+    ];
+    await saveHubConfig(HubConfig(
+      settings: settingsOut,
+      printers: merged,
+      cameras: mergedCams,
+      accounts: disk.accounts,
+    ));
   }
 
   /// Start/stop the web hub (网页访问) with its switch (2026-10-31 重构).
