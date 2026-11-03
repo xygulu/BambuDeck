@@ -277,13 +277,16 @@ class EzvizCloudClient {
   }
 
   /// 云端直播地址 (POST /api/lapp/v2/live/address/get). [protocol]: 1 ezopen,
-  /// 2 HLS, 3 RTMP, 4 FLV (H.264 only); [quality]: 1 main, 2 sub;
-  /// [expireSeconds] 30 .. 720 days.
+  /// 2 HLS, 3 RTMP, 4 FLV (H.264/H.265 per [supportH265]); [quality]: 1 main,
+  /// 2 sub; [expireSeconds] 30 .. 720 days. [supportH265]: 1 = 播放端要求
+  /// H.265 流 (智能编码设备默认 H.265, 不带这个参数平台会拒: 「视频编码类型
+  /// 非 H264」); 0/缺省 = 不要求 (H.264 设备照常给 H.264)。
   Future<String> liveAddress(String accessToken, String deviceSerial,
       {int channelNo = 1,
       int protocol = 4,
       int quality = 1,
-      int expireSeconds = 3600}) async {
+      int expireSeconds = 3600,
+      int supportH265 = 0}) async {
     final doc = await _post('/v2/live/address/get', {
       'accessToken': accessToken,
       'deviceSerial': deviceSerial,
@@ -292,6 +295,7 @@ class EzvizCloudClient {
       'quality': '$quality',
       'expireTime': '$expireSeconds',
       'type': '1',
+      'supportH265': '$supportH265',
     });
     return parseLiveAddressResponse(doc);
   }

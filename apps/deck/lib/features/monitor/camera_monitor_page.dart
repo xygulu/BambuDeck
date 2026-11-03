@@ -294,7 +294,7 @@ class _CameraPaneState extends ConsumerState<_CameraPane> {
     final feed = isCloud && c.enabled
         ? EzvizCloudFeed(
             camera: c,
-            builder: (ctx, feedUrl, refetch) => VisibleOnlyTile(
+            builder: (ctx, feedUrl, refetch, ptz) => VisibleOnlyTile(
               key: ValueKey(c.id),
               streamId: c.id,
               child: CameraTile(
@@ -307,6 +307,7 @@ class _CameraPaneState extends ConsumerState<_CameraPane> {
                 rotationDeg: c.rotationDeg,
                 ptzInvertPan: c.ptzInvertPan,
                 ptzInvertTilt: c.ptzInvertTilt,
+                ptzClient: ptz,
                 onToggleFlip: flipToggler(ref, c),
                 onSetRotation: rotationSetter(ref, c),
                 onStreamFailed: refetch,
@@ -551,7 +552,7 @@ class _CameraGridCard extends ConsumerWidget {
             child: isCloud && c.enabled
                 ? EzvizCloudFeed(
                     camera: c,
-                    builder: (ctx, feedUrl, refetch) => VisibleOnlyTile(
+                    builder: (ctx, feedUrl, refetch, ptz) => VisibleOnlyTile(
                       key: ValueKey(c.id),
                       streamId: c.id,
                       child: CameraTile(
@@ -564,6 +565,7 @@ class _CameraGridCard extends ConsumerWidget {
                         rotationDeg: c.rotationDeg,
                         ptzInvertPan: c.ptzInvertPan,
                         ptzInvertTilt: c.ptzInvertTilt,
+                        ptzClient: ptz,
                         onToggleFlip: flipToggler(ref, c),
                         onSetRotation: rotationSetter(ref, c),
                         onStreamFailed: refetch,

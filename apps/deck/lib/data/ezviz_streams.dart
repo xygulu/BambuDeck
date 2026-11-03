@@ -152,12 +152,23 @@ class EzvizStreamCache {
   /// 重试, 而不是只做一次。
   Future<String> _live(String token, String serial,
       {required int protocol}) async {
-    Future<String> call() => session.client.liveAddress(token, serial,
-        protocol: protocol, quality: 1, expireSeconds: expireSeconds);
+    Future<String> call({int supportH265 = 0}) =>
+        session.client.liveAddress(token, serial,
+            protocol: protocol,
+            quality: 1,
+            expireSeconds: expireSeconds,
+            supportH265: supportH265);
     try {
       return await call();
     } on EzvizApiException catch (e) {
-      if (e.code != '60019') rethrow;
+      // H.265 智能编码设备: 不带 supportH265=1 平台直接拒(「视频编码类型
+      // 非 H264」)。media_kit 能解 H.265, 带参重试一次即可 (2026-11-03)。
+      if (e.code != '60019') {
+        if (e.message.contains('H264') || e.message.contains('H265')) {
+          return call(supportH265: 1);
+        }
+        rethrow;
+      }
       final last = _lastEncryptOff[serial];
       if (last != null && _now().difference(last) < _encryptOffMinInterval) {
         rethrow;

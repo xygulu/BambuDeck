@@ -109,14 +109,21 @@ const _cameraKey = 'bambudeck.cameras';
 /// 2026-11-03 修复后 App 在用的库,DP(默认)是更早团队签名构建留下的、
 /// 事故中被孤儿化的条目 —— 那里可能有文件里已经丢掉的打印机访问码和萤石/
 /// 视觉密钥。规则:**文件为权威,Keychain 只补缺**(逐段复用 hub_rescue 的
-/// 合并函数),用户在文件里改过的值永不被旧数据覆盖。每次启动都跑,代价是
-/// 几次 Keychain 读;当用户在 Xcode 里续期 profile、重新用团队签名构建后,
-/// DP 条目恢复可读,其中的访问码会自动流回文件。
+/// 合并函数),用户在文件里改过的值永不被旧数据覆盖。只在文件为空(全新
+/// 安装)时跑:adhoc 包每次更新签名身份都变,种过之后再读 Keychain 会为
+/// 每条旧条目弹授权框 —— 那就是用户遇到的「每次更新启动都输密码」。
 Future<void> seedFileStore(
   FileSecureStorage storage, {
   FlutterSecureStorage? legacySource,
   FlutterSecureStorage? dpSource,
 }) async {
+  // 种过一次就不再碰 Keychain (2026-11-03 反馈「每次更新启动都输密码」):
+  // adhoc 包每次更新签名身份都变, 再读旧条目 macOS 就为每条弹一次钥匙串
+  // 授权框 —— 三个键 × 两个来源最多六次。文件存储是权威, 任一键有值就说明
+  // 种子迁移早已完成; 只有全新安装(文件空)才值得去 Keychain 捞一次。
+  for (final key in [_printerKey, _settingsKey, _cameraKey]) {
+    if (await storage.read(key) != null) return;
+  }
   final legacy = legacySource ??
       const FlutterSecureStorage(
           mOptions: MacOsOptions(useDataProtectionKeyChain: false));
@@ -159,28 +166,35 @@ Future<void> seedFileStore(
 String mergeSeedSegment(String key, String localRaw, String seedRaw) {
   try {
     if (key == _settingsKey) {
-      final merged = rescueSettings(AppSettings.fromJson(
+      final merged = rescueSettings(
+          AppSettings.fromJson(
             jsonDecode(localRaw) as Map<String, dynamic>,
           ),
           AppSettings.fromJson(jsonDecode(seedRaw) as Map<String, dynamic>));
-      return jsonEncode((merged ?? AppSettings.fromJson(
-            jsonDecode(localRaw) as Map<String, dynamic>,
-          )).toJson());
+      return jsonEncode((merged ??
+              AppSettings.fromJson(
+                jsonDecode(localRaw) as Map<String, dynamic>,
+              ))
+          .toJson());
     }
     if (key == _printerKey) {
-      List<PrinterProfile> parse(String raw) =>
-          (jsonDecode(raw) as List).whereType<Map<String, dynamic>>().map(
-                PrinterProfile.fromJson,
-              ).toList();
+      List<PrinterProfile> parse(String raw) => (jsonDecode(raw) as List)
+          .whereType<Map<String, dynamic>>()
+          .map(
+            PrinterProfile.fromJson,
+          )
+          .toList();
       final merged = rescuePrinters(parse(localRaw), parse(seedRaw));
       return jsonEncode(
           (merged ?? parse(localRaw)).map((p) => p.toJson()).toList());
     }
     if (key == _cameraKey) {
-      List<CameraProfile> parse(String raw) =>
-          (jsonDecode(raw) as List).whereType<Map<String, dynamic>>().map(
-                CameraProfile.fromJson,
-              ).toList();
+      List<CameraProfile> parse(String raw) => (jsonDecode(raw) as List)
+          .whereType<Map<String, dynamic>>()
+          .map(
+            CameraProfile.fromJson,
+          )
+          .toList();
       final merged = rescueCameras(parse(localRaw), parse(seedRaw));
       return jsonEncode(
           (merged ?? parse(localRaw)).map((c) => c.toJson()).toList());

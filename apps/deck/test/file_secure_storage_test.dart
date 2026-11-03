@@ -2,7 +2,32 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:deck/data/file_secure_storage.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+/// 数 Keychain 被读了几次 —— 种过一次后必须是 0 次(弹窗根治)。
+class _KeychainSpy implements FlutterSecureStorage {
+  _KeychainSpy(this.data);
+  final Map<String, String?> data;
+  int reads = 0;
+
+  @override
+  Future<String?> read(
+      {required String key,
+      IOSOptions? iOptions,
+      AndroidOptions? aOptions,
+      LinuxOptions? lOptions,
+      WebOptions? webOptions,
+      MacOsOptions? mOptions,
+      WindowsOptions? wOptions}) async {
+    reads++;
+    return data[key];
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('${invocation.memberName}');
+}
 
 void main() {
   late Directory dir;
@@ -91,14 +116,24 @@ void main() {
         () {
       final local = jsonEncode([
         {
-          'id': 'p1', 'name': 'n1', 'mode': 'lan', 'serial': 'SN-A',
-          'ip': '1.1.1.1', 'accessCode': '', 'token': '',
+          'id': 'p1',
+          'name': 'n1',
+          'mode': 'lan',
+          'serial': 'SN-A',
+          'ip': '1.1.1.1',
+          'accessCode': '',
+          'token': '',
         },
       ]);
       final seed = jsonEncode([
         {
-          'id': 'p1', 'name': 'n1', 'mode': 'cloud', 'serial': 'SN-A',
-          'ip': '2.2.2.2', 'accessCode': 'code-A', 'token': 'tk',
+          'id': 'p1',
+          'name': 'n1',
+          'mode': 'cloud',
+          'serial': 'SN-A',
+          'ip': '2.2.2.2',
+          'accessCode': 'code-A',
+          'token': 'tk',
         },
       ]);
       final out =
@@ -114,18 +149,31 @@ void main() {
     test('printers: seed-only printers appended', () {
       final local = jsonEncode([
         {
-          'id': 'p1', 'name': 'n1', 'mode': 'lan', 'serial': 'SN-A',
-          'ip': '1.1.1.1', 'accessCode': 'c',
+          'id': 'p1',
+          'name': 'n1',
+          'mode': 'lan',
+          'serial': 'SN-A',
+          'ip': '1.1.1.1',
+          'accessCode': 'c',
         },
       ]);
       final seed = jsonEncode([
         {
-          'id': 'p1', 'name': 'n1', 'mode': 'lan', 'serial': 'SN-A',
-          'ip': '1.1.1.1', 'accessCode': 'c',
+          'id': 'p1',
+          'name': 'n1',
+          'mode': 'lan',
+          'serial': 'SN-A',
+          'ip': '1.1.1.1',
+          'accessCode': 'c',
         },
         {
-          'id': 'p2', 'name': 'n2', 'mode': 'cloud', 'serial': 'SN-B',
-          'ip': '', 'accessCode': 'c2', 'token': 't2',
+          'id': 'p2',
+          'name': 'n2',
+          'mode': 'cloud',
+          'serial': 'SN-B',
+          'ip': '',
+          'accessCode': 'c2',
+          'token': 't2',
         },
       ]);
       final out =
@@ -154,15 +202,40 @@ void main() {
       final local = jsonEncode([
         {'id': 'c1', 'name': 'a', 'sourceType': 'rtsp', 'url': 'mine'},
       ]);
-      final out = jsonDecode(
-              mergeSeedSegment('bambudeck.cameras', local, '{broken'))
-          as List<dynamic>;
+      final out =
+          jsonDecode(mergeSeedSegment('bambudeck.cameras', local, '{broken'))
+              as List<dynamic>;
       expect(out, hasLength(1));
       expect((out.first as Map<String, dynamic>)['url'], 'mine');
     });
 
     test('unknown key returns local raw as-is', () {
       expect(mergeSeedSegment('other.key', 'localraw', 'seedraw'), 'localraw');
+    });
+  });
+
+  group('seedFileStore', () {
+    test('文件已有数据就完全不碰 Keychain (不再弹授权框)', () async {
+      await store.write('bambudeck.settings', '{}');
+      final spy = _KeychainSpy({
+        'bambudeck.printers': '[{"id":"p"}]',
+        'bambudeck.settings': '{"hubToken":"seed"}',
+        'bambudeck.cameras': '[]',
+      });
+      await seedFileStore(store, legacySource: spy, dpSource: spy);
+      expect(spy.reads, 0);
+    });
+
+    test('空文件(全新安装)才从 Keychain 捞一次', () async {
+      final spy = _KeychainSpy({
+        'bambudeck.printers': '[{"id":"p"}]',
+        'bambudeck.settings': null,
+        'bambudeck.cameras': '[]',
+      });
+      await seedFileStore(store, legacySource: spy, dpSource: spy);
+      // legacy 三个键 + dp 三个键 (settings 在 legacy 缺,dp 也来一遍)。
+      expect(spy.reads, 6);
+      expect(await store.read('bambudeck.printers'), '[{"id":"p"}]');
     });
   });
 }

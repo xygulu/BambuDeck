@@ -71,6 +71,7 @@ class CameraTile extends ConsumerStatefulWidget {
     this.rotationDeg = 0,
     this.ptzInvertPan = false,
     this.ptzInvertTilt = false,
+    this.ptzClient,
     this.onToggleFlip,
     this.onSetRotation,
     this.cameraId,
@@ -101,6 +102,10 @@ class CameraTile extends ConsumerStatefulWidget {
   /// PTZ axis calibration passed through to [PtzPad] (云台方向校准).
   final bool ptzInvertPan;
   final bool ptzInvertTilt;
+
+  /// 云端摄像头直接给平台 PTZ 客户端 ([EzvizCloudPtz]); 本地源留空,
+  /// tile 自己从 rtsp URL 推导 (ONVIF/HCNetSDK 兜底链)。
+  final PtzClient? ptzClient;
 
   /// Toggles [flipH] on the owning camera; null hides the orientation menu.
   final VoidCallback? onToggleFlip;
@@ -444,7 +449,7 @@ class _CameraTileState extends ConsumerState<CameraTile> {
   /// as the initial view defines them - no per-angle remapping, nothing to get
   /// wrong.
   Widget _ptzPadFor(String url) {
-    final client = _ptzClient();
+    final client = widget.ptzClient ?? _ptzClient();
     if (client == null) return const SizedBox.shrink();
     return _transform(PtzPad(
       client: client,

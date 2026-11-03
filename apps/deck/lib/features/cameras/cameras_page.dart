@@ -284,7 +284,7 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
         if (isCloud && camera.enabled)
           EzvizCloudFeed(
             camera: camera,
-            builder: (ctx, feedUrl, refetch) => CameraTile(
+            builder: (ctx, feedUrl, refetch, ptz) => CameraTile(
               streamUrl: feedUrl,
               label: camera.name,
               expand: true,
@@ -295,6 +295,9 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
               rotationDeg: camera.rotationDeg,
               ptzInvertPan: camera.ptzInvertPan,
               ptzInvertTilt: camera.ptzInvertTilt,
+              ptzClient: ptz,
+              onToggleFlip: flipToggler(ref, camera),
+              onSetRotation: rotationSetter(ref, camera),
               onStreamFailed: refetch,
             ),
           )
@@ -310,6 +313,8 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
             rotationDeg: camera.rotationDeg,
             ptzInvertPan: camera.ptzInvertPan,
             ptzInvertTilt: camera.ptzInvertTilt,
+            onToggleFlip: flipToggler(ref, camera),
+            onSetRotation: rotationSetter(ref, camera),
           )
         else
           Container(

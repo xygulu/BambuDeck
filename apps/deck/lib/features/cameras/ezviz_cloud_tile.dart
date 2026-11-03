@@ -5,15 +5,18 @@ import '../../core/theme.dart';
 import '../../data/camera_profile.dart';
 import '../../data/camera_providers.dart';
 import '../../data/ezviz_cloud.dart';
+import '../../data/ezviz_ptz.dart';
+import '../../data/ptz_client.dart';
 
 /// 萤石云端画面挂载点 (直接读云端 2026-11-03).
 ///
 /// Cloud cameras carry no stored URL - their signed FLV/HLS address
 /// expires, so [EzvizStreamCache] resolves one per mount and refreshes it
 /// when the player reports the stream dead ([CameraTile.onStreamFailed]).
-/// [builder] receives the resolved address plus a refetch callback and
-/// renders whatever tile stack the site needs; while resolving (or when
-/// the cloud says no) a placeholder explains the wait.
+/// [builder] receives the resolved address, a refetch callback and the
+/// cloud PTZ client (平台云台走画面上的方向键, 同 LAN 体验 2026-11-03);
+/// while resolving (or when the cloud says no) a placeholder explains
+/// the wait.
 class EzvizCloudFeed extends ConsumerStatefulWidget {
   const EzvizCloudFeed({
     super.key,
@@ -23,8 +26,10 @@ class EzvizCloudFeed extends ConsumerStatefulWidget {
 
   final CameraProfile camera;
 
-  /// (context, resolvedUrl, refetch) - refetch is throttled upstream.
-  final Widget Function(BuildContext, String, VoidCallback) builder;
+  /// (context, resolvedUrl, refetch, ptzClient) - refetch is throttled
+  /// upstream; ptzClient is null for cameras without platform PTZ.
+  final Widget Function(BuildContext, String, VoidCallback, PtzClient?)
+      builder;
 
   @override
   ConsumerState<EzvizCloudFeed> createState() => _EzvizCloudFeedState();
@@ -33,10 +38,16 @@ class EzvizCloudFeed extends ConsumerStatefulWidget {
 class _EzvizCloudFeedState extends ConsumerState<EzvizCloudFeed> {
   String? _url;
   String? _error;
+  PtzClient? _ptz;
 
   @override
   void initState() {
     super.initState();
+    _ptz = EzvizCloudPtz(
+      session: ref.read(ezvizSessionProvider),
+      serial: widget.camera.ezvizSerial,
+      log: null,
+    );
     _load();
   }
 
@@ -46,8 +57,20 @@ class _EzvizCloudFeedState extends ConsumerState<EzvizCloudFeed> {
     if (old.camera.ezvizSerial != widget.camera.ezvizSerial) {
       _url = null;
       _error = null;
+      _ptz?.dispose();
+      _ptz = EzvizCloudPtz(
+        session: ref.read(ezvizSessionProvider),
+        serial: widget.camera.ezvizSerial,
+        log: null,
+      );
       _load();
     }
+  }
+
+  @override
+  void dispose() {
+    _ptz?.dispose();
+    super.dispose();
   }
 
   Future<void> _load({bool force = false}) async {
@@ -84,7 +107,7 @@ class _EzvizCloudFeedState extends ConsumerState<EzvizCloudFeed> {
   Widget build(BuildContext context) {
     final url = _url;
     if (url != null) {
-      return widget.builder(context, url, _refetch);
+      return widget.builder(context, url, _refetch, _ptz);
     }
     return Container(
       color: Colors.black,

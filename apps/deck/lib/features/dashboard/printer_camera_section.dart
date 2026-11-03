@@ -7,6 +7,7 @@ import '../../data/app_settings.dart';
 import '../../data/camera_profile.dart';
 import '../../data/camera_providers.dart';
 import '../../data/printer_profile.dart';
+import '../../data/ptz_client.dart';
 import '../../data/providers.dart';
 import '../../data/settings_providers.dart';
 import '../../ui/camera_tile.dart';
@@ -127,7 +128,9 @@ List<CameraTileSpec> buildCameraSpecs(WidgetRef ref, PrinterProfile profile) {
 /// 断流时借 [CameraTile.onStreamFailed] 换一条新地址重连。
 Widget cameraSpecTile(WidgetRef ref, CameraTileSpec spec,
     {required String frameSlot, bool expand = false}) {
-  Widget tile(String url, {VoidCallback? onStreamFailed}) => CameraTile(
+  Widget tile(String url,
+          {VoidCallback? onStreamFailed, PtzClient? ptz}) =>
+      CameraTile(
         streamUrl: url,
         label: spec.label,
         expand: expand,
@@ -138,6 +141,7 @@ Widget cameraSpecTile(WidgetRef ref, CameraTileSpec spec,
         rotationDeg: spec.rotationDeg,
         ptzInvertPan: spec.ptzInvertPan,
         ptzInvertTilt: spec.ptzInvertTilt,
+        ptzClient: ptz,
         onToggleFlip: spec.onToggleFlip,
         onSetRotation: spec.onSetRotation,
         onStreamFailed: onStreamFailed,
@@ -146,7 +150,8 @@ Widget cameraSpecTile(WidgetRef ref, CameraTileSpec spec,
   if (cloud == null) return tile(spec.url);
   return EzvizCloudFeed(
     camera: cloud,
-    builder: (_, url, refetch) => tile(url, onStreamFailed: refetch),
+    builder: (_, url, refetch, ptz) =>
+        tile(url, onStreamFailed: refetch, ptz: ptz),
   );
 }
 

@@ -194,6 +194,28 @@ void main() {
     expect(calls, 1);
   });
 
+  test('H265 智能编码设备被拒后带 supportH265=1 重试成功', () async {
+    final h265Flags = <String>[];
+    final cache = EzvizStreamCache(
+      session: sessionWith((uri, fields) async {
+        h265Flags.add(fields['supportH265'] ?? '(缺省)');
+        if (fields['supportH265'] != '1') {
+          return {'code': '60000', 'msg': '视频编码类型非 H264'};
+        }
+        return {
+          'code': '200',
+          'data': [
+            {'url': 'https://gw/h265.flv'},
+          ],
+        };
+      }),
+    );
+    expect(await cache.fetchOrThrow('S1'), 'https://gw/h265.flv');
+    // 第一次带 supportH265=0 被拒, 重试那次带上了 supportH265=1。
+    expect(h265Flags, ['0', '1']);
+    expect(cache.cached('S1'), 'https://gw/h265.flv');
+  });
+
   test('60019 自动关闭视频加密后重取成功', () async {
     var offCalls = 0;
     var liveCalls = 0;
