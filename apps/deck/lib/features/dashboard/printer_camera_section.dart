@@ -12,6 +12,7 @@ import '../../data/settings_providers.dart';
 import '../../ui/camera_tile.dart';
 import '../../ui/visible_tile.dart';
 import '../cameras/cameras_page.dart';
+import '../cameras/ezviz_cloud_tile.dart';
 
 /// Single source of truth for the built-in camera default-load choice of
 /// one printer: the persisted per-printer tri-state. The card switch, the
@@ -47,6 +48,7 @@ class CameraTileSpec {
     required this.id,
     required this.label,
     required this.url,
+    this.cloudCamera,
     this.onToggleQuality,
     this.flipH = false,
     this.rotationDeg = 0,
@@ -59,6 +61,10 @@ class CameraTileSpec {
   final String id;
   final String label;
   final String url;
+
+  /// 萤石云端摄像头: 地址要现取 (手机在外网也能看), 渲染走 [EzvizCloudFeed]。
+  /// 非空时 [url] 为空串。
+  final CameraProfile? cloudCamera;
 
   /// Main/sub quality chip closure; null hides the chip.
   final VoidCallback? onToggleQuality;
@@ -93,16 +99,19 @@ List<CameraTileSpec> buildCameraSpecs(WidgetRef ref, PrinterProfile profile) {
     ));
   }
   for (final c in cameras) {
-    if (c.sourceType != CameraSourceType.rtsp ||
+    // 机内源由打印机的 builtinCam 管; RTSP 与萤石云端都能绑到打印机。
+    if (c.sourceType == CameraSourceType.bambu ||
         !c.enabled ||
         !c.printerIds.contains(profile.id)) {
       continue;
     }
+    final cloud = c.sourceType == CameraSourceType.ezviz;
     specs.add(CameraTileSpec(
       id: c.id,
       label: c.name,
-      url: c.resolveUrl(null) ?? '',
-      onToggleQuality: qualityToggler(ref, c),
+      url: cloud ? '' : (c.resolveUrl(null) ?? ''),
+      cloudCamera: cloud ? c : null,
+      onToggleQuality: cloud ? null : qualityToggler(ref, c),
       flipH: c.flipH,
       rotationDeg: c.rotationDeg,
       ptzInvertPan: c.ptzInvertPan,
@@ -112,6 +121,33 @@ List<CameraTileSpec> buildCameraSpecs(WidgetRef ref, PrinterProfile profile) {
     ));
   }
   return specs;
+}
+
+/// 画面块本体: 本地源直接给 [CameraTile]; 云端摄像头先经取流缓存拿地址,
+/// 断流时借 [CameraTile.onStreamFailed] 换一条新地址重连。
+Widget cameraSpecTile(WidgetRef ref, CameraTileSpec spec,
+    {required String frameSlot, bool expand = false}) {
+  Widget tile(String url, {VoidCallback? onStreamFailed}) => CameraTile(
+        streamUrl: url,
+        label: spec.label,
+        expand: expand,
+        cameraId: spec.id,
+        frameSlot: frameSlot,
+        onToggleQuality: spec.onToggleQuality,
+        flipH: spec.flipH,
+        rotationDeg: spec.rotationDeg,
+        ptzInvertPan: spec.ptzInvertPan,
+        ptzInvertTilt: spec.ptzInvertTilt,
+        onToggleFlip: spec.onToggleFlip,
+        onSetRotation: spec.onSetRotation,
+        onStreamFailed: onStreamFailed,
+      );
+  final cloud = spec.cloudCamera;
+  if (cloud == null) return tile(spec.url);
+  return EzvizCloudFeed(
+    camera: cloud,
+    builder: (_, url, refetch) => tile(url, onStreamFailed: refetch),
+  );
 }
 
 /// 监控画面 title row with the binding/add-camera entries, shared by the
@@ -219,19 +255,7 @@ class PrinterCameraSection extends ConsumerWidget {
               child: VisibleOnlyTile(
                 key: ValueKey(spec.id),
                 streamId: spec.id,
-                child: CameraTile(
-                  streamUrl: spec.url,
-                  label: spec.label,
-                  cameraId: spec.id,
-                  frameSlot: 'dash-wall',
-                  onToggleQuality: spec.onToggleQuality,
-                  flipH: spec.flipH,
-                  rotationDeg: spec.rotationDeg,
-                  ptzInvertPan: spec.ptzInvertPan,
-                  ptzInvertTilt: spec.ptzInvertTilt,
-                  onToggleFlip: spec.onToggleFlip,
-                  onSetRotation: spec.onSetRotation,
-                ),
+                child: cameraSpecTile(ref, spec, frameSlot: 'dash-wall'),
               ),
             ),
         ],
@@ -293,27 +317,38 @@ class PrinterCameraSection extends ConsumerWidget {
                 const SizedBox(height: 14),
                 const Align(
                   alignment: Alignment.centerLeft,
-                  child: Text('绑定的 RTSP 摄像头(可多选)',
+                  child: Text('绑定的摄像头(可多选, 含萤石云端)',
                       style: TextStyle(
                           fontSize: 12, color: DeckColors.textSecondary)),
                 ),
-                if (cameras
-                    .where((c) => c.sourceType == CameraSourceType.rtsp)
-                    .isEmpty) ...[
+                if (!cameras.any(_bindable)) ...[
                   const SizedBox(height: 8),
-                  Text('还没有 RTSP 摄像头 - 关闭此对话框后点右上角添加',
+                  Text('还没有可绑定的摄像头 - 关闭此对话框后点右上角添加',
                       style: TextStyle(
                           fontSize: 12,
                           color:
                               DeckColors.textSecondary.withValues(alpha: 0.9))),
                 ] else
                   for (final c in cameras)
-                    if (c.sourceType == CameraSourceType.rtsp)
+                    if (_bindable(c))
                       CheckboxListTile(
                         dense: true,
                         value: selected.contains(c.id),
-                        title:
-                            Text(c.name, style: const TextStyle(fontSize: 13)),
+                        title: Row(children: [
+                          Flexible(
+                            child: Text(c.name,
+                                style: const TextStyle(fontSize: 13),
+                                overflow: TextOverflow.ellipsis),
+                          ),
+                          if (c.sourceType == CameraSourceType.ezviz)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 6),
+                              child: Text('云端',
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: DeckColors.textSecondary)),
+                            ),
+                        ]),
                         onChanged: (v) => setState(() {
                           v == true
                               ? selected.add(c.id)
@@ -343,8 +378,7 @@ class PrinterCameraSection extends ConsumerWidget {
       for (final p in printers)
         p.id == profile.id ? p.copyWith(builtinCam: tri) : p,
     ]);
-    for (final c
-        in cameras.where((c) => c.sourceType == CameraSourceType.rtsp)) {
+    for (final c in cameras.where(_bindable)) {
       final bound = c.printerIds.contains(profile.id);
       final want = selected.contains(c.id);
       if (bound == want) continue;
@@ -355,6 +389,11 @@ class PrinterCameraSection extends ConsumerWidget {
           ));
     }
   }
+
+  /// 能绑到打印机上的摄像头: RTSP 与萤石云端 (机内源归 builtinCam 管)。
+  static bool _bindable(CameraProfile c) =>
+      c.sourceType == CameraSourceType.rtsp ||
+      c.sourceType == CameraSourceType.ezviz;
 }
 
 /// Placeholder for a policy-off built-in camera: one tap opens it for this
@@ -540,20 +579,8 @@ class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
           VisibleOnlyTile(
             key: ValueKey(spec.id),
             streamId: spec.id,
-            child: CameraTile(
-              streamUrl: spec.url,
-              label: spec.label,
-              expand: true,
-              cameraId: spec.id,
-              frameSlot: 'dash-zoom',
-              onToggleQuality: spec.onToggleQuality,
-              flipH: spec.flipH,
-              rotationDeg: spec.rotationDeg,
-              ptzInvertPan: spec.ptzInvertPan,
-              ptzInvertTilt: spec.ptzInvertTilt,
-              onToggleFlip: spec.onToggleFlip,
-              onSetRotation: spec.onSetRotation,
-            ),
+            child:
+                cameraSpecTile(ref, spec, frameSlot: 'dash-zoom', expand: true),
           ),
           Positioned(
             // Bottom-left: bottom-right is the PTZ pad's spot.
@@ -575,20 +602,8 @@ class _CameraWallSectionState extends ConsumerState<CameraWallSection> {
         VisibleOnlyTile(
           key: ValueKey(spec.id),
           streamId: spec.id,
-          child: CameraTile(
-            streamUrl: spec.url,
-            label: spec.label,
-            expand: true,
-            cameraId: spec.id,
-            frameSlot: 'dash-zoom2',
-            onToggleQuality: spec.onToggleQuality,
-            flipH: spec.flipH,
-            rotationDeg: spec.rotationDeg,
-            ptzInvertPan: spec.ptzInvertPan,
-            ptzInvertTilt: spec.ptzInvertTilt,
-            onToggleFlip: spec.onToggleFlip,
-            onSetRotation: spec.onSetRotation,
-          ),
+          child:
+              cameraSpecTile(ref, spec, frameSlot: 'dash-zoom2', expand: true),
         ),
         Positioned(
           // Bottom-left: top-right is the quality chip, bottom-right the
