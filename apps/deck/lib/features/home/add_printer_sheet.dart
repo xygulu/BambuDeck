@@ -532,29 +532,45 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
     final notifier = ref.read(printersProvider.notifier);
     var added = 0;
     var skipped = 0;
+    var failed = 0;
+    Object? firstError;
     for (final d in devices) {
       if (existingSerials.contains(d.devId)) {
         skipped++;
         continue;
       }
-      // id is stable per serial, so a re-add is idempotent instead of piling
-      // duplicates; the serial check above already guards the list.
-      await notifier.add(PrinterProfile(
-        id: 'p_${d.devId}',
-        name: _deviceName(d),
-        mode: PrinterMode.cloud,
-        serial: d.devId,
-        region: _region,
-        token: token,
-        userId: userId,
-        model: d.modelName,
-        accessCode: d.accessCode,
-      ));
-      added++;
+      // 逐台容错(2026-11-03):某台的保存失败不能打断整批 —— 之前循环里
+      // 一次 throw 就让「一键全部添加」只加进第一台,用户看到的是「只加了
+      // 一台」。
+      try {
+        // id is stable per serial, so a re-add is idempotent instead of
+        // piling duplicates; the serial check above already guards the list.
+        await notifier.add(PrinterProfile(
+          id: 'p_${d.devId}',
+          name: _deviceName(d),
+          mode: PrinterMode.cloud,
+          serial: d.devId,
+          region: _region,
+          token: token,
+          userId: userId,
+          model: d.modelName,
+          accessCode: d.accessCode,
+        ));
+        added++;
+      } catch (e) {
+        failed++;
+        firstError ??= e;
+        LogBuffer.instance.add('[云端添加] ${_deviceName(d)} 保存失败: $e');
+      }
     }
     if (!mounted) return;
     if (added == 0 && skipped > 0) {
       setState(() => _error = '所选打印机均已添加过');
+      return;
+    }
+    if (failed > 0) {
+      // 有失败就留在面板上如实报告,不再假装全部成功。
+      setState(() => _error = '已添加 $added 台,失败 $failed 台: $firstError');
       return;
     }
     // 云端给了访问码的新打印机: 后台补一次 LAN 发现, 命中就升级直连

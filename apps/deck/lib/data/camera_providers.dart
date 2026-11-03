@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'camera_profile.dart';
 import 'log_buffer.dart';
+import 'printer_profile.dart' show TombstoneStore;
 
 /// Riverpod wiring for the camera list (kept out of [CameraProfile]'s file so
 /// the data class / store stay pure Dart for the standalone web service).
@@ -27,6 +28,10 @@ class CamerasNotifier extends AsyncNotifier<List<CameraProfile>> {
 
   Future<void> remove(String id) async {
     final store = ref.read(cameraStoreProvider);
+    // 显式删除 → 记墓碑(2026-11-03),导出时才允许这条从盘上消失。
+    if (store is TombstoneStore) {
+      await (store as TombstoneStore).addTombstone('c:$id');
+    }
     state =
         AsyncData((state.valueOrNull ?? []).where((c) => c.id != id).toList());
     await store.save(state.valueOrNull ?? []);

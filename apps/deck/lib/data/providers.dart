@@ -48,6 +48,14 @@ class PrintersNotifier extends AsyncNotifier<List<PrinterProfile>> {
 
   Future<void> remove(String id) async {
     final store = ref.read(storeProvider);
+    // 显式删除 → 记墓碑(2026-11-03)。导出时只有墓碑里的那台才允许从
+    // hub.json 消失;存储层降级导致的「读不到」不会被当成删除。
+    final gone = (state.valueOrNull ?? []).where((p) => p.id == id).firstOrNull;
+    if (gone != null && store is TombstoneStore) {
+      await (store as TombstoneStore).addTombstone(gone.serial.trim().isNotEmpty
+          ? 's:${gone.serial.trim()}'
+          : 'i:${gone.id}');
+    }
     state = AsyncData(
         (state.valueOrNull ?? []).where((p) => p.id != id).toList());
     await store.save(state.valueOrNull ?? []);

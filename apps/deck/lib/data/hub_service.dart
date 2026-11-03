@@ -537,12 +537,15 @@ class HubService {
     } else {
       accounts.add(acc);
     }
-    final (printers, _) = mergeCloudDevices(
-        printers: config.printers, account: acc, devices: devices);
+    final (printers, cams, _) = mergeCloudDevices(
+        printers: config.printers,
+        account: acc,
+        devices: devices,
+        cameras: config.cameras);
     config = HubConfig(
       settings: config.settings,
       printers: printers,
-      cameras: config.cameras,
+      cameras: cams,
       accounts: accounts,
     );
     hub.accounts = accounts;

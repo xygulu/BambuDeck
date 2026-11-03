@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:bambu_protocol/bambu_protocol.dart' show PrinterMode;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:media_kit/media_kit.dart';
 
@@ -14,7 +17,9 @@ import 'data/camera_profile.dart';
 import 'data/camera_providers.dart';
 import 'data/cloud_print_helper.dart';
 import 'data/hub_config.dart';
+import 'data/hub_rescue.dart';
 import 'data/hub_server.dart';
+import 'data/file_secure_storage.dart';
 import 'data/hub_service_control.dart';
 import 'data/log_buffer.dart';
 import 'data/plate_swap.dart';
@@ -102,20 +107,35 @@ Future<void> main() async {
   // 版本更新提醒: 检查全自动 (启动后 8s + 每 12h), 有新版弹窗由人决定装不装。
   UpdateReminder.start();
 
+  // 存储后端(2026-11-03 根治「更新后数据被清空」):
+  // Keychain 的访问判定挂在代码签名身份上 —— DP Keychain 在 CI 的 adhoc 包
+  // (无 entitlements)下整体砖化(读空/写抛,2026-11-02 事故根源),legacy
+  // Keychain 换签名要重新授权、无人值守时读会被拒。macOS 改用 0600 文件
+  // (~/.bambudeck/secure_store.json),与签名身份完全解耦,更新永不触碰;
+  // 启动前把 Keychain 里还能读出的历史数据种子合并进来(文件为权威,只补缺
+  // —— DP 条目里可能有丢掉的访问码/萤石密钥)。其他平台维持原样。
+  final SecureStorageAdapter storageAdapter;
+  if (!kIsWeb && Platform.isMacOS) {
+    final fileStore = FileSecureStorage(
+        '${Platform.environment['HOME'] ?? '.'}/.bambudeck/secure_store.json');
+    try {
+      await seedFileStore(fileStore);
+    } catch (e) {
+      // 种子迁移失败不阻断启动:文件存储自身照常用,hub_rescue 兜底。
+      debugPrint('[存储] Keychain 种子迁移失败: $e');
+    }
+    storageAdapter = fileStore;
+  } else {
+    storageAdapter = const SecureAdapter(FlutterSecureStorage());
+  }
   runApp(ProviderScope(
     overrides: [
       storeProvider.overrideWith(
-          (ref) => SecurePrinterStore(storage: const SecureAdapter(
-                FlutterSecureStorage(),
-              ))),
+          (ref) => SecurePrinterStore(storage: storageAdapter)),
       settingsStoreProvider.overrideWith(
-          (ref) => SecureSettingsStore(storage: const SecureAdapter(
-                FlutterSecureStorage(),
-              ))),
+          (ref) => SecureSettingsStore(storage: storageAdapter)),
       cameraStoreProvider.overrideWith(
-          (ref) => SecureCameraStore(storage: const SecureAdapter(
-                FlutterSecureStorage(),
-              ))),
+          (ref) => SecureCameraStore(storage: storageAdapter)),
     ],
     child: const DeckApp(),
   ));
@@ -348,6 +368,9 @@ class _DeckAppState extends ConsumerState<DeckApp> {
       _hubSyncChain = _hubSyncChain.then((_) => _syncHub(s));
     }
 
+    // 启动自救必须先于第一批导出(见 _startupHubRescue / _exportHub 门)。
+    unawaited(_startupHubRescue());
+
     final loaded = ref.read(appSettingsProvider).valueOrNull;
     if (loaded != null) syncService(loaded);
     ref.listenManual(appSettingsProvider, (_, next) {
@@ -375,12 +398,18 @@ class _DeckAppState extends ConsumerState<DeckApp> {
         _exportHub();
         // 云端添加的打印机 (有访问码没 IP): 补一次 LAN 发现, 命中就升级
         // LAN 直连 —— 机内摄像头的开关只对 LAN 模式放开 (2026-10-31)。
-        if (!_lanBackfillRan && list.any(needsLanIp)) {
+        // 自救完成后再补扫:盘上补回的 ip 通常已让补扫无事可做,也避免
+        // 慢速发现结果回头覆盖自救合回来的清单。
+        if (_hubRescueDone && !_lanBackfillRan && list.any(needsLanIp)) {
           _lanBackfillRan = true;
           unawaited(backfillLanIps(
               ref.read(printersProvider.notifier), list,
               log: LogBuffer.instance.add));
         }
+        // 机内摄像头自动补挂(2026-11-03): 打印机新获得完整局域网凭据
+        // (重填访问码 / 云升 LAN / 新导入带码)时,自动补一台绑定的机内
+        // 摄像头。凭据没变不触发 —— 用户手删的摄像头不会被复活。
+        _ensureBuiltinCams(list);
       }
     }, fireImmediately: true);
   }
@@ -393,26 +422,46 @@ class _DeckAppState extends ConsumerState<DeckApp> {
   /// 打印机是网页服务(云同步)的地盘, App 导出不得覆盖 —— 按盘上现有文件合并:
   /// 云账号原样带回, 云账号名下的打印机在 App 本地清单之外原样追加。
   void _exportHub() {
-    final printers = ref.read(printersProvider).valueOrNull ?? const [];
-    final cameras = ref.read(camerasProvider).valueOrNull ?? const [];
+    // 自救(启动回填)完成前不许写盘 —— 否则 Keychain 降级状态会先冲掉盘上
+    // 的完整数据,自救就没了数据源(2026-11-02 19:56 的数据丢失正是这个顺序)。
+    if (!_hubRescueDone) return;
+    final printers = ref.read(printersProvider).valueOrNull;
+    final cameras = ref.read(camerasProvider).valueOrNull;
     final settings = ref.read(appSettingsProvider).valueOrNull;
-    if (settings == null) return;
+    // 三个 provider 任一还在载入就不导出: 用空列表兜底会把「半空状态」写盘,
+    // 冷启动 Keychain 慢时尤其危险(hub.log 里 0/0→1/0→1/1 的渐进重载即此)。
+    if (settings == null || printers == null || cameras == null) return;
     unawaited(() async {
       final disk = await loadHubConfig();
-      final cloudOwned = disk.printers.where((p) => p.accountId.isNotEmpty);
-      final accountIdBySerial = {for (final p in cloudOwned) p.serial: p.accountId};
-      final merged = [
-        for (final p in printers)
-          accountIdBySerial[p.serial] != null
-              ? p.copyWith(accountId: accountIdBySerial[p.serial])
-              : p,
-        ...cloudOwned.where(
-            (p) => !printers.any((q) => q.serial == p.serial && q.serial.isNotEmpty)),
+      // 非破坏性导出(2026-11-03):设置段里 App 空着的密钥/地址类字段一律用
+      // 盘上值补(rescueSettings 的补空逻辑复用, 含 hubToken)。Keychain 一旦
+      // 降级,导出再也不能成为「把盘上密钥冲掉」的第二事故源。
+      final settingsOut = rescueSettings(settings, disk.settings) ?? settings;
+      // 打印机段:App 清单可能因存储降级而少(不是用户删的)。只有墓碑里的
+      // 那台才允许消失,其余以盘上为准 —— 导出不再是「把盘上清空」的第二
+      // 事故源(2026-11-03 事故链最后一环)。
+      final pStore = ref.read(storeProvider);
+      final tombstones = pStore is TombstoneStore
+          ? await (pStore as TombstoneStore).loadTombstones()
+          : const <String>{};
+      final merged = mergeExportPrinters(
+          app: printers, disk: disk.printers, tombstoned: tombstones);
+      // 摄像头段:同样只让「用户显式删过的」消失。
+      final cStore = ref.read(cameraStoreProvider);
+      final camTombstones = cStore is TombstoneStore
+          ? await (cStore as TombstoneStore).loadTombstones()
+          : const <String>{};
+      final mergedCams = [
+        ...cameras,
+        for (final c in disk.cameras)
+          if (!cameras.any((q) => q.id == c.id) &&
+              !camTombstones.contains('c:${c.id}'))
+            c,
       ];
       await saveHubConfig(HubConfig(
-        settings: settings,
+        settings: settingsOut,
         printers: merged,
-        cameras: cameras,
+        cameras: mergedCams,
         accounts: disk.accounts,
       ));
     }());
@@ -459,6 +508,104 @@ class _DeckAppState extends ConsumerState<DeckApp> {
   /// 云端添加的打印机缺 IP: 启动后补一次 LAN 发现 (每次进程生命周期一次,
   /// 失败等下次启动, 不重试风暴 —— 与独立服务 _resolveLanIps 同策略)。
   bool _lanBackfillRan = false;
+
+  /// 各打印机最近一次「凭据指纹」(id → ip|码长|模式),用于判定谁
+  /// **新**获得了局域网凭据 —— 只有变化才自动补机内摄像头。
+  final Map<String, String> _builtinCamSeen = {};
+
+  /// 启动自救是否已完成; 完成前 _exportHub 一律不写盘。
+  bool _hubRescueDone = false;
+
+  void _ensureBuiltinCams(List<PrinterProfile> list) {
+    final cameras = ref.read(camerasProvider).valueOrNull;
+    if (cameras == null) return; // 摄像头清单未载入,无从判断「已有绑定」
+    var newlyEligible = false;
+    final seenNext = <String, String>{};
+    for (final p in list) {
+      final key = '${p.ip}|${p.accessCode.length}|${p.mode.name}';
+      seenNext[p.id] = key;
+      final eligible = p.accessCode.trim().isNotEmpty &&
+          (p.mode == PrinterMode.lan || p.ip.trim().isNotEmpty);
+      final was = _builtinCamSeen[p.id];
+      if (eligible && was != null && was != key) newlyEligible = true;
+    }
+    _builtinCamSeen
+      ..clear()
+      ..addAll(seenNext);
+    if (!newlyEligible) return;
+    final next = ensureBuiltinCameras(list, cameras);
+    if (next != null) {
+      unawaited(ref.read(camerasProvider.notifier).replaceAll(next));
+      LogBuffer.instance.add('[摄像头] 打印机获得局域网凭据,已自动添加机内摄像头');
+    }
+  }
+
+  /// 启动自救(2026-11-02 事故修复): App 的 printers/cameras/settings 存
+  /// Keychain, 更新换包(adhoc 签名每次构建身份不同)会让部分条目读不出来
+  /// 或回到默认; ~/.bambudeck/hub.json 保有最近一次完整导出。在首导出前按
+  /// 「本地为权威, 只补本地缺的」合回盘上数据, 完成后才放行导出与 LAN 补扫。
+  Future<void> _startupHubRescue() async {
+    // 三段(设置/打印机/摄像头)各自独立落位:一段失败(比如 Keychain 拒写,
+    // adhoc 换包后实测会发生)不再拖垮其余两段 —— 2026-11-03 早上的实测就是
+    // settings 写 Keychain 抛异常,后面打印机/摄像头的合并全被跳过。
+    var ok = true;
+    try {
+      final disk = await loadHubConfig();
+      final settings = await ref.read(appSettingsProvider.future);
+      final printers = await ref.read(printersProvider.future);
+      final cameras = await ref.read(camerasProvider.future);
+      final r = rescueHubData(
+          settings: settings,
+          printers: printers,
+          cameras: cameras,
+          disk: disk);
+      if (r.settings != null) {
+        try {
+          await ref.read(appSettingsProvider.notifier).set(r.settings!);
+          LogBuffer.instance.add('[自救] 设置已从 hub.json 补回'
+              '(${settingsLookDefault(settings) ? '本地整包丢失, 整包采纳' : '补空字段'})');
+        } catch (e) {
+          ok = false;
+          LogBuffer.instance.add('[自救] 设置补回失败: $e');
+        }
+      }
+      if (r.printers != null) {
+        try {
+          await ref.read(printersProvider.notifier).replaceAll(r.printers!);
+          LogBuffer.instance.add('[自救] 打印机清单已按 hub.json 补齐 '
+              '(${r.printers!.length} 台)');
+        } catch (e) {
+          ok = false;
+          LogBuffer.instance.add('[自救] 打印机补回失败: $e');
+        }
+      }
+      if (r.cameras != null) {
+        try {
+          await ref.read(camerasProvider.notifier).replaceAll(r.cameras!);
+          LogBuffer.instance.add('[自救] 摄像头清单已从 hub.json 补回 '
+              '(${r.cameras!.length} 个)');
+        } catch (e) {
+          ok = false;
+          LogBuffer.instance.add('[自救] 摄像头补回失败: $e');
+        }
+      }
+      if (ok && r.settings == null && r.printers == null && r.cameras == null) {
+        LogBuffer.instance.add('[自救] 本地数据完整, 无需回填');
+      }
+    } catch (e) {
+      ok = false;
+      LogBuffer.instance.add('[自救] 失败: $e');
+    } finally {
+      _hubRescueDone = true;
+      if (ok) {
+        _exportHub();
+      } else {
+        // 救援没全成功就导出 = 把降级状态写回盘上,冲掉自救的数据源。
+        // 暂停本次导出,盘上 hub.json 原样保住,重启再试。
+        LogBuffer.instance.add('[自救] 有段失败, 本次暂停导出 —— 保住盘上数据');
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

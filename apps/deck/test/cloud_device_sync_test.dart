@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:deck/data/camera_profile.dart';
 import 'package:deck/data/cloud_device_sync.dart';
 import 'package:deck/data/hub_config.dart';
 import 'package:deck/data/printer_profile.dart';
@@ -32,8 +33,53 @@ const account = CloudAccount(
 );
 
 void main() {
+  test('云端新设备带访问码入列时自动补机内摄像头', () {
+    final (printers, cameras, changed) = mergeCloudDevices(
+      printers: const [],
+      account: account,
+      devices: [
+        dev('SER1', name: '车间 A1', product: 'A1', accessCode: '12345678'),
+        dev('SER2', name: '云端 P1S', product: 'P1S'),
+      ],
+    );
+    expect(changed, isTrue);
+    // 带码入列的 SER1 有摄像头;云端模式的 SER2 没有(没有局域网凭据)。
+    expect(cameras, hasLength(1));
+    expect(cameras.first.sourceType, CameraSourceType.bambu);
+    expect(cameras.first.id, 'bambu_SER1');
+    expect(cameras.first.printerIds, [printers.first.id]);
+  });
+
+  test('已有摄像头绑定的打印机同步不重复补', () {
+    final existing = PrinterProfile(
+      id: 'manual-1',
+      name: '车间 A1',
+      mode: PrinterMode.lan,
+      serial: 'SER1',
+      ip: '192.168.1.5',
+      accessCode: '12345678',
+      accountId: 'a1',
+    );
+    final cameras = [
+      CameraProfile(
+        id: 'bambu_SER1',
+        name: '手动加的',
+        sourceType: CameraSourceType.bambu,
+        printerIds: <String>['manual-1'],
+      ),
+    ];
+    final (_, cams, changed) = mergeCloudDevices(
+      printers: [existing],
+      account: account,
+      devices: [dev('SER1', name: '车间 A1', accessCode: '12345678')],
+      cameras: cameras,
+    );
+    expect(changed, isFalse);
+    expect(cams, same(cameras)); // 原样返回,不新增
+  });
+
   test('云端新设备入列：有访问码走 LAN，没有走云模式', () {
-    final (printers, changed) = mergeCloudDevices(
+    final (printers, _, changed) = mergeCloudDevices(
       printers: const [],
       account: account,
       devices: [
@@ -69,7 +115,7 @@ void main() {
       accountId: 'a1',
       createdAt: 42,
     );
-    final (printers, changed) = mergeCloudDevices(
+    final (printers, _, changed) = mergeCloudDevices(
       printers: [existing],
       account: account,
       devices: [dev('SER1', name: '新名字', product: 'A1', accessCode: 'new')],
@@ -107,7 +153,7 @@ void main() {
       mode: PrinterMode.lan,
       serial: 'MANUAL',
     );
-    final (printers, changed) = mergeCloudDevices(
+    final (printers, _, changed) = mergeCloudDevices(
       printers: [mine, other, manual],
       account: account,
       devices: const [],
@@ -125,7 +171,7 @@ void main() {
       ip: '10.0.0.2',
       accessCode: 'old',
     );
-    final (printers, changed) = mergeCloudDevices(
+    final (printers, _, changed) = mergeCloudDevices(
       printers: [manual],
       account: account,
       devices: [dev('SER1', name: '云名字', product: 'A1', accessCode: 'new')],
@@ -150,7 +196,7 @@ void main() {
       accountId: 'a1',
       createdAt: 5,
     );
-    final (printers, changed) = mergeCloudDevices(
+    final (printers, _, changed) = mergeCloudDevices(
       printers: [existing],
       account: account,
       devices: [
@@ -169,7 +215,7 @@ void main() {
       serial: 'SER1',
       accountId: 'a2',
     );
-    final (printers, changed) = mergeCloudDevices(
+    final (printers, _, changed) = mergeCloudDevices(
       printers: [otherAccountPrinter],
       account: account,
       devices: [dev('SER1', name: '新名', product: 'A1', accessCode: 'c')],

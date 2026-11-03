@@ -3,7 +3,9 @@ import 'dart:io';
 
 import 'package:bambu_protocol/bambu_protocol.dart';
 
+import 'camera_profile.dart';
 import 'hub_config.dart';
+import 'hub_rescue.dart';
 import 'log_buffer.dart';
 import 'printer_profile.dart';
 
@@ -35,6 +37,7 @@ class CloudDeviceSync {
     _syncing = true;
     try {
       var printers = config.printers;
+      var cameras = config.cameras;
       var changed = false;
       final activeIds = active.map((a) => a.id).toSet();
       for (final acc in active) {
@@ -50,12 +53,14 @@ class CloudDeviceSync {
           LogBuffer.instance.add('[云同步] ${acc.account} 拉取失败，沿用缓存: $e');
           continue;
         }
-        final (next, c) = mergeCloudDevices(
+        final (next, cams, c) = mergeCloudDevices(
           printers: printers,
           account: acc,
           devices: devices,
+          cameras: cameras,
         );
         printers = next;
+        cameras = cams;
         changed |= c;
       }
       // 孤儿清理：归属的账号已经不在列表里（退出/删除）→ 其打印机一并下架。
@@ -68,7 +73,7 @@ class CloudDeviceSync {
         HubConfig(
           settings: config.settings,
           printers: kept,
-          cameras: config.cameras,
+          cameras: cameras,
           accounts: config.accounts,
         ),
         configFile,
@@ -97,7 +102,10 @@ class AccountSyncStatus {
 }
 
 /// 纯函数：把 [devices]（账号 [account] 的 bind 列表）合并进 [printers]。
-/// 返回 `(新清单, 是否有变化)`。
+/// 返回 `(新打印机清单, 新摄像头清单, 是否有变化)`。云端新入列或本轮拿到
+/// 访问码升级 LAN 的打印机,顺手补一台绑定的机内摄像头（复用
+/// [ensureBuiltinCameras], 幂等不重复; 用户手删的摄像头只在凭据变化的
+/// 那一轮可能回来,平时同步不会复活）。
 ///
 /// - 云端有、本地无 → 入列：有访问码走 LAN 模式；没有走云模式（直接用账号
 ///   token/uid 监控，不等 LAN/SSDP 补 IP）；
@@ -106,10 +114,11 @@ class AccountSyncStatus {
 ///   无归属的手工条目撞上即升级归属（accountId 填上，只发生一次）；
 /// - 本地归属本账号、云端没有 → 移除（解绑即下架）；他账号的条目不动；
 /// - mode 已是云模式的条目只刷新 accountId/名称，不动其 token。
-(List<PrinterProfile>, bool) mergeCloudDevices({
+(List<PrinterProfile>, List<CameraProfile>, bool) mergeCloudDevices({
   required List<PrinterProfile> printers,
   required CloudAccount account,
   required List<CloudDevice> devices,
+  List<CameraProfile> cameras = const [],
 }) {
   final bySerial = <String, CloudDevice>{
     for (final d in devices)
@@ -118,6 +127,9 @@ class AccountSyncStatus {
   final out = <PrinterProfile>[];
   final claimed = <String>{};
   var changed = false;
+  // 本轮「新获得局域网凭据」的打印机(新入列带码 / 原有条目拿到码升级),
+  // 只有它们才允许补机内摄像头 —— 用户手删的摄像头平时不被同步复活。
+  final transitioned = <PrinterProfile>[];
 
   for (final p in printers) {
     final d = p.serial.isEmpty ? null : bySerial[p.serial];
@@ -151,6 +163,7 @@ class AccountSyncStatus {
       // 拿到访问码：云模式升级为 LAN 直连（控制秒回、不怕云隧道抖动）。
       np = np.copyWith(accessCode: d.accessCode, mode: PrinterMode.lan);
       changed = true;
+      transitioned.add(np);
     }
     final model = d.productName.isNotEmpty ? d.productName : d.modelName;
     if (model.isNotEmpty && model != np.model) {
@@ -181,7 +194,11 @@ class AccountSyncStatus {
       accountId: account.id,
     ));
     changed = true;
+    if (hasCode) transitioned.add(out.last);
   }
 
-  return (out, changed);
+  final camOut = transitioned.isEmpty
+      ? cameras
+      : (ensureBuiltinCameras(transitioned, cameras) ?? cameras);
+  return (out, camOut, changed);
 }

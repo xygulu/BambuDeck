@@ -146,18 +146,53 @@ Future<File> defaultHubConfigFile() async {
 }
 
 Future<HubConfig> loadHubConfig([File? file]) async {
-  try {
-    final f = file ?? await defaultHubConfigFile();
-    if (!await f.exists()) return const HubConfig();
-    return HubConfig.fromJson(
-        jsonDecode(await f.readAsString()) as Map<String, dynamic>);
-  } catch (_) {
-    return const HubConfig();
+  final f = file ?? await defaultHubConfigFile();
+  // 主文件坏了(半截 JSON / 空文件)先试 .bak —— 旧版这里直接返回空配置,
+  // 于是「文件里还有数据但读不出来」被当成「本来就没数据」,App 顺势把空清单
+  // 写回盘上,数据就没了(2026-11-03 事故链的最后一环)。
+  Future<HubConfig?> fromFile(File p) async {
+    try {
+      if (!await p.exists()) return null;
+      final raw = await p.readAsString();
+      if (raw.trim().isEmpty) return null;
+      return HubConfig.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
+    }
   }
+
+  final main = await fromFile(f);
+  if (main != null) return main;
+  final bak = await fromFile(File('${f.path}.bak'));
+  if (bak != null) return bak;
+  return const HubConfig();
 }
 
+/// 原子写 + `.bak` 轮转(2026-11-03)。
+///
+/// 旧实现是裸 `writeAsString`:写到一半断电/被杀,hub.json 就是半截 JSON,
+/// 下次读出来直接 `HubConfig()`(全空)—— 数据在文件里但读不出来,等于丢。
+/// 现在:先落 `.tmp` → 旧文件轮转为 `.bak` → `.tmp` rename 上位。rename 在
+/// 同一文件系统内是原子的,读者永远看到完整的旧版或完整的新版;万一新文件
+/// 本身有问题,`.bak` 里还有上一版完整数据。
 Future<void> saveHubConfig(HubConfig config, [File? file]) async {
   final f = file ?? await defaultHubConfigFile();
   await f.parent.create(recursive: true);
-  await f.writeAsString(jsonEncode(config.toJson()), flush: true);
+  final tmp = File('${f.path}.tmp');
+  await tmp.writeAsString(jsonEncode(config.toJson()), flush: true);
+  if (await f.exists()) {
+    try {
+      await f.rename('${f.path}.bak');
+    } on FileSystemException {
+      // 旧文件挪不动(被占用等):保留主文件,直接覆盖上位,不影响正确性。
+      try {
+        await tmp.delete();
+      } on FileSystemException {
+        // 忽略。
+      }
+      await f.writeAsString(jsonEncode(config.toJson()), flush: true);
+      return;
+    }
+  }
+  await tmp.rename(f.path);
 }

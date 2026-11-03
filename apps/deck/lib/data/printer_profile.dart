@@ -171,11 +171,24 @@ abstract class PrinterStore {
   Future<void> save(List<PrinterProfile> printers);
 }
 
+/// 用户**显式**删掉的条目墓碑(2026-11-03)。
+///
+/// 导出到 hub.json 是覆盖式的:App 清单少一台,盘上就少一台。而 App 的
+/// 清单可能因存储层降级而少(不是用户删的)。墓碑让导出能区分二者 ——
+/// 只有记在墓碑里的那台才允许从盘上消失。
+///
+/// 独立接口而非 [PrinterStore] 的方法:测试里的 fake store 无需跟着改。
+abstract class TombstoneStore {
+  Future<Set<String>> loadTombstones();
+  Future<void> addTombstone(String key);
+}
+
 /// JSON list in the OS secure store.
-class SecurePrinterStore implements PrinterStore {
+class SecurePrinterStore implements PrinterStore, TombstoneStore {
   SecurePrinterStore({required this.storage});
 
   static const _key = 'bambudeck.printers';
+  static const _tombstoneKey = 'bambudeck.tombstones.printers';
 
   final SecureStorageAdapter storage;
 
@@ -198,6 +211,25 @@ class SecurePrinterStore implements PrinterStore {
   Future<void> save(List<PrinterProfile> printers) {
     final raw = jsonEncode(printers.map((p) => p.toJson()).toList());
     return storage.write(_key, raw);
+  }
+
+  @override
+  Future<Set<String>> loadTombstones() async {
+    final raw = await storage.read(_tombstoneKey);
+    if (raw == null || raw.isEmpty) return const {};
+    try {
+      return (jsonDecode(raw) as List).whereType<String>().toSet();
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  @override
+  Future<void> addTombstone(String key) async {
+    final cur = await loadTombstones();
+    if (cur.contains(key)) return;
+    await storage.write(
+        _tombstoneKey, jsonEncode([...cur, key].toList(growable: false)));
   }
 }
 

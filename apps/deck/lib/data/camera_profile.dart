@@ -191,10 +191,11 @@ abstract class CameraStore {
 }
 
 /// JSON list in the OS secure store.
-class SecureCameraStore implements CameraStore {
+class SecureCameraStore implements CameraStore, TombstoneStore {
   SecureCameraStore({required this.storage});
 
   static const _key = 'bambudeck.cameras';
+  static const _tombstoneKey = 'bambudeck.tombstones.cameras';
 
   final SecureStorageAdapter storage;
 
@@ -216,5 +217,24 @@ class SecureCameraStore implements CameraStore {
   Future<void> save(List<CameraProfile> cameras) {
     final raw = jsonEncode(cameras.map((c) => c.toJson()).toList());
     return storage.write(_key, raw);
+  }
+
+  @override
+  Future<Set<String>> loadTombstones() async {
+    final raw = await storage.read(_tombstoneKey);
+    if (raw == null || raw.isEmpty) return const {};
+    try {
+      return (jsonDecode(raw) as List).whereType<String>().toSet();
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  @override
+  Future<void> addTombstone(String key) async {
+    final cur = await loadTombstones();
+    if (cur.contains(key)) return;
+    await storage.write(
+        _tombstoneKey, jsonEncode([...cur, key].toList(growable: false)));
   }
 }
