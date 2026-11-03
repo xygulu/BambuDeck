@@ -274,7 +274,9 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
     final url = camera.resolveUrl(linked);
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
-      child: Stack(fit: StackFit.expand, children: [
+      child: GestureDetector(
+        onLongPress: () => _showCameraActions(camera),
+        child: Stack(fit: StackFit.expand, children: [
         if (url != null && camera.enabled)
           CameraTile(
             streamUrl: url,
@@ -316,8 +318,98 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
               ],
             ),
           ),
-      ]),
+        // 每格右下角的管理入口(2026-11-03 反馈: 墙上看不到编辑/删除)。
+        // 之前只有「单画面监视页」的工具栏能进编辑, 删除还藏在编辑对话框里,
+        // 主界面等于没有入口。长按同一格也能呼出。
+        Positioned(
+          right: 6,
+          bottom: 6,
+          child: Material(
+            color: Colors.black.withValues(alpha: 0.55),
+            shape: const CircleBorder(),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: () => _showCameraActions(camera),
+              child: const Padding(
+                padding: EdgeInsets.all(4),
+                child: Icon(Icons.more_vert, size: 18, color: Colors.white),
+              ),
+            ),
+          ),
+        ),
+        ]),
+      ),
     );
+  }
+
+  /// 一格摄像头的管理菜单: 编辑(名称/连接/绑定/翻转)与删除。
+  Future<void> _showCameraActions(CameraProfile camera) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: DeckColors.surface,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+            child: Row(children: [
+              const Icon(Icons.videocam_outlined,
+                  size: 18, color: DeckColors.textSecondary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(camera.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w600)),
+              ),
+              Text(camera.sourceType.label,
+                  style: const TextStyle(
+                      fontSize: 12, color: DeckColors.textSecondary)),
+            ]),
+          ),
+          ListTile(
+            leading: const Icon(Icons.edit_outlined),
+            title: const Text('编辑摄像头'),
+            subtitle: const Text('名称 / 视频源 / 绑定打印机 / 画面翻转'),
+            onTap: () => Navigator.pop(ctx, 'edit'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.delete_outline, color: DeckColors.error),
+            title: const Text('删除摄像头',
+                style: TextStyle(color: DeckColors.error)),
+            subtitle: const Text('从本机移除, 不影响萤石云端设备'),
+            onTap: () => Navigator.pop(ctx, 'delete'),
+          ),
+          const SizedBox(height: 6),
+        ]),
+      ),
+    );
+    if (!mounted || action == null) return;
+    if (action == 'edit') {
+      await showAddCameraDialog(context, ref, editing: camera);
+      return;
+    }
+    final yes = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        backgroundColor: DeckColors.surface,
+        title: const Text('删除摄像头'),
+        content: Text('确定删除「${camera.name}」吗?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dctx, false),
+              child: const Text('取消')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: DeckColors.error),
+            onPressed: () => Navigator.pop(dctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (yes != true) return;
+    await ref.read(camerasProvider.notifier).remove(camera.id);
   }
 
   PrinterProfile? _linkedPrinter(
