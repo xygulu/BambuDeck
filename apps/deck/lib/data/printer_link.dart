@@ -162,3 +162,55 @@ Future<bool> awaitSpeedLevel(
   }
   return state()?.speedLevel == level;
 }
+
+/// 腔灯开关 + 等打印机确认（App 与独立网页服务共用）。
+///
+/// publish 成功 ≠ 灯真的变了：固件常常只在 ledctrl 回执那一帧带
+/// `lights_report`，而且这帧不一定送到别的订阅者 —— 于是网页/App 的开关
+/// 一直停在旧值（反馈 2026-11-03「灯亮了但开关没变化」）。这里发完命令
+/// 等状态，没变就发一次 pushall 逼打印机交完整状态：pushall 的回应里
+/// 带 `lights_report`，那才是权威值。
+///
+/// [state] 返回当前状态（ConnectionNotifier 读自己的 _current，独立服务读
+/// 自己的连接表）。
+Future<({bool sent, bool confirmed, String? note})> confirmLightState(
+  PrinterLink link,
+  bool on, {
+  required BambuState? Function() state,
+}) async {
+  final sent = await link.setLight(on);
+  if (!sent) return (sent: false, confirmed: false, note: null);
+  if (await awaitLightState(on, state,
+      within: const Duration(milliseconds: 1200))) {
+    return (sent: true, confirmed: true, note: null);
+  }
+  await link.refresh();
+  // 5 秒: 实测 pushall 后的第一帧常还是旧值, 真正带新状态的那帧要到
+  // 2 秒之后才来 (2026-11-05 真机 123 验证), 窗口太短会误报「没回报」。
+  final confirmed = await awaitLightState(on, state,
+      within: const Duration(seconds: 5));
+  if (!confirmed) {
+    LogBuffer.instance.add('[腔灯] 打印机没有回报灯光状态'
+        '(当前 ${state()?.lightState ?? -1})');
+  }
+  return (
+    sent: true,
+    confirmed: confirmed,
+    note: confirmed ? null : '腔灯命令已发出，但打印机没有回报状态',
+  );
+}
+
+/// 等打印机状态帧里的 lightState 变成目标值（-1 未知 / 0 关 / 1 开）。
+Future<bool> awaitLightState(
+  bool on,
+  BambuState? Function() state, {
+  Duration within = const Duration(seconds: 10),
+}) async {
+  final want = on ? 1 : 0;
+  final end = DateTime.now().add(within);
+  while (DateTime.now().isBefore(end)) {
+    if (state()?.lightState == want) return true;
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+  }
+  return state()?.lightState == want;
+}

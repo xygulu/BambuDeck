@@ -377,11 +377,16 @@ class HubService {
       }
     }
     if (light != null) {
-      final lightOk = link == null ? false : await link.setLight(light);
-      ok = lightOk && ok;
+      // 同 App: 发完命令要等打印机回报灯光状态, 否则网页开关停在旧值
+      // (printer_link.dart 的 confirmLightState)。
+      final r = link == null
+          ? (sent: false, confirmed: false, note: null)
+          : await confirmLightState(link, light, state: () => _stateOf(p));
+      ok = r.sent && ok;
       if (speed == null) {
         LogBuffer.instance.add('[网页] 设置 ${p.name}: '
-            '腔灯${light ? '开' : '关'} ${lightOk ? '已发送' : '失败(打印机未连接?)'}');
+            '腔灯${light ? '开' : '关'} ${r.sent ? '已发送' : '失败(打印机未连接?)'}'
+            '${r.confirmed ? '' : '(打印机没回报状态)'}');
       }
     }
     return <String, dynamic>{

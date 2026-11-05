@@ -14,6 +14,15 @@ class _FakeLink implements PrinterLink {
   Future<({bool sent, bool? accepted, String? reason})> Function(int level)?
       onSetSpeed;
 
+  /// 腔灯的假固件行为 —— 收到 ledctrl 后要不要回报 lights_report。
+  Future<bool> Function(bool on)? onSetLight;
+
+  /// pushall 的假固件行为。
+  Future<bool> Function()? onRefresh;
+
+  /// 被逼 pushall 的次数 (腔灯开关靠它校对状态)。
+  int refreshCount = 0;
+
   final _states = StreamController<BambuState>.broadcast();
 
   void emit(BambuState s) => _states.add(s);
@@ -50,10 +59,13 @@ class _FakeLink implements PrinterLink {
       (sent: true, accepted: true, reason: null);
 
   @override
-  Future<bool> setLight(bool on) async => true;
+  Future<bool> setLight(bool on) async => await onSetLight?.call(on) ?? true;
 
   @override
-  Future<bool> refresh() async => true;
+  Future<bool> refresh() async {
+    refreshCount++;
+    return await onRefresh?.call() ?? true;
+  }
 
   @override
   Future<bool> printProjectFile({
@@ -153,6 +165,41 @@ void main() {
     expect(r.sent, isTrue);
     expect(r.confirmed, isTrue);
     expect(r.note, isNull);
+  });
+
+  test('腔灯: 打印机回报 lights_report → 开关跟着变', () async {
+    final link = _FakeLink();
+    link.onSetLight = (on) async {
+      // 固件执行完在下一次状态帧里带 lights_report。
+      Timer(
+          const Duration(milliseconds: 50),
+          () => link.emit(
+              BambuState(updatedAt: DateTime.now(), lightState: on ? 1 : 0)));
+      return true;
+    };
+    final container = await _warm(link);
+    final ok =
+        await container.read(connectionProvider('p1').notifier).setLight(true);
+    expect(ok, isTrue);
+    expect(container.read(connectionProvider('p1')).state?.lightState, 1);
+    // 打印机自己回报了, 不用再逼一次 pushall。
+    expect(link.refreshCount, 0);
+  });
+
+  test('腔灯: 固件不主动送 lights_report → 逼一次 pushall 校对开关', () async {
+    final link = _FakeLink();
+    link.onSetLight = (on) async => true; // 固件沉默, 不回报 lights_report
+    link.onRefresh = () async {
+      // pushall 的完整状态里才有权威的 lights_report。
+      link.emit(BambuState(updatedAt: DateTime.now(), lightState: 1));
+      return true;
+    };
+    final container = await _warm(link);
+    final ok =
+        await container.read(connectionProvider('p1').notifier).setLight(true);
+    expect(ok, isTrue);
+    expect(link.refreshCount, greaterThanOrEqualTo(1));
+    expect(container.read(connectionProvider('p1')).state?.lightState, 1);
   });
 }
 

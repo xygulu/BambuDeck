@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'cloud_api.dart';
 import 'hub_server.dart';
 import 'lan_printer_probe.dart' show applyLanIps, discoverLanPrinterIps, needsLanIp;
+import 'log_buffer.dart';
 import 'print_events.dart';
 import 'printer_link.dart';
 import 'printer_profile.dart';
@@ -199,6 +200,12 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
     });
     _stateSub = link.states.listen((s) {
       final prev = _current.state;
+      // 腔灯状态变化落日志: 显示跟不上实物时先看这里 (2026-11-03 反馈
+      // 「开关没变化」), 免得再靠截图考古。
+      if (prev?.lightState != s.lightState) {
+        LogBuffer.instance.add(
+            '[腔灯] ${profile.name}: ${prev?.lightState ?? "-"} -> ${s.lightState}');
+      }
       _current = _current.copyWith(state: s, lastError: null);
       state = _current;
       printEvents.observe(profile, prev, s);
@@ -240,8 +247,15 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
   Future<bool> awaitSpeed(int level,
           {Duration within = const Duration(seconds: 10)}) =>
       awaitSpeedLevel(level, () => _current.state, within: within);
-  Future<bool> setLight(bool on) =>
-      _link?.setLight(on) ?? Future.value(false);
+  /// 腔灯开关 + 等打印机回报（见 printer_link.dart 的 [confirmLightState]）。
+  /// 只发命令不管回报的话, 固件不主动送 `lights_report` 时开关会永远停在
+  /// 旧值(反馈 2026-11-03)。
+  Future<bool> setLight(bool on) async {
+    final link = _link;
+    if (link == null) return false;
+    final r = await confirmLightState(link, on, state: () => _current.state);
+    return r.sent;
+  }
   Future<bool> refresh() => _link?.refresh() ?? Future.value(false);
   Future<bool> printProjectFile({
     required String url,

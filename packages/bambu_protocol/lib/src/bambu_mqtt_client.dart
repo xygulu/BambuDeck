@@ -287,6 +287,12 @@ class BambuMqttClient {
         final text =
             MqttPublishPayload.bytesToStringAsString(recMess.payload.message);
         _lastMessageAt = DateTime.now();
+        // 灯光状态帧: 固件把腔灯状态放在 print.lights_report, 但常常只在
+        // ledctrl 回执那一帧出现, 而且不保证每个订阅者都收到 —— 记一笔,
+        // 免得下次「灯变了开关没变」只能靠猜 (2026-11-03)。
+        if (text.contains('lights_report')) {
+          _logLine('收到灯光状态帧');
+        }
         // 命令回执: 固件在 report 流里按 sequence_id 回执。被拒帧只有
         // err_code、没有 result —— 必须在这里抓，否则「按钮点了没反应」
         // 永远查不到原因(换盘诊断 2026-10-21)。
