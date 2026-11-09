@@ -380,6 +380,11 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
         ]),
       );
 
+  /// 异常自带的类名前缀 (`HttpException: `) 对用户没有信息量, 去掉再显示。
+  static String _reason(Object e) => '$e'
+      .replaceFirst('HttpException: ', '')
+      .replaceFirst('Exception: ', '');
+
   Future<void> _runLogin(Future<LoginOutcome> Function() flow) async {
     setState(() {
       _loginBusy = true;
@@ -403,7 +408,7 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
       }
     } on Exception catch (e) {
       debugPrint('[cloud] login FAILED: $e');
-      setState(() => _loginMsg = '登录失败: $e');
+      setState(() => _loginMsg = '登录失败: ${_reason(e)}');
     } finally {
       if (mounted) setState(() => _loginBusy = false);
     }
@@ -435,7 +440,7 @@ class _AddPrinterSheetState extends ConsumerState<AddPrinterSheet> {
           _loginMsg = '验证码已发送到 $account(${account.contains("@") ? "邮件" : "短信"})');
     } on Exception catch (e) {
       debugPrint('[cloud] send code FAILED: $e');
-      setState(() => _loginMsg = '发送失败: $e');
+      setState(() => _loginMsg = '发送失败: ${_reason(e)}');
     } finally {
       if (mounted) setState(() => _loginBusy = false);
     }

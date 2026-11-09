@@ -153,6 +153,30 @@ String _serverMessage(String body) {
   return body.isEmpty ? '(no body)' : body;
 }
 
+/// 把拓竹服务端的拒绝翻译成「用户照着能做」的中文。
+///
+/// 2026-11 起短信/邮件验证码接口会被风控挡（Cloudflare 机器人校验），
+/// 原始报错是一页 HTML 或 `HTTP 403` —— 对用户等于没说。风控不是重试能
+/// 解决的，只能改走密码登录或浏览器登录后粘 Token。
+String friendlyCloudError(int status, String body) {
+  final b = body.toLowerCase();
+  if (status == 403 ||
+      status == 418 ||
+      b.contains('captcha') ||
+      b.contains('robot') ||
+      b.contains('cloudflare') ||
+      b.contains('just a moment')) {
+    return '拓竹风控拦了这次验证码请求（机器人校验）。改用「密码登录」，'
+        '或在浏览器登录 bambulab.cn 后把 Token 粘进「访问 Token」框。';
+  }
+  if (status == 429) return '请求太频繁，被拓竹限流了，过几分钟再试。';
+  final msg = _serverMessage(body);
+  if (msg.toLowerCase().contains('incorrect account or password')) {
+    return '账号或密码不正确。';
+  }
+  return 'HTTP $status: $msg';
+}
+
 /// POST JSON and return `(status, rawBody)` without interpreting the body.
 Future<(int, String)> _postRaw(Uri uri, Map<String, dynamic> body) async {
   final client = HttpClient();
@@ -179,7 +203,7 @@ Future<Map<String, dynamic>> _postJson(
     Uri uri, Map<String, dynamic> body) async {
   final (status, text) = await _postRaw(uri, body);
   if (status != 200) {
-    throw HttpException('HTTP $status: ${_serverMessage(text)}', uri: uri);
+    throw HttpException(friendlyCloudError(status, text), uri: uri);
   }
   final doc = jsonDecode(text);
   return doc is Map<String, dynamic> ? doc : <String, dynamic>{};
@@ -191,7 +215,7 @@ Future<Map<String, dynamic>> _postJson(
 Future<void> _postStatus(Uri uri, Map<String, dynamic> body) async {
   final (status, text) = await _postRaw(uri, body);
   if (status != 200) {
-    throw HttpException('HTTP $status: ${_serverMessage(text)}', uri: uri);
+    throw HttpException(friendlyCloudError(status, text), uri: uri);
   }
 }
 
@@ -226,7 +250,7 @@ Future<LoginOutcome> cloudLogin({
     return LoginNeedsTfa(tfaKey);
   }
   if (loginType == 'verifyCode') return const LoginNeedsEmailCode();
-  throw HttpException('登录被拒绝: ${jsonEncode(doc)}', uri: uri);
+  throw HttpException('登录被拒绝: ${_serverMessage(jsonEncode(doc))}', uri: uri);
 }
 
 /// True when [account] reads as an email address rather than a phone
