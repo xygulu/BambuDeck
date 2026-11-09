@@ -32,6 +32,45 @@ jobs:
           cache: true
       - run: flutter pub get
         working-directory: apps/deck
+      # runner 从 repo.maven.apache.org 拉某些包会被 302 到 github release,
+      # 那里稳定 504 (JetBrains 的 kotlin-compiler-embeddable 就是)。
+      # init script 把腾讯的 Maven 镜像放到仓库列表最前面 (官方仓库仍在
+      # 后面兜底)。
+      - name: Use Maven mirror for Gradle
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cp "$GITHUB_WORKSPACE/tool/ci/gradle-mirror.init.gradle" ~/.gradle/init.d/ci-mirror.gradle
+      # media_kit 的 Android libmpv jar 从 github release 下载, runner 拉它
+      # 稳定 504 (2026-11-09)。jar 自带 MD5 校验, 所以提前从镜像取好放进
+      # 插件的 build 目录, 构建时就会直接用 (校验照样过)。
+      - name: Pre-fetch media_kit libmpv jars
+        shell: bash
+        run: |
+          set -u
+          cache="${PUB_CACHE:-$HOME/.pub-cache}"
+          plugin=$(ls -d "$cache"/hosted/pub.dev/media_kit_libs_android_video-* 2>/dev/null | head -1)
+          if [ -z "$plugin" ]; then echo "::warning::media_kit android plugin not in pub cache"; exit 0; fi
+          dest="$plugin/android/build/v1.1.7"
+          mkdir -p "$dest"
+          base="https://github.com/media-kit/libmpv-android-video-build/releases/download/v1.1.7"
+          fetch() { # name md5
+            name="$1"; want="$2"; out="$dest/$name"
+            [ -f "$out" ] && [ "$(md5sum "$out" | cut -d' ' -f1)" = "$want" ] && return 0
+            for url in "$base/$name" "https://ghfast.top/$base/$name"; do
+              for i in 1 2 3; do
+                curl -fsSL --max-time 180 -o "$out" "$url" || continue
+                got=$(md5sum "$out" | cut -d' ' -f1)
+                if [ "$got" = "$want" ]; then echo "ok $name"; return 0; fi
+                echo "::warning::$name md5 mismatch ($got)"
+                rm -f "$out"
+              done
+            done
+            echo "::error::could not fetch $name"; return 1
+          }
+          fetch default-arm64-v8a.jar 83df25b61193af8fa815e373143ac9af || exit 1
+          fetch default-armeabi-v7a.jar 22e21526fefc0a2b8f17adbec9f57590 || exit 1
+          fetch default-x86.jar 0d742b756dc9d1fcd84ea271d8b68f32 || exit 1
+          fetch default-x86_64.jar 6fa26bf0459b11f1c0b0dbc29e5b940d || exit 1
       # Gradle 分发包: services.gradle.org 现在 302 到 github release, 跑在
       # Azure 上的 ubuntu runner 拉它稳定 504 (2026-11-09 连挂三次, 与代码
       # 无关)。换腾讯镜像 (2026-11-09 比对 sha256 与官方一致), 仍失败就退回
@@ -45,7 +84,7 @@ jobs:
           official=$(sed -n 's/^distributionUrl=//p' "$f" | sed 's#\\:#:#g')
           mirror="https://mirrors.cloud.tencent.com/gradle/$zip"
           for attempt in 1 2 3; do
-            if [ $((attempt % 2)) -eq 1 ]; then url="$mirror"; else url="$official"; fi
+            if [ "$attempt" -lt 3 ]; then url="$mirror"; else url="$official"; fi
             sed -i "s#^distributionUrl=.*#distributionUrl=$url#" "$f"
             echo "attempt $attempt: $url"
             if flutter build apk --release --dart-define=DECK_VERSION=${{ env.VERSION }}; then
@@ -150,8 +189,22 @@ jobs:
           cache: true
       - run: flutter pub get
         working-directory: apps/deck
-      # media_kit 在 CMake 阶段下载 ANGLE.7z, 偶发下坏 (校验失败, 2026-11-09)。
-      # 删掉残留再试, 最多三次。
+      # media_kit 在 CMake 阶段从 github release 下 ANGLE.7z, 2026-11-09 起
+      # runner 拉 github release 稳定 504 (同一次构建里 Gradle/Kotlin 也栽在
+      # 同一处)。media_kit 的 download_and_verify 只在文件不存在时下载, 下到的
+      # 错误页会一直留着 → 提前把校验通过的包放进 build 目录, 并用 cache 留住。
+      - name: Cache media_kit archives
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/deck/build/windows/x64/ANGLE.7z
+            apps/deck/build/windows/x64/mpv-dev-x86_64-20230924-git-652a1dd.7z
+          key: media-kit-windows-archives-2026-11-09
+      - name: Pre-fetch media_kit archives
+        shell: pwsh
+        run: |
+          & "$GITHUB_WORKSPACE/tool/ci/fetch_media_kit_archives.ps1" -DestDir 'apps/deck/build/windows/x64'
+        working-directory: apps/deck
       - name: Build Windows
         shell: pwsh
         run: |
@@ -159,7 +212,6 @@ jobs:
             flutter build windows --release --dart-define=DECK_VERSION=${{ env.VERSION }}
             if ($LASTEXITCODE -eq 0) { exit 0 }
             Write-Host "::warning::windows build attempt $i failed"
-            Remove-Item -Recurse -Force 'build/windows/x64/ANGLE.7z' -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 15
           }
           exit 1

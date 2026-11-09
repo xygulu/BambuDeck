@@ -1,0 +1,24 @@
+// CI 用的 Gradle init script: 把腾讯的 Maven 镜像放在仓库列表最前面。
+//
+// 背景 (2026-11-09): GitHub Actions 的 runner 从 repo.maven.apache.org
+// 拉某些包时会被 302 到 GitHub release (JetBrains 的 kotlin-compiler-
+// embeddable 就是这样), 那里稳定 504, 构建直接挂。腾讯镜像自己代理
+// Central, 不会绕去 GitHub。
+//
+// 官方仓库仍在列表里 (只是排在后面) —— 镜像缺哪个包时会退回去。
+allprojects {
+    buildscript {
+        repositories {
+            maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+        }
+    }
+    repositories {
+        maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+    }
+}
+
+beforeSettings { settings ->
+    settings.pluginManagement.repositories {
+        maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+    }
+}
