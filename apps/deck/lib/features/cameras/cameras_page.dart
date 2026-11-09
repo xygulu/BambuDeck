@@ -27,6 +27,13 @@ import 'ezviz_import_sheet.dart';
 /// (2026-10-26 需求, 交互对齐 iPhone 照片墙) - 默认单画面, 鼠标滚轮 /
 /// 触控板 / 捏合连续缩放, 缩小时画面连续变多、放大时变少变大, 网格随
 /// 画面数自动取最佳 16:9 排布铺满一屏。
+/// 单画面上下滑的方向判定: 上滑(负) → 下一台, 下滑(正) → 上一台; 位移不够
+/// 阈值 (轻点/抖动) 返回 null, 不换台。
+int? swipeCameraStep(double dy, {double threshold = 40}) {
+  if (dy.abs() <= threshold) return null;
+  return dy < 0 ? 1 : -1;
+}
+
 class CamerasPage extends ConsumerStatefulWidget {
   const CamerasPage({super.key, required this.onAdd});
 
@@ -196,9 +203,10 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                 _dragDy = 0;
                 if (s != 1.0) {
                   _applyZoom(1 / s); // 捏合放大(>1) → 画面变少
-                } else if (single && dy.abs() > 40) {
-                  _stepCamera(dy < 0 ? 1 : -1); // 上滑 = 下一台
+                  return;
                 }
+                final step = single ? swipeCameraStep(dy) : null;
+                if (step != null) _stepCamera(step); // 上滑 = 下一台
               },
               onDoubleTap: () => _applyZoom(
                   _zoom > 1.0001 ? 1.0 : zMax), // 双击在单画面/全部间切换
