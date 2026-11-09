@@ -203,7 +203,7 @@ jobs:
       - name: Pre-fetch media_kit archives
         shell: pwsh
         run: |
-          & "$GITHUB_WORKSPACE/tool/ci/fetch_media_kit_archives.ps1" -DestDir 'apps/deck/build/windows/x64'
+          & "$env:GITHUB_WORKSPACE/tool/ci/fetch_media_kit_archives.ps1" -DestDir 'apps/deck/build/windows/x64'
         working-directory: apps/deck
       - name: Build Windows
         shell: pwsh
