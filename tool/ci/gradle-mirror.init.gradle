@@ -5,16 +5,26 @@
 // embeddable 就是这样), 那里稳定 504, 构建直接挂。腾讯镜像自己代理
 // Central, 不会绕去 GitHub。
 //
-// 只动 settings 级仓库: Flutter 的 included build 用的是
-// RepositoriesMode.PREFER_SETTINGS, 往 project 里塞仓库会直接报错
-// ("Build was configured to prefer settings repositories over project
-// repositories")。官方仓库仍在列表里 (只是排在后面) —— 镜像缺哪个包时
-// 会退回去。
+// 两个约束 (都踩过):
+// - Flutter 的 included build (flutter_tools/gradle) 用 FAIL_ON_PROJECT_REPOS,
+//   往 project 里塞仓库会直接报错 → 只动 settings 级仓库; 也绝不改
+//   repositoriesMode (改成 PREFER_SETTINGS 会把 app 工程里 Flutter 引擎的
+//   本地 maven 仓库丢掉, 构建直接解析不到 io.flutter:*)。
+// - 一旦显式声明 pluginManagement.repositories, Gradle 就不再自动加默认的
+//   plugin portal → 必须自己补上 gradlePluginPortal(), 否则 kotlin-dsl
+//   插件解析失败。
+//
+// 官方仓库都排在镜像后面, 镜像缺包时照样能退回去。
 beforeSettings { settings ->
     settings.pluginManagement.repositories {
         maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+        gradlePluginPortal()
+        google()
+        mavenCentral()
     }
     settings.dependencyResolutionManagement.repositories {
         maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+        google()
+        mavenCentral()
     }
 }
