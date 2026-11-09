@@ -48,6 +48,14 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
   /// 捏合进行中的实时缩放 (视觉反馈, 松手折算进 _zoom)。
   double _pinch = 1.0;
 
+  /// 单画面时看的是第几台 (上下滑换台, 2026-11-09 反馈「不能滑动」)。
+  /// 切到网格再切回来保持原位置; 摄像头被删时在 _wall 里夹回范围内。
+  int _index = 0;
+
+  /// 本次手势累计的竖向位移, 以及是否已经进入过双指/缩放 (双指不该触发换台)。
+  double _dragDy = 0;
+  bool _pinched = false;
+
   void _applyZoom(double factor) {
     final n =
         (ref.read(camerasProvider).valueOrNull ?? const <CameraProfile>[])
@@ -57,6 +65,15 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
       _zoom = (_zoom * factor).clamp(1.0, math.sqrt(n).toDouble());
       _pinch = 1.0;
     });
+  }
+
+  /// 单画面上下滑换台 (上滑 = 下一台), 到头绕回第一台。
+  void _stepCamera(int delta) {
+    final n =
+        (ref.read(camerasProvider).valueOrNull ?? const <CameraProfile>[])
+            .length;
+    if (n <= 1) return;
+    setState(() => _index = (_index + delta) % n);
   }
 
   @override
@@ -108,6 +125,9 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
   /// 无级缩放的墙: _zoom ∈ [1, √n] 连续变化, 画面数 k = (n / z²) 连续
   /// 增减 (1 ↔ 全部), 每次重建按 k 取最佳 16:9 网格铺满; 滚轮/触控板/
   /// 捏合都连续驱动 _zoom, 捏合过程另有 Transform.scale 实时反馈。
+  ///
+  /// 单画面 (k == 1) 时上下滑换台 (反馈 2026-11-09「不能滑动」): 之前只能
+  /// 捏合/按钮缩放, 想换一台看没有手势可用。
   Widget _wall(List<CameraProfile> list, List<PrinterProfile> printers) {
     final n = list.length;
     if (n == 0) return const SizedBox.shrink();
@@ -121,7 +141,12 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
         ref.watch(appSettingsProvider).valueOrNull ?? const AppSettings();
     final sortMode = settings.cameraSortMode;
     final k = math.min(n, math.max(1, (n / (_zoom * _zoom)).round()));
-    final shown = sortCameras(list, sortMode).take(k).toList();
+    final ordered = sortCameras(list, sortMode);
+    // 摄像头被删 / 排序变了: 当前单画面位置夹回范围。
+    if (_index >= ordered.length) _index = ordered.length - 1;
+    if (_index < 0) _index = 0;
+    final single = k == 1 && n > 1;
+    final shown = k == 1 ? [ordered[_index]] : ordered.take(k).toList();
     final canZoomIn = _zoom < zMax - 0.0001; // 放大 = 画面更少 (_zoom 还能加)
     final canZoomOut = _zoom > 1.0001; // 缩小 = 画面更多 (_zoom 还能减)
 
@@ -150,14 +175,29 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
             },
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
+              onScaleStart: (_) {
+                _dragDy = 0;
+                _pinched = false;
+              },
               onScaleUpdate: (d) {
-                if (d.scale != 1.0) setState(() => _pinch = d.scale);
+                // 双指 = 缩放; 单指竖向拖 = 换台 (只有单画面时)。
+                if (d.pointerCount > 1 || d.scale != 1.0) {
+                  _pinched = true;
+                  _dragDy = 0;
+                  if (d.scale != 1.0) setState(() => _pinch = d.scale);
+                  return;
+                }
+                if (single && !_pinched) _dragDy += d.focalPointDelta.dy;
               },
               onScaleEnd: (_) {
                 final s = _pinch;
+                final dy = _dragDy;
                 _pinch = 1.0;
+                _dragDy = 0;
                 if (s != 1.0) {
                   _applyZoom(1 / s); // 捏合放大(>1) → 画面变少
+                } else if (single && dy.abs() > 40) {
+                  _stepCamera(dy < 0 ? 1 : -1); // 上滑 = 下一台
                 }
               },
               onDoubleTap: () => _applyZoom(
@@ -251,7 +291,8 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
                     tooltip: '放大 (画面更少更大)',
                     onPressed: canZoomIn ? () => _applyZoom(1.4) : null,
                   ),
-                  Text('$k / $n',
+                  // 单画面显示「第几台/共几台」, 多画面显示「屏上几个/共几台」。
+                  Text(single ? '${_index + 1} / $n' : '$k / $n',
                       style: const TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w700,
