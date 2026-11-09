@@ -32,7 +32,21 @@ jobs:
           cache: true
       - run: flutter pub get
         working-directory: apps/deck
-      - run: flutter build apk --release --dart-define=DECK_VERSION=${{ env.VERSION }}
+      # Gradle 分发包由 services.gradle.org 跳到 github release 下载, 偶发
+      # 504 (2026-11-09 连挂两次, 与代码无关)。失败后清掉残留分发包再试,
+      # 最多三次。
+      - name: Build APK
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if flutter build apk --release --dart-define=DECK_VERSION=${{ env.VERSION }}; then
+              exit 0
+            fi
+            echo "::warning::APK build attempt $attempt failed"
+            rm -rf ~/.gradle/wrapper/dists/gradle-* || true
+            sleep 15
+          done
+          exit 1
         working-directory: apps/deck
       - name: Collect APK
         run: |
@@ -126,7 +140,19 @@ jobs:
           cache: true
       - run: flutter pub get
         working-directory: apps/deck
-      - run: flutter build windows --release --dart-define=DECK_VERSION=${{ env.VERSION }}
+      # media_kit 在 CMake 阶段下载 ANGLE.7z, 偶发下坏 (校验失败, 2026-11-09)。
+      # 删掉残留再试, 最多三次。
+      - name: Build Windows
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 3; $i++) {
+            flutter build windows --release --dart-define=DECK_VERSION=${{ env.VERSION }}
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "::warning::windows build attempt $i failed"
+            Remove-Item -Recurse -Force 'build/windows/x64/ANGLE.7z' -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 15
+          }
+          exit 1
         working-directory: apps/deck
       - uses: actions/upload-artifact@v4
         with:
