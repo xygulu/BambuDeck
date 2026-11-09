@@ -91,23 +91,25 @@ class _MonitorPageState extends ConsumerState<MonitorPage> {
               ],
             );
           }
-          // Narrow: grid + push route, like before the merge.
-          final columns = (constraints.maxWidth ~/ 340).clamp(1, 2);
-          return GridView.count(
+          // Narrow (手机/竖屏平板): 卡片按内容高度排 + 点击推详情页。
+          // 原来是 1.15 宽高比的网格: 云端未连接 / 没有状态帧时卡片只剩
+          // 名称一行, 网格仍把它撑到 300+ 高, 大片留白 (反馈 2026-11-09)。
+          return ListView(
             padding: const EdgeInsets.all(16),
-            crossAxisCount: columns,
-            mainAxisSpacing: 14,
-            crossAxisSpacing: 14,
-            // 卡片现在带完整状态详情 (2026-10-21), 放宽到更高的瓦片。
-            childAspectRatio: 1.15,
             children: [
               for (final p in sorted)
-                MonitorPrinterCard(
-                  profile: p,
-                  selected: p.id == selectedId,
-                  onTap: () => Navigator.of(context).push(MaterialPageRoute(
-                    builder: (_) => DashboardPage(profileId: p.id),
-                  )),
+                Center(
+                  child: ConstrainedBox(
+                    // 平板宽度下一行别拉得太长。
+                    constraints: const BoxConstraints(maxWidth: 620),
+                    child: MonitorPrinterCard(
+                      profile: p,
+                      selected: p.id == selectedId,
+                      onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) => DashboardPage(profileId: p.id),
+                      )),
+                    ),
+                  ),
                 ),
             ],
           );
