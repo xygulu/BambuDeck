@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:bambu_protocol/bambu_protocol.dart' show PrinterMode;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:media_kit/media_kit.dart';
 
@@ -386,6 +385,12 @@ class _DeckAppState extends ConsumerState<DeckApp> {
         visionGuard.cameras = list;
         hubServer.cameras = list;
         _exportHub();
+        // 摄像头清单和打印机清单谁先加载完不确定: 打印机先到时补挂会因
+        // 摄像头还没载入而跳过,这里在摄像头落位后再补一次,幂等。
+        final printersNow = ref.read(printersProvider).valueOrNull;
+        if (printersNow != null) {
+          unawaited(_ensureBuiltinCams(printersNow));
+        }
       }
     }, fireImmediately: true);
     ref.listenManual(printersProvider, (_, next) {
@@ -406,10 +411,10 @@ class _DeckAppState extends ConsumerState<DeckApp> {
               ref.read(printersProvider.notifier), list,
               log: LogBuffer.instance.add));
         }
-        // 机内摄像头自动补挂(2026-11-03): 打印机新获得完整局域网凭据
-        // (重填访问码 / 云升 LAN / 新导入带码)时,自动补一台绑定的机内
-        // 摄像头。凭据没变不触发 —— 用户手删的摄像头不会被复活。
-        _ensureBuiltinCams(list);
+        // 机内摄像头自动补挂(2026-11-03 / 2026-11-09): 打印机有访问码就补
+        // 一台绑定的机内摄像头(先离线形态,补扫到 IP 后自动亮)。每轮都跑,
+        // 幂等;用户手删过的按墓碑跳过,不会被复活。
+        unawaited(_ensureBuiltinCams(list));
       }
     }, fireImmediately: true);
   }
@@ -529,34 +534,45 @@ class _DeckAppState extends ConsumerState<DeckApp> {
   /// 失败等下次启动, 不重试风暴 —— 与独立服务 _resolveLanIps 同策略)。
   bool _lanBackfillRan = false;
 
-  /// 各打印机最近一次「凭据指纹」(id → ip|码长|模式),用于判定谁
-  /// **新**获得了局域网凭据 —— 只有变化才自动补机内摄像头。
-  final Map<String, String> _builtinCamSeen = {};
-
   /// 启动自救是否已完成; 完成前 _exportHub 一律不写盘。
   bool _hubRescueDone = false;
 
-  void _ensureBuiltinCams(List<PrinterProfile> list) {
+  /// 自动补机内摄像头正在跑,避免并发两轮各算一份清单。
+  bool _ensuringBuiltin = false;
+
+  /// 有访问码的打印机自动补一台绑定的机内摄像头 (2026-11-03 需求,
+  /// 2026-11-09 放宽): 手机上用云端账号一键添加打印机后,摄像头要自己出现。
+  ///
+  /// 以前只在「凭据发生变化」时补,新装的 App 第一次看到打印机时凭据
+  /// 指纹是空的,永远不触发 —— 手机端因此一台机内摄像头都不会有。
+  /// 现在每轮都跑: 用户显式删掉的按相机墓碑跳过,不会复活;幂等,没得补
+  /// 就返回 null 不落盘。
+  Future<void> _ensureBuiltinCams(List<PrinterProfile> list) async {
+    if (_ensuringBuiltin) return;
     final cameras = ref.read(camerasProvider).valueOrNull;
     if (cameras == null) return; // 摄像头清单未载入,无从判断「已有绑定」
-    var newlyEligible = false;
-    final seenNext = <String, String>{};
-    for (final p in list) {
-      final key = '${p.ip}|${p.accessCode.length}|${p.mode.name}';
-      seenNext[p.id] = key;
-      final eligible = p.accessCode.trim().isNotEmpty &&
-          (p.mode == PrinterMode.lan || p.ip.trim().isNotEmpty);
-      final was = _builtinCamSeen[p.id];
-      if (eligible && was != null && was != key) newlyEligible = true;
-    }
-    _builtinCamSeen
-      ..clear()
-      ..addAll(seenNext);
-    if (!newlyEligible) return;
-    final next = ensureBuiltinCameras(list, cameras);
-    if (next != null) {
-      unawaited(ref.read(camerasProvider.notifier).replaceAll(next));
-      LogBuffer.instance.add('[摄像头] 打印机获得局域网凭据,已自动添加机内摄像头');
+    _ensuringBuiltin = true;
+    try {
+      var deleted = const <String>{};
+      final store = ref.read(cameraStoreProvider);
+      if (store is TombstoneStore) {
+        try {
+          // CameraStore 与 TombstoneStore 是互不相干的接口,静态类型不会
+          // 被 is 提升,显式转型。
+          deleted = await (store as TombstoneStore).loadTombstones();
+        } catch (_) {
+          // 墓碑读不出来不该挡住自动补挂,只是可能复活一条手删条目。
+        }
+      }
+      final next =
+          ensureBuiltinCameras(list, cameras, deletedIds: deleted);
+      if (next == null) return;
+      await ref.read(camerasProvider.notifier).replaceAll(next);
+      LogBuffer.instance.add('[摄像头] 打印机有访问码,已自动添加机内摄像头');
+    } catch (e) {
+      LogBuffer.instance.add('[摄像头] 自动添加机内摄像头失败: $e');
+    } finally {
+      _ensuringBuiltin = false;
     }
   }
 

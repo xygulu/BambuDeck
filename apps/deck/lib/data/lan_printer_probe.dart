@@ -67,7 +67,7 @@ Future<LanProbeResult> locateLanPrinters({
   await _forEach(candidates, 8, (ip) async {
     for (final t in targets) {
       if (found.containsKey(t.serial)) continue;
-      if (await _authAccepts(ip, t.accessCode, authTimeout)) {
+      if (await lanPrinterAccepts(ip, t.accessCode, authTimeout)) {
         found[t.serial] = ip;
       }
     }
@@ -76,7 +76,7 @@ Future<LanProbeResult> locateLanPrinters({
 }
 
 /// 用 [accessCode] 向 ip:8883 发一条 MQTT CONNECT; CONNACK rc=0 → true。
-Future<bool> _authAccepts(String ip, String accessCode, Duration timeout) async {
+Future<bool> lanPrinterAccepts(String ip, String accessCode, Duration timeout) async {
   SecureSocket? sock;
   try {
     sock = await SecureSocket.connect(ip, 8883,
@@ -188,6 +188,26 @@ bool needsLanIp(PrinterProfile p) =>
     p.serial.trim().isNotEmpty &&
     p.accessCode.isNotEmpty &&
     p.ip.trim().isEmpty;
+
+/// 云模式打印机的状态帧里带 `net.info[].ip`(打印机自报的局域网 IP)。
+/// 值得拿去验证才返回它 —— 验证通过即可把云模式升级成局域网直连,机内
+/// 摄像头也就有了地址 (2026-11-09: 手机端云端添加后摄像头要能自己亮)。
+///
+/// 只认: 云模式 + 有访问码 + 还没有 IP + 是合法的私有/常规 IPv4(排除
+/// 回环与 0.x)。已有 IP、LAN 模式、无码的都返回 null。
+String? promotableLanIp(PrinterProfile p, String reportedIp) {
+  if (p.mode != PrinterMode.cloud) return null;
+  if (p.accessCode.trim().isEmpty || p.ip.trim().isNotEmpty) return null;
+  final ip = reportedIp.trim();
+  final parts = ip.split('.');
+  if (parts.length != 4) return null;
+  for (final s in parts) {
+    final n = int.tryParse(s);
+    if (n == null || n < 0 || n > 255) return null;
+  }
+  if (ip.startsWith('127.') || ip.startsWith('0.')) return null;
+  return ip;
+}
 
 /// 云端来的 LAN 打印机缺 IP 时跑一次发现:
 /// (1) SSDP 组播 (同网段, 零流量) → (2) 8883 扫网+访问码认证 (跨网段;

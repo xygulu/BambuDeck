@@ -211,25 +211,32 @@ List<PrinterProfile> mergeExportPrinters({
   return out;
 }
 
-/// 为「有访问码且(LAN 模式或有 IP)」的打印机补一台绑定的机内摄像头
-/// (2026-11-03 需求:云端批量接入打印机后机内摄像头自动出现)。云同步新
-/// 入列的打印机先有码后扫到 ip,机内画面的地址/码本来就是播放时从绑定的
-/// 打印机档案现取的,所以 ip 允许后到 —— 摄像头先以离线形态出现,打印面
-/// 上线后自动亮。
-/// 幂等:已存在绑定的(按 printerIds 或确定性 id 任意一条命中)不再重复加。
-/// 返回 null = 没有要补的。
+/// 为「有访问码」的打印机补一台绑定的机内摄像头 (2026-11-03 需求:
+/// 云端批量接入打印机后机内摄像头自动出现)。
 ///
-/// 调用方负责「只在打印机新获得凭据时调用」,保证用户手删摄像头后不被复活:
-/// 凭据没变就不触发,变化了(重填访问码/云升 LAN)才补。
+/// 2026-11-09 修正:以前还要求「LAN 模式或已有 IP」,导致手机上刚用云端账号
+/// 添加的打印机(云模式、码有了但还没扫到 IP)永远补不上摄像头 —— 用户看到
+/// 的就是「自带摄像头加不了」。机内画面的地址/码本来就是播放时从绑定的打印机
+/// 档案现取的,所以码一到就可以把摄像头建出来:先以离线形态出现,等补扫把
+/// IP 填上、云升 LAN 后自动亮。
+///
+/// [deletedIds] 是用户显式删过的摄像头 id(墓碑)。删掉的不再复活;调用方
+/// 可以每轮都调用本函数,幂等且不会把用户删掉的加回来。
+/// 返回 null = 没有要补的。
 List<CameraProfile>? ensureBuiltinCameras(
-    List<PrinterProfile> printers, List<CameraProfile> cameras) {
+  List<PrinterProfile> printers,
+  List<CameraProfile> cameras, {
+  Set<String> deletedIds = const {},
+}) {
   final out = <CameraProfile>[];
   for (final p in printers) {
-    final eligible = p.accessCode.trim().isNotEmpty &&
-        (p.mode == PrinterMode.lan || p.ip.trim().isNotEmpty);
-    if (!eligible) continue;
+    if (p.accessCode.trim().isEmpty) continue;
     final camId =
         'bambu_${p.serial.trim().isNotEmpty ? p.serial.trim() : p.id}';
+    // 墓碑按「c:<id>」记 (CamerasNotifier.remove), 两种写法都认。
+    if (deletedIds.contains(camId) || deletedIds.contains('c:$camId')) {
+      continue;
+    }
     final exists = cameras.any((c) =>
         c.sourceType == CameraSourceType.bambu &&
         (c.printerIds.contains(p.id) || c.id == camId));

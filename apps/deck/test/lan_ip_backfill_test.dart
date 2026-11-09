@@ -32,6 +32,34 @@ void main() {
     });
   });
 
+  group('promotableLanIp', () {
+    test('cloud + code + no ip: take the printer-reported address', () {
+      final p = cloud('a', serial: 'SN', code: 'code');
+      expect(promotableLanIp(p, '192.168.100.110'), '192.168.100.110');
+    });
+
+    test('only cloud printers without an ip are candidates', () {
+      final lan = cloud('a', serial: 'SN', code: 'code')
+          .copyWith(mode: PrinterMode.lan);
+      final hasIp = cloud('b', serial: 'SN', code: 'code')
+          .copyWith(ip: '1.2.3.4');
+      final noCode = cloud('c', serial: 'SN');
+      expect(promotableLanIp(lan, '192.168.100.110'), isNull);
+      expect(promotableLanIp(hasIp, '192.168.100.110'), isNull);
+      expect(promotableLanIp(noCode, '192.168.100.110'), isNull);
+    });
+
+    test('rejects empty / loopback / malformed reports', () {
+      final p = cloud('a', serial: 'SN', code: 'code');
+      expect(promotableLanIp(p, ''), isNull);
+      expect(promotableLanIp(p, '127.0.0.1'), isNull);
+      expect(promotableLanIp(p, '0.0.0.0'), isNull);
+      expect(promotableLanIp(p, '192.168.100'), isNull);
+      expect(promotableLanIp(p, '192.168.100.999'), isNull);
+      expect(promotableLanIp(p, 'fe80::1'), isNull);
+    });
+  });
+
   group('applyLanIps', () {
     test('fills ip and upgrades cloud mode to lan', () {
       final a = cloud('a', serial: 'SN-A', code: 'c1');

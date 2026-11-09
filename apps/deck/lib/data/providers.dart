@@ -5,7 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'cloud_api.dart';
 import 'hub_server.dart';
-import 'lan_printer_probe.dart' show applyLanIps, discoverLanPrinterIps, needsLanIp;
+import 'lan_printer_probe.dart'
+    show
+        applyLanIps,
+        discoverLanPrinterIps,
+        lanPrinterAccepts,
+        needsLanIp,
+        promotableLanIp;
 import 'log_buffer.dart';
 import 'print_events.dart';
 import 'printer_link.dart';
@@ -163,6 +169,9 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
   PrinterConnection _current =
       const PrinterConnection(status: BambuConnStatus.disconnected);
 
+  /// 已验证过 / 验证失败的打印机自报 IP,避免状态帧每几秒重探一次。
+  final Set<String> _promotionTried = {};
+
   @override
   PrinterConnection build(String arg) {
     final profile = ref.watch(printersProvider
@@ -211,6 +220,7 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
       printEvents.observe(profile, prev, s);
       visionGuard.observeState(profile, s);
       hubServer.observeState(profile, s);
+      unawaited(_maybePromoteLan(profile, s));
     });
     await link.connect();
   }
@@ -222,6 +232,41 @@ class ConnectionNotifier extends FamilyNotifier<PrinterConnection, String> {
     _statusSub = null;
     _link?.dispose();
     _link = null;
+  }
+
+  /// 云模式打印机的状态帧自带局域网 IP(`net.info[].ip`)。用访问码做一次
+  /// LAN MQTT 认证,通了才把打印机的 IP 补上并升级成局域网直连 —— 机内
+  /// 摄像头因此马上有地址可播(2026-11-09: 手机上云端添加的打印机摄像头
+  /// 不该永远等扫网)。
+  ///
+  /// 认证不通过(异地 / 路由器隔离)就维持云模式,不做任何改动: 云端监控
+  /// 照常,免得把还能用的云连接换成不可达的 LAN。
+  Future<void> _maybePromoteLan(PrinterProfile profile, BambuState s) async {
+    final ip = promotableLanIp(profile, s.localIp);
+    if (ip == null || !_promotionTried.add(ip)) return;
+    try {
+      if (!await lanPrinterAccepts(ip, profile.accessCode, const Duration(seconds: 3))) {
+        return;
+      }
+    } catch (_) {
+      return;
+    }
+    final list = ref.read(printersProvider).valueOrNull;
+    if (list == null) return;
+    final current = list.where((p) => p.id == profile.id).toList();
+    if (current.isEmpty ||
+        current.single.mode != PrinterMode.cloud ||
+        current.single.ip.trim().isNotEmpty) {
+      return;
+    }
+    await ref.read(printersProvider.notifier).replaceAll([
+      for (final p in list)
+        p.id == profile.id
+            ? p.copyWith(ip: ip, mode: PrinterMode.lan)
+            : p,
+    ]);
+    LogBuffer.instance.add(
+        '[LAN 发现] ${profile.name} 上报地址 $ip, 认证通过, 已转局域网直连');
   }
 
   // -- commands (no-ops when disconnected) ----------------------------------

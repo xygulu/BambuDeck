@@ -162,6 +162,18 @@ class CameraProfile {
     return applyRtspQuality(url, quality);
   }
 
+  /// 取不到画面时卡片上显示的说明。机内摄像头缺局域网地址时把原因说清楚
+  /// (2026-11-09: 云端添加的打印机摄像头会先以离线形态出现,用户需要知道
+  /// 等的就是这个地址)。
+  String placeholderLabel(PrinterProfile? linked) {
+    if (!enabled) return '已停用';
+    if (sourceType == CameraSourceType.bambu) {
+      if (linked == null) return '未关联打印机';
+      if (linked.ip.trim().isEmpty) return '等待打印机局域网地址';
+    }
+    return '未配置视频源';
+  }
+
   String _builtInUrl(PrinterProfile linked) => cameraSchemeForModel(
               linked.model) ==
           BambuCameraScheme.rtsps

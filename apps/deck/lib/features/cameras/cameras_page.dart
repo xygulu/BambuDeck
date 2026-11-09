@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:bambu_protocol/bambu_protocol.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,9 +8,11 @@ import 'package:flutter/gestures.dart';
 
 import '../../core/theme.dart';
 import '../../data/app_settings.dart';
+import '../../data/builtin_camera_options.dart';
 import '../../data/camera_profile.dart';
 import '../../data/camera_providers.dart';
 import '../../data/list_sort.dart';
+import '../../data/log_buffer.dart';
 import '../../data/printer_profile.dart';
 import '../../data/providers.dart';
 import '../../data/rtsp_scanner.dart';
@@ -321,7 +322,7 @@ class _CamerasPageState extends ConsumerState<CamerasPage> {
             color: Colors.black,
             alignment: Alignment.center,
             child: Text(
-              !camera.enabled ? '已停用' : '未配置视频源',
+              camera.placeholderLabel(linked),
               style:
                   const TextStyle(fontSize: 13, color: DeckColors.textSecondary),
             ),
@@ -620,8 +621,65 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
   var urlError = '';
   var hits = const <RtspHit>[];
 
-  final printers = ref.read(printersProvider).valueOrNull ?? const [];
-  final lanPrinters = printers.where((p) => p.mode == PrinterMode.lan).toList();
+  var printers = ref.read(printersProvider).valueOrNull ?? const <PrinterProfile>[];
+  final existingCameras =
+      ref.read(camerasProvider).valueOrNull ?? const <CameraProfile>[];
+  // 编辑自己时不能把自己算成「已经加过」,否则下拉里永远缺它。
+  var builtinOptions = builtinCameraOptions(
+      printers,
+      editing == null
+          ? existingCameras
+          : existingCameras.where((c) => c.id != editing.id).toList());
+  // 「打印机自带」下拉只列能取机内画面的打印机(局域网 + IP + 访问码),
+  // 其余的在下方说明原因并提供查找入口 (2026-11-09 反馈:下拉空着没人知道为什么)。
+  var printerError = '';
+  var scanningLan = false;
+  var lanScanNote = '';
+
+  /// 「打印机自带」在添加模式下默认选中第一台还没加过机内摄像头的打印机。
+  void pickDefaultBuiltin(StateSetter setState) {
+    if (editing != null) return;
+    final option = defaultBuiltinCameraOption(builtinOptions);
+    if (option != null) {
+      setState(() {
+        linked = option.printer;
+        printerError = '';
+      });
+    }
+  }
+
+  /// 云模式 / 缺 IP 的打印机:现场跑一次局域网发现(SSDP → 8883 扫网),
+  /// 命中就补 IP 并升级成局域网直连,下拉随之出现。
+  Future<void> lookupLanIps(StateSetter setState) async {
+    setState(() {
+      scanningLan = true;
+      lanScanNote = '';
+    });
+    try {
+      final current = ref.read(printersProvider).valueOrNull ?? printers;
+      final changed = await backfillLanIps(
+          ref.read(printersProvider.notifier), current,
+          log: LogBuffer.instance.add);
+      printers = ref.read(printersProvider).valueOrNull ?? printers;
+      builtinOptions = builtinCameraOptions(
+          printers,
+          editing == null
+              ? existingCameras
+              : existingCameras.where((c) => c.id != editing.id).toList());
+      setState(() {
+        scanningLan = false;
+        lanScanNote = changed
+            ? '已找到局域网地址,现在可以添加机内摄像头了。'
+            : '没找到——确认手机和打印机在同一个局域网(路由器允许它们互通),再试一次。';
+      });
+      pickDefaultBuiltin(setState);
+    } catch (e) {
+      setState(() {
+        scanningLan = false;
+        lanScanNote = '查找失败: $e';
+      });
+    }
+  }
 
   /// Fill the URL field from a scan hit; auth-only hits get an `admin:`
   /// placeholder so the password is the only thing left to type.
@@ -707,7 +765,10 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                       enabled: editing != null),
                 ],
                 selected: {type},
-                onSelectionChanged: (s) => setState(() => type = s.first),
+                onSelectionChanged: (s) {
+                  setState(() => type = s.first);
+                  if (type == CameraSourceType.bambu) pickDefaultBuiltin(setState);
+                },
               ),
               const SizedBox(height: 12),
               if (type == CameraSourceType.rtsp) ...[
@@ -877,14 +938,20 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                 ),
               ],
               if (type == CameraSourceType.bambu) ...[
-                DropdownButtonFormField<PrinterProfile>(
-                  initialValue: linked,
-                  decoration: const InputDecoration(labelText: '选择打印机(局域网直连)'),
-                  items: [
-                    for (final p in lanPrinters)
-                      DropdownMenuItem(value: p, child: Text(p.name)),
-                  ],
-                  onChanged: (p) => setState(() => linked = p),
+                // 下拉只列真能取流的打印机;列不出来时必须说清楚为什么,
+                // 以及下一步做什么 (2026-11-09:空下拉等于「没法添加」)。
+                ..._builtinPicker(
+                  options: builtinOptions,
+                  printers: printers,
+                  selected: linked,
+                  error: printerError,
+                  scanning: scanningLan,
+                  scanNote: lanScanNote,
+                  onSelected: (p) => setState(() {
+                    linked = p;
+                    printerError = '';
+                  }),
+                  onLookup: () => lookupLanIps(setState),
                 ),
                 const SizedBox(height: 10),
                 Text(
@@ -949,6 +1016,19 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
                     return;
                   }
                 }
+                if (type == CameraSourceType.bambu) {
+                  final p = linked;
+                  if (p == null) {
+                    setState(() => printerError =
+                        '先选一台打印机——机内画面凭它的局域网地址取流');
+                    return;
+                  }
+                  if (builtinOptions.any(
+                      (o) => o.printer.id == p.id && o.hasBuiltinCamera)) {
+                    setState(() => printerError = '这台打印机的机内摄像头已经加过了');
+                    return;
+                  }
+                }
                 Navigator.pop(ctx, true);
               },
               child: Text(editing == null ? '添加' : '保存')),
@@ -991,6 +1071,90 @@ Future<void> showAddCameraDialog(BuildContext context, WidgetRef ref,
     createdAt: DateTime.now().millisecondsSinceEpoch,
   );
   await ref.read(camerasProvider.notifier).add(camera);
+}
+
+/// 「打印机自带」那一块:能取流的打印机给下拉,取不到的说清楚原因并给
+/// 「查找局域网地址」入口 (2026-11-09 反馈:手机上打开下拉是空的,没有任何
+/// 提示,用户只能认为加不了)。
+List<Widget> _builtinPicker({
+  required List<BuiltinCameraOption> options,
+  required List<PrinterProfile> printers,
+  required PrinterProfile? selected,
+  required String error,
+  required bool scanning,
+  required String scanNote,
+  required ValueChanged<PrinterProfile> onSelected,
+  required VoidCallback onLookup,
+}) {
+  final usable = options.where((o) => o.usable).toList();
+  final addable = usable.where((o) => !o.hasBuiltinCamera).toList();
+  const hint = TextStyle(fontSize: 12, color: DeckColors.textSecondary);
+
+  if (addable.isEmpty) {
+    final lines = <Widget>[];
+    if (printers.isEmpty) {
+      lines.add(const Text(
+          '这台设备上还没有打印机。机内画面要凭打印机的局域网地址和访问码取流:'
+          '先到「打印机」页添加一台,再回来。',
+          style: hint));
+    } else if (usable.isNotEmpty) {
+      lines.add(const Text('这些打印机的机内摄像头都已经加过了,在画面墙里直接看即可。',
+          style: hint));
+    } else {
+      lines.add(Text(
+          '现有 ${printers.length} 台打印机都还不能取机内画面:'
+          '${[for (final o in options) '${o.printer.name}(${o.blockedReason})'].join('、')}。'
+          '到「打印机」页把那台机改成局域网连接(填 IP 与访问码)后再来添加。',
+          style: hint));
+      if (printers.any(
+          (p) => p.accessCode.trim().isNotEmpty && p.ip.trim().isEmpty)) {
+        lines.add(const SizedBox(height: 10));
+        lines.add(FilledButton.tonal(
+          onPressed: scanning ? null : onLookup,
+          child: Text(scanning ? '查找中…' : '在局域网里查找这些打印机'),
+        ));
+      }
+    }
+    if (scanNote.isNotEmpty) {
+      lines.add(const SizedBox(height: 6));
+      lines.add(Text(scanNote, style: hint));
+    }
+    if (error.isNotEmpty) {
+      lines.add(const SizedBox(height: 6));
+      lines.add(Text(error,
+          style: const TextStyle(fontSize: 12, color: DeckColors.error)));
+    }
+    return lines;
+  }
+
+  PrinterProfile? value;
+  for (final o in addable) {
+    if (o.printer.id == selected?.id) value = o.printer;
+  }
+  return [
+    DropdownButtonFormField<PrinterProfile>(
+      // DropdownButtonFormField 只在首帧认 initialValue;默认选中是打开
+      // 对话框后才定的,用 key 逼它按新值重建。
+      key: ValueKey('builtin-${value?.id ?? ''}-${addable.length}'),
+      initialValue: value,
+      decoration: InputDecoration(
+        labelText: '选择打印机(局域网直连)',
+        errorText: error.isEmpty ? null : error,
+      ),
+      items: [
+        for (final o in addable)
+          DropdownMenuItem(
+            value: o.printer,
+            child: Text(o.printer.ip.isEmpty
+                ? o.printer.name
+                : '${o.printer.name} · ${o.printer.ip}'),
+          ),
+      ],
+      onChanged: (p) {
+        if (p != null) onSelected(p);
+      },
+    ),
+  ];
 }
 
 /// First non-loopback IPv4's first three octets - the usual LAN.

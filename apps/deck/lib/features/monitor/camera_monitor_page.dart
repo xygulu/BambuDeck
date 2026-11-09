@@ -594,7 +594,7 @@ class _CameraGridCard extends ConsumerWidget {
                         color: Colors.black,
                         alignment: Alignment.center,
                         child: Text(
-                          !c.enabled ? '已停用' : '未配置视频源',
+                          c.placeholderLabel(linked),
                           style: const TextStyle(
                               fontSize: 13, color: DeckColors.textSecondary),
                         ),

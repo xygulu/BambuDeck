@@ -208,13 +208,38 @@ void main() {
       expect(out.first.id, 'bambu_SN-A');
     });
 
-    test('skips printers without LAN credentials', () {
+    test('skips printers without an access code', () {
       final printers = [
-        p('a', serial: 'SN-A'), // cloud,无码无 ip
+        p('a', serial: 'SN-A'), // 云模式,无码无 ip
         p('b', serial: 'SN-B', ip: '1.1.1.1'), // 有 ip 无码
-        p('c', serial: 'SN-C', code: 'c'), // cloud 模式且无 ip(码还不能用)
       ];
       expect(ensureBuiltinCameras(printers, const []), isNull);
+    });
+
+    test('cloud printer with a code but no ip still gets a camera', () {
+      // 2026-11-09: 手机上云端一键添加后打印机是云模式、还没扫到 IP,
+      // 摄像头也要自动出现 (先离线形态,IP 到了自动亮)。
+      final printers = [p('c', serial: 'SN-C', code: 'c')];
+      final out = ensureBuiltinCameras(printers, const [])!;
+      expect(out, hasLength(1));
+      expect(out.first.id, 'bambu_SN-C');
+      expect(out.first.printerIds, ['c']);
+    });
+
+    test('a user-deleted camera is not resurrected (tombstone)', () {
+      final printers = [
+        p('a', serial: 'SN-A', ip: '1.1.1.1', code: 'c',
+            mode: PrinterMode.lan),
+      ];
+      expect(
+          ensureBuiltinCameras(printers, const [],
+              deletedIds: const {'bambu_SN-A'}),
+          isNull);
+      // CamerasNotifier.remove 记的是 'c:<id>' 写法。
+      expect(
+          ensureBuiltinCameras(printers, const [],
+              deletedIds: const {'c:bambu_SN-A'}),
+          isNull);
     });
 
     test('accepts LAN printer whose ip has not been discovered yet', () {
