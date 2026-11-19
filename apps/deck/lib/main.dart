@@ -23,7 +23,6 @@ import 'data/hub_service_control.dart';
 import 'data/log_buffer.dart';
 import 'data/plate_swap.dart';
 import 'data/print_events.dart';
-import 'data/lan_printer_probe.dart' show needsLanIp;
 import 'data/printer_profile.dart';
 import 'data/rtsp_quality.dart';
 import 'data/settings_providers.dart';
@@ -405,18 +404,27 @@ class _DeckAppState extends ConsumerState<DeckApp> {
         // LAN 直连 —— 机内摄像头的开关只对 LAN 模式放开 (2026-10-31)。
         // 自救完成后再补扫:盘上补回的 ip 通常已让补扫无事可做,也避免
         // 慢速发现结果回头覆盖自救合回来的清单。
-        if (_hubRescueDone && !_lanBackfillRan && list.any(needsLanIp)) {
-          _lanBackfillRan = true;
-          unawaited(backfillLanIps(
-              ref.read(printersProvider.notifier), list,
-              log: LogBuffer.instance.add));
-        }
+        // 每轮都可能换网 (2026-11-19): 有 IP 但认证不过的也在 backfill 里
+        // 重新定位, 所以这里不再用 needsLanIp 预筛。
+        _maybeBackfillLan();
         // 机内摄像头自动补挂(2026-11-03 / 2026-11-09): 打印机有访问码就补
         // 一台绑定的机内摄像头(先离线形态,补扫到 IP 后自动亮)。每轮都跑,
         // 幂等;用户手删过的按墓碑跳过,不会被复活。
         unawaited(_ensureBuiltinCams(list));
       }
     }, fireImmediately: true);
+  }
+
+  /// 启动补扫 LAN IP, 只跑一次。自救完成 + 清单就绪两个条件哪个后到都行:
+  /// 打印机列表常常在自救完成前就加载完毕, 只挂监听会永远等不到事件
+  /// (2026-11-19 实测: 换 IP 后自愈一直不触发, 就是这个原因)。
+  void _maybeBackfillLan() {
+    if (!_hubRescueDone || _lanBackfillRan) return;
+    final list = ref.read(printersProvider).valueOrNull;
+    if (list == null || list.isEmpty) return;
+    _lanBackfillRan = true;
+    unawaited(backfillLanIps(ref.read(printersProvider.notifier), list,
+        log: LogBuffer.instance.add));
   }
 
   /// 把当前 printers/cameras/settings 导出到 `~/.bambudeck/hub.json`, 供独立
@@ -633,6 +641,7 @@ class _DeckAppState extends ConsumerState<DeckApp> {
       LogBuffer.instance.add('[自救] 失败: $e');
     } finally {
       _hubRescueDone = true;
+      _maybeBackfillLan();
       if (ok) {
         _exportHub();
       } else {

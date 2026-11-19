@@ -67,12 +67,29 @@ Future<LanProbeResult> locateLanPrinters({
   await _forEach(candidates, 8, (ip) async {
     for (final t in targets) {
       if (found.containsKey(t.serial)) continue;
+      // 一个 IP 只归一台: 并发压力下固件偶发对错码回 CONNACK 0
+      // (2026-11-19 实测把嘉兴认到了另一台的 IP 上), 已认领的 IP 不再试。
+      if (found.containsValue(ip)) continue;
       if (await lanPrinterAccepts(ip, t.accessCode, authTimeout)) {
         found[t.serial] = ip;
       }
     }
   });
-  return found;
+
+  // 复核: 结果直接写进配置, 错配比漏配更难发现 (界面一直"重连中")。
+  // 串行再验一遍, 不过的丢弃, 下次启动还能再扫。
+  final code = {for (final t in targets) t.serial: t.accessCode};
+  final confirmed = <String, String>{};
+  for (final e in found.entries) {
+    if (confirmed.containsValue(e.value) ||
+        code[e.key] == null) {
+      continue;
+    }
+    if (await lanPrinterAccepts(e.value, code[e.key]!, authTimeout)) {
+      confirmed[e.key] = e.value;
+    }
+  }
+  return confirmed;
 }
 
 /// 用 [accessCode] 向 ip:8883 发一条 MQTT CONNECT; CONNACK rc=0 → true。
@@ -209,6 +226,29 @@ String? promotableLanIp(PrinterProfile p, String reportedIp) {
   return ip;
 }
 
+/// 存着的 IP 已经失效的 LAN 打印机 (2026-11-19): IP 是打印机 DHCP 拿的,
+/// 断网重启/租期到了就换一个, 清单里那份随即对不上 —— 症状是永远"连接
+/// 断开/重连中", 日志 `connect failed ... notAuthorized` 或 refused。
+/// 用访问码对现 IP 做一次认证, 不过就当 IP 过期, 交给 [locateLanPrinters]
+/// 重新扫网定位。访问码跨 IP 不变, 认证成功即证明串号↔IP 配对正确。
+Future<Set<String>> staleLanIpSerials(List<PrinterProfile> printers) async {
+  final stale = <String>{};
+  await Future.wait([
+    for (final p in printers)
+      if (p.mode == PrinterMode.lan &&
+          p.serial.trim().isNotEmpty &&
+          p.accessCode.isNotEmpty &&
+          p.ip.trim().isNotEmpty)
+        () async {
+          if (!await lanPrinterAccepts(
+              p.ip, p.accessCode, const Duration(seconds: 3))) {
+            stale.add(p.serial.trim());
+          }
+        }(),
+  ]);
+  return stale;
+}
+
 /// 云端来的 LAN 打印机缺 IP 时跑一次发现:
 /// (1) SSDP 组播 (同网段, 零流量) → (2) 8883 扫网+访问码认证 (跨网段;
 /// 组播不过路由, A1 不回单播 M-SEARCH, 只有 MQTT 必通)。
@@ -218,6 +258,12 @@ Future<Map<String, String>> discoverLanPrinterIps(
     List<PrinterProfile> printers,
     {void Function(String msg)? log}) async {
   final need = printers.where(needsLanIp).toList();
+  // 换 IP 自愈: 有 IP 但认证不过的也一起重新定位。
+  final stale = await staleLanIpSerials(printers);
+  for (final p in printers) {
+    if (stale.contains(p.serial.trim())) need.add(p);
+  }
+  if (stale.isNotEmpty) log?.call('[LAN 发现] 认证失败, 重新定位 ${stale.length} 台');
   if (need.isEmpty) return {};
   final bySerial = <String, String>{};
 

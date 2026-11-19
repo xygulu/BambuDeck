@@ -10,7 +10,6 @@ import 'lan_printer_probe.dart'
         applyLanIps,
         discoverLanPrinterIps,
         lanPrinterAccepts,
-        needsLanIp,
         promotableLanIp;
 import 'log_buffer.dart';
 import 'print_events.dart';
@@ -91,7 +90,7 @@ class PrintersNotifier extends AsyncNotifier<List<PrinterProfile>> {
 /// 落盘, ConnectionNotifier 按 connectionKey 自动重连。返回是否有变化。
 Future<bool> backfillLanIps(PrintersNotifier notifier, List<PrinterProfile> current,
     {void Function(String)? log}) async {
-  if (!current.any(needsLanIp)) return false;
+  // 缺 IP / IP 已过期(换网) 由发现内部判定; 这里不再预筛。
   final hits = await discoverLanPrinterIps(current, log: log);
   final next = applyLanIps(current, hits);
   if (next == null) return false;
